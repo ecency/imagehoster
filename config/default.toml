@@ -1,0 +1,92 @@
+# default configuration, override in config/local-development.toml
+
+# port to listen on
+port = 8800
+
+# whether the app runs behind a trusted proxy
+proxy = true
+
+# application name used for logging and service namespace
+name = 'imagehoster'
+
+# number of worker processes to spawn, 0 = autodetect
+num_workers = 0
+
+# url to hive node used for verifying signatures
+rpc_node = 'https://api.hive.blog'
+
+
+# S3-compatible storage credentials
+# Works with: AWS S3, Backblaze B2, MinIO, DigitalOcean Spaces, Wasabi, Cloudflare R2, etc.
+# Uses separate buckets for uploads (long-term) and proxy cache (ephemeral)
+# Override in config/local-development.toml or set as environment variables
+#
+
+
+S3_ACCESS_KEY_ID = ''
+S3_SECRET_ACCESS_KEY = ''
+S3_ENDPOINT = 's3.us-west-000.backblazeb2.com'
+S3_REGION = 'us-west-000'
+
+# url where service is running
+service_url = 'https://images.ecency.com'
+
+# default user avatar, should be a png minimum 512x512
+default_avatar = 'https://images.ecency.com/DQmUVRvAmChYcJqBifekwpR9UTsxSbbbnEi9kJXRWEGzX47/ecency_default_avatar.png'
+default_cover = 'https://images.ecency.com/DQmdA9wjRyGmDwrTza59yLSjCWMEc9sFD5sC4ZU5kL9UMqo/cover_fallback_day.png'
+
+# log level to output at
+#log_level = 'debug'
+#log_level = 'info'
+log_level = 'error'
+
+# where to write logs, can be file path or stdout/err
+log_output = 'stdout'
+
+# max image size to allow uploading and proxying, in bytes
+max_image_size = 30000000 # 25mb
+
+# redis db used for ratelimiting uploads
+# redis_url = 'redis://localhost'
+redis_url = 'redis://172.18.0.2'
+# redis_password = '' # Set in config/local-development.toml
+
+# cloudflare cache purging (optional)
+# cloudflare_token = '' # Set in config/local-development.toml
+# cloudflare_zone = '' # Set in config/local-development.toml
+
+# dynamic blacklist configuration
+# Fetches blacklists from remote URLs and caches in memory with TTL
+# Falls back to local JSON files (blacklist-images.json, blacklist-accounts.json) if fetch fails
+# JSON format: { "images": ["url1", "url2", ...], "accounts": ["user1", "user2", ...], "updated": "ISO8601", "version": "1.0" }
+[blacklist]
+cache_ttl = 300000 # 5 minutes in ms
+images_url = 'https://ecency.com/dmca/dmca-images.json'
+accounts_url = 'https://ecency.com/dmca/dmca-accounts.json'
+
+# upload rate and reputation limits, rate limits only enforced if redis db is configured
+[upload_limits]
+duration = 604800000 # in ms (=1 week)
+max = 700 # max requests within duration
+reputation = 10 # minimum reputation needed for upload
+app_account = 'ecency.app'
+app_posting_wif = '' # Set in config/local-development.toml - Hive posting private key
+
+# blob stores, valid types are: memory, s3, fs
+# the s3 type additionally needs the s3_bucket key to be set and expects
+# the proper AWS credentials to be configured (see aws-sdk for more info)
+
+# where to keep uploaded images
+[upload_store]
+type = 's3'
+s3_bucket = 'eupload-bucket'
+
+# where to keep proxied images
+[proxy_store]
+type = 'fs'
+s3_bucket = 'eproxy-bucket'
+
+max_image_width = 1280
+max_image_height = 1280
+max_custom_image_width = 2000
+max_custom_image_height = 2000
