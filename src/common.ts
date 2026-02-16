@@ -46,12 +46,31 @@ export const getAccount = async (user, isCached= true) => {
     return account as ExtendedAccount[]
 }
 
+export interface HiveProfile {
+    name: string
+    active: string
+    created: string
+    id: number
+    post_count: number
+    reputation: number
+    blacklists: string[]
+    stats: { followers: number, following: number, rank: number }
+    metadata: { profile: {
+        name?: string
+        about?: string
+        profile_image?: string
+        cover_image?: string
+        website?: string
+        location?: string
+    }}
+}
+
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
 export const getProfile = async (user, isCached= true) => {
-    let profile = isCached ? cache.get(`${user}:profile`) : undefined
+    let profile = isCached ? cache.get(`${user}:profile`) as HiveProfile : undefined
     if (profile === undefined && user.length <= 16) {
       try {
-        profile = await rpcClient.call('bridge', 'get_profile', {account: user})
+        profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
         cache.set(`${user}:profile`, profile, 30)
       } catch (e) {
         logger.error({ err: e, user }, 'Unable to load account profile from hived')

@@ -48,8 +48,9 @@ export function loggerMiddleware(ctx: KoaContext, next: () => Promise<any>) {
             size: ctx.response.length,
             status: ctx.status,
         }
-        if (ctx['api_error']) {
-            info.err_code = ctx['api_error'].toJSON().name
+        const apiError = ctx['api_error']
+        if (apiError) {
+            info.err_code = apiError.toJSON().name
         }
         ctx['log'].info(info, 'response')
     }
