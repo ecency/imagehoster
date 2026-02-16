@@ -59,7 +59,8 @@ async function handleAvatar(ctx: KoaContext) {
 
   // get_profile returns metadata already parsed, no JSON.parse needed
   let avatarUrl = DefaultAvatar
-  if (profile.metadata?.profile?.profile_image &&
+  if (profile.metadata && profile.metadata.profile &&
+      profile.metadata.profile.profile_image &&
       profile.metadata.profile.profile_image.startsWith('http')) {
     avatarUrl = profile.metadata.profile.profile_image
   }

@@ -58,7 +58,8 @@ async function handleCover(ctx: KoaContext) {
 
   // get_profile returns metadata already parsed, no JSON.parse needed
   let coverUrl = DefaultCover
-  if (profile.metadata?.profile?.cover_image &&
+  if (profile.metadata && profile.metadata.profile &&
+      profile.metadata.profile.cover_image &&
       profile.metadata.profile.cover_image.startsWith('http')) {
     coverUrl = profile.metadata.profile.cover_image
   }

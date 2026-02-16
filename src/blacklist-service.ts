@@ -71,8 +71,8 @@ async function fetchBlacklistData(url: string): Promise<BlacklistData | null> {
 
         logger.info({
             url,
-            imageCount: data.images?.length || 0,
-            accountCount: data.accounts?.length || 0,
+            imageCount: (data.images && data.images.length) || 0,
+            accountCount: (data.accounts && data.accounts.length) || 0,
             version: data.version
         }, 'blacklist fetched successfully')
 
