@@ -6,7 +6,7 @@ import * as config from 'config'
 import { createHash } from 'crypto'
 import * as http from 'http'
 import * as LRU from 'lru-cache'
-import { Magic, MAGIC_MIME_TYPE } from 'mmmagic'
+import * as fileType from 'file-type'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
 import * as Sharp from 'sharp'
@@ -18,7 +18,6 @@ import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
 
-const magic = new Magic(MAGIC_MIME_TYPE)
 
 export const AcceptedContentTypes = [
     'image/gif',
@@ -69,12 +68,17 @@ export function readStream(stream: NodeJS.ReadableStream) {
     })
 }
 
-export function mimeMagic(data: Buffer) {
-    return new Promise<string>((resolve, reject) => {
-        magic.detect(data, (error, result) => {
-            if (error) { reject(error) } else { resolve(result) }
-        })
-    })
+export async function mimeMagic(data: Buffer): Promise<string> {
+    const result = await fileType.fromBuffer(data)
+    if (result) {
+        return result.mime
+    }
+    // file-type can't detect text-based formats — check for SVG
+    const head = data.slice(0, 512).toString('utf8').trim()
+    if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) {
+        return 'image/svg+xml'
+    }
+    return 'application/octet-stream'
 }
 
 export function storeExists(store: AbstractBlobStore, key: BlobKey) {

@@ -40,15 +40,55 @@ export const mockAccounts: any = {
     }
 }
 
+export const mockProfiles: any = {
+    foo: {
+        name: 'foo',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 1,
+        post_count: 100,
+        reputation: 65,
+        blacklists: [],
+        stats: { followers: 100, following: 50, rank: 0 },
+        metadata: {
+            profile: {
+                name: 'Foo User',
+                about: 'Test account',
+                profile_image: 'https://example.com/avatar.jpg',
+                cover_image: 'https://example.com/cover.jpg',
+            }
+        }
+    },
+    bar: {
+        name: 'bar',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 2,
+        post_count: 50,
+        reputation: 25,
+        blacklists: [],
+        stats: { followers: 10, following: 5, rank: 0 },
+        metadata: {
+            profile: {
+                name: 'Bar User',
+                profile_image: 'https://example.com/bar-avatar.jpg',
+            }
+        }
+    }
+}
+
 before(() => {
     // mock out dsteem rpc calls
     const _client = rpcClient as any
-    _client.call = async (api: string, method: string, params = []) => {
+    _client.call = async (api: string, method: string, params: any = []) => {
         const apiMethod = `${ api }-${ method }`
         switch (apiMethod) {
             case 'database_api-get_accounts':
                 assert.equal(params.length, 1, 'can only mock single account lookups')
                 return [mockAccounts[params[0]]]
+            case 'bridge-get_profile':
+                const username = params.account || params[0]
+                return mockProfiles[username] || null
             default:
                 throw new Error(`No mock data for: ${ apiMethod }`)
         }
