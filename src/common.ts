@@ -81,7 +81,7 @@ export const getProfile = async (user, isCached= true) => {
 
 /** Redis client. */
 export let redisClient: Redis.RedisClient | undefined
-if (config.has('redis_url')) {
+if (config.has('redis_url') && config.get('redis_url')) {
     const redisOptions: any = {
         url: config.get('redis_url') as string
     }

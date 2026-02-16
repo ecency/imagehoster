@@ -254,11 +254,15 @@ export async function proxyHandler(ctx: KoaContext) {
         } catch (err) {
             ctx.tag({url: urlString})
             ctx.log.error({err, urlString, msg: 'storeExist read / mimeMagic failed'})
-            res = await fetchUrl(`https://images.hive.blog/0x0/${urlString}`, {
-                parse_response: false,
-                follow_max: 5,
-                user_agent: 'SteemitProxy/1.0 (+https://github.com/steemit/imagehoster)',
-            } as any)
+            const result = await fetchImageWithFallbacks(
+                urlString,
+                urlParams,
+                'EcencyProxy/1.0 (+https://github.com/ecency)',
+                DefaultAvatar,
+                ctx.log
+            )
+            res = result.res
+            if (result.isFallback) { isDefaultImage = true }
             origData = res.body
             if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
@@ -375,24 +379,21 @@ export async function proxyHandler(ctx: KoaContext) {
         let width: number | undefined = safeParseInt(options.width)
         let height: number | undefined = safeParseInt(options.height)
 
-        // If no width and height are provided, it will use the default image
-        // width and height, but cap it to the config-provided max image width
-        // and height. This is so we can save on bandwidth for the default case.
-        //
-        // If width and height are provided, it will use the provided width and
-        // height. This is so clients who need a higher-res image can still get
-        // one.
-        //
-        // Special handling for 0: 0 means "auto-calculate based on aspect ratio"
-        // but first apply max dimension limits if a dimension is explicitly set
+        // Cap user-specified dimensions against custom limits
         if (width !== undefined && width > 0) {
           if (width > maxCustomWidth) { width = maxCustomWidth }
-        } else if (width === undefined) {
-          if (metadata.width && metadata.width > maxWidth) { width = maxWidth }
         }
         if (height !== undefined && height > 0) {
           if (height > maxCustomHeight) { height = maxCustomHeight }
-        } else if (height === undefined) {
+        }
+
+        // When neither dimension is specified by the user, cap oversized images
+        // to default max limits to save bandwidth. Only apply when BOTH are
+        // unspecified — if one dimension is set, the other should auto-calculate
+        // from aspect ratio to avoid unnatural crops.
+        const bothUnspecified = (width === undefined || width === 0) && (height === undefined || height === 0)
+        if (bothUnspecified) {
+          if (metadata.width && metadata.width > maxWidth) { width = maxWidth }
           if (metadata.height && metadata.height > maxHeight) { height = maxHeight }
         }
 

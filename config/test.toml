@@ -1,1 +1,15 @@
 log_level = 'fatal'
+
+# Match the test server URL so double-proxy detection works
+service_url = 'http://localhost:63205'
+
+# Disable Redis for tests (avoids connection timeout crash)
+redis_url = ''
+
+# Use memory stores for tests so caching actually works
+# (default.toml uses filesystem at /mnt/eproxy-bucket which doesn't exist locally)
+[upload_store]
+type = 'memory'
+
+[proxy_store]
+type = 'memory'
