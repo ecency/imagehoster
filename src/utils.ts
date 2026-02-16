@@ -313,9 +313,9 @@ export function buildSharpPipeline(buffer: Buffer) {
     }).png({
         quality: 80, compressionLevel: 9, force: false
     }).heif({
-        compression: 'hevc'
+        compression: 'hevc', force: false
     }).webp({
-        quality: 80, alphaQuality: 80
+        quality: 80, alphaQuality: 80, force: false
     })
 }
 
