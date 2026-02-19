@@ -262,6 +262,13 @@ export async function proxyHandler(ctx: KoaContext) {
         try {
             origData = await readStream(origStore.createReadStream(origKey))
             contentType = await mimeMagic(origData)
+            // Validate stored data is actually an image — stale error pages or
+            // truncated responses may have been cached by a previous request
+            if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
+                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type, purging and re-fetching'})
+                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                throw new Error('Invalid stored content type: ' + contentType)
+            }
         } catch (err) {
             ctx.tag({url: urlString})
             ctx.log.error({err, urlString, msg: 'storeExist read / mimeMagic failed'})
