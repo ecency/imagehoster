@@ -156,7 +156,7 @@ async function handleCover(ctx: KoaContext) {
 
   if (
       contentType === 'image/gif' &&
-      options.format === OutputFormat.Match &&
+      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP) &&
       options.mode === ScalingMode.Fit
   ) {
     rv = origData

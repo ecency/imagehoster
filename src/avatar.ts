@@ -168,7 +168,7 @@ async function handleAvatar(ctx: KoaContext) {
 
   if (
       contentType === 'image/gif' &&
-      options.format === OutputFormat.Match &&
+      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP) &&
       options.mode === ScalingMode.Cover
   ) {
     rv = origData

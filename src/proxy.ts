@@ -433,9 +433,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 image.webp({quality: 80, alphaQuality: 80, force: true})
                 break
             default:
-                contentType = 'image/webp'
-                image.webp({quality: 80, alphaQuality: 80, force: true})
-
+                break
         }
 
         try {

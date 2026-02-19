@@ -49,7 +49,7 @@ export async function serveOrBuildFallbackImage(
             })
     }
 
-    let contentType = 'image/webp'
+    let contentType: string
     switch (options.format) {
         case OutputFormat.JPEG:
             image.jpeg({ force: true })
@@ -65,8 +65,8 @@ export async function serveOrBuildFallbackImage(
             break
         case OutputFormat.Match:
         default:
-            image.webp({ force: true, quality: 80, alphaQuality: 80 })
-            contentType = 'image/webp'
+            image.jpeg({ force: true })
+            contentType = 'image/jpeg'
     }
 
     const rv = await image.toBuffer()
