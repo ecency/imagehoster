@@ -256,7 +256,9 @@ export async function proxyHandler(ctx: KoaContext) {
 
     // check if we have the original
     let origData: Buffer
+    let origFromCache = false
     if (await storeExists(origStore, origKey) && !options.ignorecache && !options.invalidate && !options.refetch) {
+        origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
         try {
@@ -388,6 +390,16 @@ export async function proxyHandler(ctx: KoaContext) {
             }
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
+            if (origFromCache) {
+                ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
+                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                const fallbackRes = await fetchUrl(DefaultAvatar, {
+                    parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
+                })
+                return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
+                    width: options.width, height: options.height, mode: options.mode, format: options.format,
+                })
+            }
             throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { url: urlString, key: imageKey,
                     metadata: 'fallback-failed' } })
         }
@@ -462,6 +474,16 @@ export async function proxyHandler(ctx: KoaContext) {
             rv = await image.toBuffer()
         } catch (err) {
             ctx.log.error({ err, urlString, imageKey, msg: 'sharp.toBuffer() failed' })
+            if (origFromCache) {
+                ctx.log.warn({origKey, msg: 'purging corrupt cached original after toBuffer failure'})
+                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                const fallbackRes = await fetchUrl(DefaultAvatar, {
+                    parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
+                })
+                return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
+                    width: options.width, height: options.height, mode: options.mode, format: options.format,
+                })
+            }
             isDefaultImage = true
             throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
         }

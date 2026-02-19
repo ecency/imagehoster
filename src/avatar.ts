@@ -44,6 +44,7 @@ async function handleAvatar(ctx: KoaContext) {
   const preferWebP = !preferAvif && supportsWebP(acceptHeader)
 
   const username = ctx.params['username'].toLowerCase()
+  APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
 
   // Check for cache bypass parameters
