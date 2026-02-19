@@ -76,6 +76,10 @@ export async function resizeImageWithOptions(
             contentType = 'image/png'
             image.png({ quality: 80, force: true, compressionLevel: 9 })
             break
+        case OutputFormat.AVIF:
+            contentType = 'image/avif'
+            image.avif({ quality: 50, effort: 4, force: true })
+            break
     }
 
     const buffer = await image.toBuffer()

@@ -21,6 +21,7 @@ import {
   storeExists,
   storeRemove,
   storeWrite,
+  supportsAvif,
   supportsWebP,
 } from './utils'
 
@@ -36,9 +37,10 @@ async function handleCover(ctx: KoaContext) {
   APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
   APIError.assertParams(ctx.params, ['username'])
 
-  // Detect WebP support from Accept header for content negotiation
+  // Detect modern format support from Accept header for content negotiation
   const acceptHeader = ctx.get('accept') || ''
-  const preferWebP = supportsWebP(acceptHeader)
+  const preferAvif = supportsAvif(acceptHeader)
+  const preferWebP = !preferAvif && supportsWebP(acceptHeader)
 
   const username = ctx.params['username'].toLowerCase()
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
@@ -78,7 +80,7 @@ async function handleCover(ctx: KoaContext) {
     width: COVER_WIDTH,
     height: COVER_HEIGHT,
     mode: ScalingMode.Fit,
-    format: preferWebP ? OutputFormat.WEBP : OutputFormat.Match,
+    format: preferAvif ? OutputFormat.AVIF : preferWebP ? OutputFormat.WEBP : OutputFormat.Match,
   }
   const imageKey = getImageKey(origKey, options)
 
@@ -156,7 +158,7 @@ async function handleCover(ctx: KoaContext) {
 
   if (
       contentType === 'image/gif' &&
-      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP) &&
+      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) &&
       options.mode === ScalingMode.Fit
   ) {
     rv = origData

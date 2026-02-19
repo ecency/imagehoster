@@ -63,6 +63,10 @@ export async function serveOrBuildFallbackImage(
             image.webp({ force: true, quality: 80, alphaQuality: 80 })
             contentType = 'image/webp'
             break
+        case OutputFormat.AVIF:
+            image.avif({ force: true, quality: 50, effort: 4 })
+            contentType = 'image/avif'
+            break
         case OutputFormat.Match:
         default:
             image.jpeg({ force: true })

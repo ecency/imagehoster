@@ -34,6 +34,7 @@ import {
     storeExists,
     storeRemove,
     storeWrite,
+    supportsAvif,
     supportsWebP
 } from './utils'
 
@@ -70,7 +71,14 @@ function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): P
         case undefined:
         case 'match':
             // When format is not specified or 'match', use content negotiation via Accept header
-            format = supportsWebP(acceptHeader) ? OutputFormat.WEBP : OutputFormat.Match
+            // Prefer AVIF > WebP > Match (original format)
+            if (supportsAvif(acceptHeader)) {
+                format = OutputFormat.AVIF
+            } else if (supportsWebP(acceptHeader)) {
+                format = OutputFormat.WEBP
+            } else {
+                format = OutputFormat.Match
+            }
             break
         case 'jpeg':
         case 'jpg':
@@ -81,6 +89,9 @@ function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): P
             break
         case 'webp':
             format = OutputFormat.WEBP
+            break
+        case 'avif':
+            format = OutputFormat.AVIF
             break
         default:
             format = OutputFormat.Match
@@ -339,7 +350,7 @@ export async function proxyHandler(ctx: KoaContext) {
 
     let rv: Buffer
     if ((contentType === 'image/gif' || contentType === 'video/mp4' || contentType === 'image/apng') &&
-        (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP) &&
+        (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) &&
         options.mode === ScalingMode.Fit
     ) {
         // pass through GIF if requested with the original size
@@ -431,6 +442,10 @@ export async function proxyHandler(ctx: KoaContext) {
             case OutputFormat.WEBP:
                 contentType = 'image/webp'
                 image.webp({quality: 80, alphaQuality: 80, force: true})
+                break
+            case OutputFormat.AVIF:
+                contentType = 'image/avif'
+                image.avif({quality: 50, effort: 4, force: true})
                 break
             default:
                 break

@@ -23,6 +23,7 @@ import {
   storeExists,
   storeRemove,
   storeWrite,
+  supportsAvif,
   supportsWebP,
 } from './utils'
 
@@ -37,9 +38,10 @@ async function handleAvatar(ctx: KoaContext) {
   APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
   APIError.assertParams(ctx.params, ['username'])
 
-  // Detect WebP support from Accept header for content negotiation
+  // Detect modern format support from Accept header for content negotiation
   const acceptHeader = ctx.get('accept') || ''
-  const preferWebP = supportsWebP(acceptHeader)
+  const preferAvif = supportsAvif(acceptHeader)
+  const preferWebP = !preferAvif && supportsWebP(acceptHeader)
 
   const username = ctx.params['username'].toLowerCase()
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
@@ -80,7 +82,7 @@ async function handleAvatar(ctx: KoaContext) {
     width: size,
     height: size,
     mode: ScalingMode.Cover,
-    format: preferWebP ? OutputFormat.WEBP : OutputFormat.Match,
+    format: preferAvif ? OutputFormat.AVIF : preferWebP ? OutputFormat.WEBP : OutputFormat.Match,
   }
   const imageKey = getImageKey(origKey, options)
 
@@ -168,7 +170,7 @@ async function handleAvatar(ctx: KoaContext) {
 
   if (
       contentType === 'image/gif' &&
-      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP) &&
+      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) &&
       options.mode === ScalingMode.Cover
   ) {
     rv = origData

@@ -150,6 +150,7 @@ export enum OutputFormat {
     JPEG,
     PNG,
     WEBP,
+    AVIF,
 }
 
 export interface ProxyOptions {
@@ -286,6 +287,13 @@ export function supportsWebP(acceptHeader: string): boolean {
     return acceptHeader.toLowerCase().includes('image/webp')
 }
 
+/**
+ * Detect AVIF support from Accept header for content negotiation
+ */
+export function supportsAvif(acceptHeader: string): boolean {
+    return acceptHeader.toLowerCase().includes('image/avif')
+}
+
 export function sanitizeIgnoreInvalidateParams(url: URL): URL {
     return new URL(
         url.toString()
@@ -316,6 +324,8 @@ export function buildSharpPipeline(buffer: Buffer) {
         compression: 'hevc', force: false
     }).webp({
         quality: 80, alphaQuality: 80, force: false
+    }).avif({
+        quality: 50, effort: 4, force: false
     })
 }
 

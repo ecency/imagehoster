@@ -10,6 +10,7 @@ import {
     base58Dec,
     safeParseInt,
     supportsWebP,
+    supportsAvif,
     stripWebpOrPng,
     getImageKey,
     getUrlHashKey,
@@ -159,6 +160,24 @@ describe('utils', function() {
         })
     })
 
+    describe('supportsAvif', function() {
+        it('should detect AVIF support in Accept header', function() {
+            assert.equal(supportsAvif('image/avif,image/webp,*/*'), true)
+            assert.equal(supportsAvif('text/html,image/avif'), true)
+        })
+
+        it('should detect AVIF case-insensitively', function() {
+            assert.equal(supportsAvif('image/AVIF,*/*'), true)
+            assert.equal(supportsAvif('Image/Avif'), true)
+        })
+
+        it('should return false when AVIF not present', function() {
+            assert.equal(supportsAvif('image/webp,image/png,*/*'), false)
+            assert.equal(supportsAvif('*/*'), false)
+            assert.equal(supportsAvif(''), false)
+        })
+    })
+
     describe('stripWebpOrPng', function() {
         it('should strip .webp extension', function() {
             assert.equal(stripWebpOrPng('image.webp'), 'image')
@@ -225,6 +244,14 @@ describe('utils', function() {
                 mode: ScalingMode.Cover, format: OutputFormat.JPEG,
             })
             assert.equal(key, 'Uabc123_Cover_JPEG')
+        })
+
+        it('should generate key for AVIF format', function() {
+            const key = getImageKey('Uabc123', {
+                width: 512, height: 512,
+                mode: ScalingMode.Cover, format: OutputFormat.AVIF,
+            })
+            assert.equal(key, 'Uabc123_Cover_AVIF_512_512')
         })
     })
 
