@@ -37,12 +37,8 @@ export const rpcClient = new Client([config.get('rpc_node'),
 export const getAccount = async (user, isCached= true) => {
     let account = isCached ? cache.get(`${user}:account`) : undefined
     if (account === undefined && user.length <= 16) {
-      try {
-        account = await rpcClient.database.getAccounts([user])
-        cache.set(`${user}:account`, account, 30)
-      } catch (e) {
-        logger.error({ err: e, user }, 'Unable to load account from hived')
-      }
+      account = await rpcClient.database.getAccounts([user])
+      cache.set(`${user}:account`, account, 30)
     }
     return account as ExtendedAccount[]
 }
@@ -74,6 +70,10 @@ export const getProfile = async (user, isCached= true) => {
         profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
         cache.set(`${user}:profile`, profile, 30)
       } catch (e) {
+        // "account does not exist" errors should propagate so callers can return 404
+        if (e.info && JSON.stringify(e.info).includes('does not exist')) {
+          throw e
+        }
         logger.error({ err: e, user }, 'Unable to load account profile from hived')
       }
     }

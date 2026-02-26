@@ -55,16 +55,17 @@ async function handleCover(ctx: KoaContext) {
   const profile = await getProfile(username, !shouldBypassCache)
   ctx.log.debug({ profile, username }, 'Fetched profile data')
 
-  if (!profile) {
-    throw new APIError({ code: APIError.Code.NoSuchAccount })
-  }
-
   // get_profile returns metadata already parsed, no JSON.parse needed
+  // If profile is undefined, it means a transient RPC error — fall back to default cover.
+  // If account doesn't exist, getProfile throws and we never reach here.
   let coverUrl = DefaultCover
-  if (profile.metadata && profile.metadata.profile &&
+  let isProfileFallback = false
+  if (profile && profile.metadata && profile.metadata.profile &&
       profile.metadata.profile.cover_image &&
       profile.metadata.profile.cover_image.startsWith('http')) {
     coverUrl = profile.metadata.profile.cover_image
+  } else if (!profile) {
+    isProfileFallback = true
   }
 
   const { url, urlParams } = getDefaultUrlAndParams(coverUrl)
@@ -87,7 +88,7 @@ async function handleCover(ctx: KoaContext) {
 
   ctx.set({
     'ETag': etag(imageKey),
-    'Last-Modified': new Date(`${profile.active}Z`).toUTCString(),
+    'Last-Modified': profile ? new Date(`${profile.active}Z`).toUTCString() : new Date().toUTCString(),
   })
 
   if (ctx.fresh && !shouldBypassCache) {
@@ -186,7 +187,7 @@ async function handleCover(ctx: KoaContext) {
       // Continue serving - storage failure shouldn't block response
     }
   }
-  const isFinalFallback = isFetchFallback || isResizeFallback
+  const isFinalFallback = isFetchFallback || isResizeFallback || isProfileFallback
 
   ctx.set('Content-Type', contentType)
   // Vary on Accept header for proper content negotiation caching
