@@ -106,10 +106,10 @@
   dependencies:
     long "~3"
 
-"@hiveio/dhive@^1.3.3":
-  version "1.3.3"
-  resolved "https://registry.yarnpkg.com/@hiveio/dhive/-/dhive-1.3.3.tgz#921a217212441a2def133be9cf98e97d296b49e8"
-  integrity sha512-yS8dptvuYwgmJXkTPzOjXdY/BCijkCQtTy7my1KmuM+jdw4HUyUpmAiqFHBvCLens6XFla+TDS71qZ1xwTPe2Q==
+"@hiveio/dhive@^1.3.4":
+  version "1.3.4"
+  resolved "https://registry.yarnpkg.com/@hiveio/dhive/-/dhive-1.3.4.tgz#59337ff076a99b39158ffc85dd974ad78ec2ac7f"
+  integrity sha512-BO8ObCtXDNc9Idwp8dsICF14Vqw/VwPOHdAgL/Zwci6oiuB+KS7GMyxcgETPSm8IGSxyrlb5bSdMBXmlGnuhgA==
   dependencies:
     "@ecency/bytebuffer" "^6.0.0"
     bigi "^1.4.2"
