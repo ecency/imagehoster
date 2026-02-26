@@ -9,7 +9,7 @@
     "node": ">=8"
   },
   "dependencies": {
-    "@hiveio/dhive": "^1.2.7",
+    "@hiveio/dhive": "^1.3.3",
     "@koa/cors": "^2.2.1",
     "@types/etag": "^1.8.0",
     "abstract-blob-store": "^3.3.4",
@@ -19,13 +19,13 @@
     "cloudflare": "2.7.0",
     "config": "^1.29.4",
     "etag": "^1.8.1",
+    "file-type": "^16.5.4",
     "fs-blob-store": "^6.0.0",
     "hivesigner": "^3.2.0",
     "http": "^0.0.1-security",
     "koa": "^2.3.0",
     "koa-router": "^7.4.0",
     "lru-cache": "^6.0.0",
-    "file-type": "^16.5.4",
     "multihashes": "^0.4.13",
     "needle": "^2.1.1",
     "node-cache": "^5.1.2",

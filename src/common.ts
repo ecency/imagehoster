@@ -23,10 +23,11 @@ export interface KoaContext extends IRouterContext {
 
 /** Steemd (jussi) RPC client. */
 export const rpcClient = new Client([config.get('rpc_node'),
-    'https://hive-api.arcange.eu',
-    'https://api.openhive.network',
-    'https://techcoderx.com',
-    'https://api.c0ff33a.uk',
+      'https://api.deathwing.me',
+      'https://rpc.mahdiyari.info',
+      'https://api.openhive.network',
+      'https://techcoderx.com',
+      'https://api.syncad.com'
     ], {
     timeout: 2000,
     failoverThreshold: 2
