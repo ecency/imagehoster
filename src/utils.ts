@@ -315,8 +315,8 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     const urlHash = createHash('sha1').update(url.toString()).digest()
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
-export function buildSharpPipeline(buffer: Buffer) {
-    return Sharp(buffer, { failOnError: false }).jpeg({
+export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
+    return Sharp(buffer, { failOnError: false, animated }).jpeg({
         quality: 80, force: false
     }).png({
         quality: 80, compressionLevel: 9, force: false

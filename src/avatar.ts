@@ -170,13 +170,7 @@ async function handleAvatar(ctx: KoaContext) {
 
   let rv: Buffer
 
-  if (
-      contentType === 'image/gif' &&
-      (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) &&
-      options.mode === ScalingMode.Cover
-  ) {
-    rv = origData
-  } else {
+  {
     const { buffer, contentType: finalType, isFallback } = await resizeImageWithOptions(
         origData,
         contentType,

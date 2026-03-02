@@ -358,18 +358,12 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     let rv: Buffer
-    if ((contentType === 'image/gif' || contentType === 'video/mp4' || contentType === 'image/apng') &&
-        (options.format === OutputFormat.Match || options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) &&
-        options.mode === ScalingMode.Fit
-    ) {
-        // pass through GIF if requested with the original size
-        // this is needed since resizing GIFs creates still images
-        rv = origData
-    } else if (contentType.indexOf('video') > -1) {
+    const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
+    if (contentType.indexOf('video') > -1) {
         rv = origData
     } else {
 
-        const image = buildSharpPipeline(origData)
+        const image = buildSharpPipeline(origData, isAnimated)
         let metadata: Sharp.Metadata
         try {
             const metaResult = await getSharpMetadataWithRetry(
@@ -447,27 +441,31 @@ export async function proxyHandler(ctx: KoaContext) {
                 break
         }
 
-        switch (options.format) {
-            case OutputFormat.Match:
-                break
-            case OutputFormat.JPEG:
-                image.jpeg({force: true})
-                contentType = 'image/jpeg'
-                break
-            case OutputFormat.PNG:
-                image.png({force: true})
-                contentType = 'image/png'
-                break
-            case OutputFormat.WEBP:
-                contentType = 'image/webp'
-                image.webp({quality: 80, alphaQuality: 80, force: true})
-                break
-            case OutputFormat.AVIF:
-                contentType = 'image/avif'
-                image.avif({quality: 50, effort: 4, force: true})
-                break
-            default:
-                break
+        // Skip format conversion for animated images (GIF/APNG) to preserve animation
+        // Animated AVIF/WebP encoding is too slow for a proxy and may lose frames
+        if (!isAnimated) {
+            switch (options.format) {
+                case OutputFormat.Match:
+                    break
+                case OutputFormat.JPEG:
+                    image.jpeg({force: true})
+                    contentType = 'image/jpeg'
+                    break
+                case OutputFormat.PNG:
+                    image.png({force: true})
+                    contentType = 'image/png'
+                    break
+                case OutputFormat.WEBP:
+                    contentType = 'image/webp'
+                    image.webp({quality: 80, alphaQuality: 80, force: true})
+                    break
+                case OutputFormat.AVIF:
+                    contentType = 'image/avif'
+                    image.avif({quality: 50, effort: 4, force: true})
+                    break
+                default:
+                    break
+            }
         }
 
         try {
