@@ -168,30 +168,25 @@ async function handleAvatar(ctx: KoaContext) {
     }
   }
 
-  let rv: Buffer
+  const { buffer: rv, contentType: finalType, isFallback } = await resizeImageWithOptions(
+      origData,
+      contentType,
+      options,
+      urlString,
+      urlParams,
+      ctx.get('user-agent') || '',
+      DefaultAvatar,
+      ctx.log
+  )
+  contentType = finalType
+  isResizeFallback = isFallback
 
-  {
-    const { buffer, contentType: finalType, isFallback } = await resizeImageWithOptions(
-        origData,
-        contentType,
-        options,
-        urlString,
-        urlParams,
-        ctx.get('user-agent') || '',
-        DefaultAvatar,
-        ctx.log
-    )
-    rv = buffer
-    contentType = finalType
-    isResizeFallback = isFallback
-
-    ctx.log.debug('storing converted %s', imageKey)
-    try {
-      await storeWrite(proxyStore, imageKey, rv)
-    } catch (err) {
-      ctx.log.error({ err, imageKey }, 'failed to store converted avatar image')
-      // Continue serving - storage failure shouldn't block response
-    }
+  ctx.log.debug('storing converted %s', imageKey)
+  try {
+    await storeWrite(proxyStore, imageKey, rv)
+  } catch (err) {
+    ctx.log.error({ err, imageKey }, 'failed to store converted avatar image')
+    // Continue serving - storage failure shouldn't block response
   }
 
   const isFinalFallback = isFetchFallback || isResizeFallback || isProfileFallback
