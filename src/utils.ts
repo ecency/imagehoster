@@ -160,7 +160,6 @@ export interface ProxyOptions {
     format: OutputFormat
     ignorecache?: number
     invalidate?: number
-    refetch?: number
 }
 
 export function getImageKey(origKey: string, options: ProxyOptions): string {
