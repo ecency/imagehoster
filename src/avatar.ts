@@ -28,6 +28,9 @@ import {
 } from './utils'
 
 const DefaultAvatar = config.get('default_avatar') as string
+const INVALIDATE_TOKEN = config.has('invalidate_token')
+  ? config.get('invalidate_token') as string
+  : ''
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
 const AVATAR_SIZE = 256
@@ -52,6 +55,18 @@ async function handleAvatar(ctx: KoaContext) {
   const ignorecache = Number.parseInt(query['ignorecache'] as string) || undefined
   const invalidate = Number.parseInt(query['invalidate'] as string) || undefined
   const shouldBypassCache = !!(ignorecache || invalidate)
+  if (invalidate) {
+    const invalidateKey = ctx.get('x-invalidate-key')
+    APIError.assert(
+      INVALIDATE_TOKEN && invalidateKey && invalidateKey === INVALIDATE_TOKEN,
+      { code: APIError.Code.Deplorable, message: 'Forbidden: invalid invalidate key' }
+    )
+  }
+  const avatarRequestPurgeUrl = (() => {
+    const purgeUrl = new URL(ctx.request.url, new URL(config.get('service_url')).origin)
+    purgeUrl.searchParams.delete('invalidate')
+    return purgeUrl.toString()
+  })()
 
   const profile = await getProfile(username, !shouldBypassCache)
   ctx.log.debug({ profile, username }, 'Fetched profile data')
@@ -108,22 +123,24 @@ async function handleAvatar(ctx: KoaContext) {
     return
   }
 
-  // If cache bypass requested, remove cached images and purge CDN
-  if (shouldBypassCache) {
-    ctx.log.debug('cache bypass requested, removing cached images')
-    if (await storeExists(proxyStore, imageKey)) {
-      await storeRemove(proxyStore, imageKey)
+  // Invalidate requested: remove cached images and purge CDN for this endpoint URL
+  if (invalidate) {
+    ctx.log.debug('invalidate requested, removing cached images')
+    try {
+      if (await storeExists(proxyStore, imageKey)) {
+        await storeRemove(proxyStore, imageKey)
+      }
+    } catch (err) {
+      ctx.log.error({ err, imageKey }, 'unable to remove resized avatar on invalidate')
     }
-    // Purge Cloudflare cache
-    const serviceUrl = new URL(config.get('service_url'))
-    await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/`)
-    await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/small`)
-    await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/medium`)
-    await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/large`)
-    await purgeCache(`${serviceUrl.origin}/webp/u/${username}/avatar/`)
-    await purgeCache(`${serviceUrl.origin}/webp/u/${username}/avatar/small`)
-    await purgeCache(`${serviceUrl.origin}/webp/u/${username}/avatar/medium`)
-    await purgeCache(`${serviceUrl.origin}/webp/u/${username}/avatar/large`)
+    try {
+      if (!origIsUpload && await storeExists(origStore, origKey)) {
+        await storeRemove(origStore, origKey)
+      }
+    } catch (err) {
+      ctx.log.error({ err, origKey }, 'unable to remove original avatar on invalidate')
+    }
+    await purgeCache(avatarRequestPurgeUrl)
   }
 
   let origData: Buffer

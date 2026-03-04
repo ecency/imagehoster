@@ -121,6 +121,7 @@ GET /p/:url?width=W&height=H&mode=M&format=F
 **Cache Control:**
 - `ignorecache=1` - Bypass cache for this request
 - `invalidate=1` - Purge cache and refetch
+  - Requires header `X-Invalidate-Key` matching configured `invalidate_token`
 
 **Examples:**
 

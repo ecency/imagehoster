@@ -40,6 +40,9 @@ import {
 
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
 const DefaultAvatar = config.get('default_avatar') as string
+const INVALIDATE_TOKEN = config.has('invalidate_token')
+    ? config.get('invalidate_token') as string
+    : ''
 
 if (!Number.isFinite(MAX_IMAGE_SIZE)) {
     throw new Error('Invalid max image size')
@@ -107,6 +110,13 @@ export async function proxyHandler(ctx: KoaContext) {
     const acceptHeader = ctx.get('accept') || ''
     const options = parseOptions(ctx.query, acceptHeader)
     const shouldBypassCache = !!(options.ignorecache || options.invalidate)
+    if (options.invalidate) {
+        const invalidateKey = ctx.get('x-invalidate-key')
+        APIError.assert(
+            INVALIDATE_TOKEN && invalidateKey && invalidateKey === INVALIDATE_TOKEN,
+            { code: APIError.Code.Deplorable, message: 'Forbidden: invalid invalidate key' }
+        )
+    }
     const proxyRequestPurgeUrl = (() => {
         const purgeUrl = new URL(ctx.request.url, SERVICE_URL.origin)
         purgeUrl.searchParams.delete('invalidate')

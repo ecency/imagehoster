@@ -55,6 +55,10 @@ redis_url = 'redis://172.18.0.2'
 # cloudflare_token = '' # Set in config/local-development.toml
 # cloudflare_zone = '' # Set in config/local-development.toml
 
+# Token required for cache invalidation requests (?invalidate=1) on /p/*, /u/*/avatar, /u/*/cover
+# Clients must send header: X-Invalidate-Key: <invalidate_token>
+# invalidate_token = '' # Set in config/local-development.toml
+
 # dynamic blacklist configuration
 # Fetches blacklists from remote URLs and caches in memory with TTL
 # Falls back to local JSON files (blacklist-images.json, blacklist-accounts.json) if fetch fails
