@@ -107,6 +107,12 @@ export async function proxyHandler(ctx: KoaContext) {
 
     const acceptHeader = ctx.get('accept') || ''
     const options = parseOptions(ctx.query, acceptHeader)
+    const shouldBypassCache = !!(options.ignorecache || options.invalidate || options.refetch)
+    const proxyRequestPurgeUrl = (() => {
+        const purgeUrl = new URL(ctx.request.url, SERVICE_URL.origin)
+        purgeUrl.searchParams.delete('invalidate')
+        return purgeUrl.toString()
+    })()
 
     const cleanUrl = ctx.params.url.replace(/\.(webp|png)$/, '')
     let url = parseProxiedUrl(cleanUrl)
@@ -140,15 +146,12 @@ export async function proxyHandler(ctx: KoaContext) {
 
     let urlString = url.toString()
 
-    if (options.ignorecache) {
-        url = new URL(urlString.replace('&ignorecache=1', '').replace('?ignorecache=1', ''))
-    }
-    if (options.invalidate) {
-        url = new URL(urlString.replace('&invalidate=1', '').replace('?invalidate=1', ''))
-        await purgeCache(urlString)
-    }
-    if (options.refetch) {
-        url = new URL(urlString.replace('&refetch=1', '').replace('?refetch=1', ''))
+    if (options.ignorecache || options.invalidate || options.refetch) {
+        const normalizedSourceUrl = new URL(urlString)
+        normalizedSourceUrl.searchParams.delete('ignorecache')
+        normalizedSourceUrl.searchParams.delete('invalidate')
+        normalizedSourceUrl.searchParams.delete('refetch')
+        url = normalizedSourceUrl
     }
     urlString = url.toString()
     ctx.tag({ normalizedUrl: urlString })
@@ -204,16 +207,29 @@ export async function proxyHandler(ctx: KoaContext) {
     }
     const imageKey = getImageKey(origKey, options)
     ctx.set('ETag', etag(imageKey))
-    // check if content is same with user cache
-    if (ctx.fresh) {
-        ctx.status = 304
-        return
-    }
     ctx.tag({imageKey})
+    if (options.invalidate) {
+        try {
+            await storeRemove(proxyStore, imageKey)
+            ctx.log.debug({ image: imageKey }, 'removed resized file due to invalidate')
+        } catch (err) {
+            ctx.log.error({err, msg: 'unable to remove resized on invalidate', imageKey})
+        }
+        if (!origIsUpload) {
+            try {
+                await storeRemove(origStore, origKey)
+                ctx.log.debug({ image: origKey }, 'removed original file due to invalidate')
+            } catch (err) {
+                ctx.log.error({err, origKey, msg: 'unable to remove original on invalidate'})
+            }
+        }
+        await purgeCache(proxyRequestPurgeUrl)
+        ctx.tag({ invalidate: true })
+    }
     if (options.refetch) {
         try {
             await storeRemove(proxyStore, imageKey)
-            await purgeCache(urlString)
+            await purgeCache(proxyRequestPurgeUrl)
             ctx.log.debug({ image: imageKey }, 'removed original file')
         } catch (err) {
             ctx.log.error({err, msg: 'unable to remove on refetch', imageKey})
@@ -221,13 +237,18 @@ export async function proxyHandler(ctx: KoaContext) {
         if (!origIsUpload) {
             try {
                 await storeRemove(origStore, origKey)
-                await purgeCache(urlString)
+                await purgeCache(proxyRequestPurgeUrl)
                 ctx.log.debug({ image: origKey }, 'removed original file')
             } catch (err) {
                 ctx.log.error({err, origKey, msg: 'unable to remove on refetch non orig'})
             }
         }
         ctx.tag({ refetch: true })
+    }
+    // check if content is same with user cache
+    if (ctx.fresh && !shouldBypassCache) {
+        ctx.status = 304
+        return
     }
     // check if we already have a converted image for a requested key
     if (await storeExists(proxyStore, imageKey) && !options.ignorecache && !options.invalidate && !options.refetch) {
