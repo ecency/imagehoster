@@ -79,9 +79,25 @@ async function main() {
         for (let i = 0; i < numWorkers; i++) {
             cluster.fork()
         }
+        const restartTimestamps: number[] = []
+        const RESTART_WINDOW = 60000  // 1 minute
+        const MAX_RESTARTS = 5
+        const RESTART_DELAY = 5000    // 5 second backoff
         cluster.on('exit', (worker, code, signal) => {
-            logger.warn({ workerId: worker.id, code, signal }, 'worker died, respawning')
-            cluster.fork()
+            const now = Date.now()
+            restartTimestamps.push(now)
+            // Prune entries older than window
+            while (restartTimestamps.length > 0 && restartTimestamps[0] <= now - RESTART_WINDOW) {
+                restartTimestamps.shift()
+            }
+            if (restartTimestamps.length > MAX_RESTARTS) {
+                logger.warn({ workerId: worker.id, code, signal, restartsInWindow: restartTimestamps.length },
+                    'worker died, throttling respawn due to rapid restarts')
+                setTimeout(() => { cluster.fork() }, RESTART_DELAY)
+            } else {
+                logger.warn({ workerId: worker.id, code, signal }, 'worker died, respawning')
+                cluster.fork()
+            }
         })
     } else {
         const port = config.get('port')

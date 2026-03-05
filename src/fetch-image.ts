@@ -1,5 +1,9 @@
+import * as config from 'config'
 import { URL } from 'url'
 import { assertPublicUrl, fetchUrl, NeedleResponse } from './utils'
+
+const SERVICE_URL = new URL(config.get('service_url'))
+const isLocalService = SERVICE_URL.hostname === 'localhost' || SERVICE_URL.hostname === '127.0.0.1'
 
 const fallbackDomains = [
     '', // original
@@ -35,11 +39,13 @@ export async function fetchImageWithFallbacks(
     })
 
     for (const candidate of urls) {
-        try {
-            assertPublicUrl(new URL(candidate))
-        } catch (e) {
-            ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
-            continue
+        if (!isLocalService) {
+            try {
+                assertPublicUrl(new URL(candidate))
+            } catch (e) {
+                ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
+                continue
+            }
         }
         try {
             ctxLog.info({ candidate }, 'Trying fallback fetch')

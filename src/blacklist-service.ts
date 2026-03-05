@@ -2,8 +2,8 @@
 
 import * as config from 'config'
 import { URL } from 'url'
-import { fetchUrl } from './utils'
 import { logger } from './logger'
+import { fetchUrl } from './utils'
 
 interface BlacklistData {
     images?: string[]

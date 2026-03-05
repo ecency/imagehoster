@@ -9,7 +9,7 @@ import * as RateLimiter from 'ratelimiter'
 import {URL} from 'url'
 
 import {accountBlacklist} from './blacklist'
-import {getAccount, getProfile, KoaContext, redisClient, rpcClient, uploadStore} from './common'
+import {getAccount, getProfile, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
 
@@ -184,15 +184,16 @@ export async function uploadHsHandler(ctx: KoaContext) {
         APIError.assert(validSignature, APIError.Code.InvalidSignature)
         APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
-        let limit: RateLimit
-        try {
-            limit = await getRatelimit(account.name)
-        } catch (error) {
-            ctx.log.error(error, 'unable to enforce upload rate limits')
-            throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+        if (redisClient) {
+            let limit: RateLimit
+            try {
+                limit = await getRatelimit(account.name)
+            } catch (error) {
+                ctx.log.error(error, 'unable to enforce upload rate limits')
+                throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+            }
+            APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         }
-
-        APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
 
         // Use get_profile for accurate reputation (get_accounts returns incorrect data)
         const profile = await getProfile(username, false)
@@ -342,15 +343,16 @@ export async function uploadHandler(ctx: KoaContext) {
     APIError.assert(validSignature, APIError.Code.InvalidSignature)
     APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
-    let limit: RateLimit
-    try {
-        limit = await getRatelimit(account.name)
-    } catch (error) {
-        ctx.log.error(error, 'unable to enforce upload rate limits')
-        throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+    if (redisClient) {
+        let limit: RateLimit
+        try {
+            limit = await getRatelimit(account.name)
+        } catch (error) {
+            ctx.log.error(error, 'unable to enforce upload rate limits')
+            throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+        }
+        APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
     }
-
-    APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
 
     // Use get_profile for accurate reputation (get_accounts returns incorrect data)
     const profile = await getProfile(ctx.params['username'].toLowerCase(), false)

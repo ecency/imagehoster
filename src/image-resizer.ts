@@ -1,7 +1,10 @@
 // utils/image-resizer.ts
 import * as Sharp from 'sharp'
 import { APIError } from './error'
-import { buildSharpPipeline, getProxyImageLimits, OutputFormat, ProxyOptions, safeParseInt, ScalingMode } from './utils'
+import {
+    buildSharpPipeline, getProxyImageLimits, mimeMagic,
+    OutputFormat, ProxyOptions, safeParseInt, ScalingMode,
+} from './utils'
 
 export async function resizeImageWithOptions(
     origData: Buffer,
@@ -13,7 +16,7 @@ export async function resizeImageWithOptions(
     fallbackUrl: string,
     logger: any
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
-    const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
+    let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
     let meta: Sharp.Metadata
     let isFallback = false
@@ -25,6 +28,8 @@ export async function resizeImageWithOptions(
         isFallback = fallbackUsed
         if (isFallback) {
             origData = buffer
+            contentType = await mimeMagic(origData)
+            isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
         }
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })

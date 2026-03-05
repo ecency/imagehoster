@@ -4,8 +4,8 @@ import { AbstractBlobStore, BlobKey } from 'abstract-blob-store'
 import * as cloudflare from 'cloudflare'
 import * as config from 'config'
 import { createHash } from 'crypto'
-import * as http from 'http'
 import * as fileType from 'file-type'
+import * as http from 'http'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
 import * as Sharp from 'sharp'
@@ -304,13 +304,13 @@ export function assertPublicUrl(url: URL): void {
     const hostname = url.hostname
     if (
         hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
+        hostname.startsWith('127.') ||
         hostname === '::1' ||
         hostname === '[::1]' ||
         hostname.startsWith('10.') ||
         hostname.startsWith('192.168.') ||
         /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
-        hostname === '169.254.169.254' ||
+        hostname.startsWith('169.254.') ||
         hostname.endsWith('.local') ||
         url.protocol === 'file:' ||
         url.protocol === 'ftp:'

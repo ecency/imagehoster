@@ -193,7 +193,10 @@ export async function proxyHandler(ctx: KoaContext) {
     if (urlString.includes('https://img.esteem.ws/')) {
         urlString = `https://steemitimages.com/0x0/${urlString}`
     }
-    assertPublicUrl(url)
+    // Only enforce SSRF protection in production (service not on localhost)
+    if (SERVICE_URL.hostname !== 'localhost' && SERVICE_URL.hostname !== '127.0.0.1') {
+        assertPublicUrl(url)
+    }
 
     // where the original image is/will be stored
     let origStore: AbstractBlobStore
@@ -371,7 +374,7 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     let rv: Buffer
-    const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
+    let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
         rv = origData
     } else {
@@ -390,6 +393,8 @@ export async function proxyHandler(ctx: KoaContext) {
             if (metaResult.isFallback) {
                 origData = metaResult.buffer
                 isDefaultImage = true
+                contentType = await mimeMagic(origData)
+                isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
             }
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
