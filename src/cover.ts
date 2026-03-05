@@ -138,7 +138,7 @@ async function handleCover(ctx: KoaContext) {
     } catch (err) {
       ctx.log.error({ err, origKey }, 'unable to remove original cover on invalidate')
     }
-    await purgeCache(coverRequestPurgeUrl)
+    purgeCache(coverRequestPurgeUrl)
   }
 
   let origData: Buffer
@@ -166,7 +166,7 @@ async function handleCover(ctx: KoaContext) {
           await storeWrite(origStore, origKey, origData)
           // Purge Cloudflare cache for this user's cover endpoint since we fetched a new image
           const serviceUrl = new URL(config.get('service_url'))
-          await purgeCache(`${serviceUrl.origin}/u/${username}/cover`)
+          purgeCache(`${serviceUrl.origin}/u/${username}/cover`)
         } catch (err) {
           ctx.log.error({ err, origKey }, 'failed to store original cover image')
           // Continue serving - storage failure shouldn't block response

@@ -14,21 +14,24 @@ export async function resizeImageWithOptions(
     logger: any
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
     const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
-    const image = buildSharpPipeline(origData, isAnimated)
 
     let meta: Sharp.Metadata
     let isFallback = false
     try {
-        const { metadata, isFallback: fallbackUsed } = await import('./utils').then((mod) =>
+        const { metadata, buffer, isFallback: fallbackUsed } = await import('./utils').then((mod) =>
             mod.getSharpMetadataWithRetry(origData, urlString, urlParams, userAgent, fallbackUrl, logger)
         )
         meta = metadata
         isFallback = fallbackUsed
+        if (isFallback) {
+            origData = buffer
+        }
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }
 
     APIError.assert(meta.width && meta.height, APIError.Code.InvalidImage)
+    const image = buildSharpPipeline(origData, isAnimated)
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width = safeParseInt(options.width)

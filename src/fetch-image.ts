@@ -1,4 +1,5 @@
-import { fetchUrl, NeedleResponse } from './utils'
+import { URL } from 'url'
+import { assertPublicUrl, fetchUrl, NeedleResponse } from './utils'
 
 const fallbackDomains = [
     '', // original
@@ -34,6 +35,12 @@ export async function fetchImageWithFallbacks(
     })
 
     for (const candidate of urls) {
+        try {
+            assertPublicUrl(new URL(candidate))
+        } catch (e) {
+            ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
+            continue
+        }
         try {
             ctxLog.info({ candidate }, 'Trying fallback fetch')
             const res = await fetchUrl(candidate, {

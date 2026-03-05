@@ -140,7 +140,7 @@ async function handleAvatar(ctx: KoaContext) {
     } catch (err) {
       ctx.log.error({ err, origKey }, 'unable to remove original avatar on invalidate')
     }
-    await purgeCache(avatarRequestPurgeUrl)
+    purgeCache(avatarRequestPurgeUrl)
   }
 
   let origData: Buffer
@@ -168,10 +168,10 @@ async function handleAvatar(ctx: KoaContext) {
           await storeWrite(origStore, origKey, origData)
           // Purge Cloudflare cache for this user's avatar endpoint since we fetched a new image
           const serviceUrl = new URL(config.get('service_url'))
-          await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/`)
-          await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/small`)
-          await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/medium`)
-          await purgeCache(`${serviceUrl.origin}/u/${username}/avatar/large`)
+          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/`)
+          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/small`)
+          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/medium`)
+          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/large`)
         } catch (err) {
           ctx.log.error({ err, origKey }, 'failed to store original avatar image')
           // Continue serving - storage failure shouldn't block response

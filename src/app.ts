@@ -46,6 +46,11 @@ app.on('error', (error, ctx: KoaContext) => {
 app.use(loggerMiddleware as any)
 app.use(errorMiddleware as any)
 
+app.use(async (ctx, next) => {
+    ctx.set('X-Content-Type-Options', 'nosniff')
+    await next()
+})
+
 app.use(cors({origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']}))
@@ -74,6 +79,10 @@ async function main() {
         for (let i = 0; i < numWorkers; i++) {
             cluster.fork()
         }
+        cluster.on('exit', (worker, code, signal) => {
+            logger.warn({ workerId: worker.id, code, signal }, 'worker died, respawning')
+            cluster.fork()
+        })
     } else {
         const port = config.get('port')
         await listen(port)

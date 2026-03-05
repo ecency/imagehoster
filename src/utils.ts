@@ -5,7 +5,6 @@ import * as cloudflare from 'cloudflare'
 import * as config from 'config'
 import { createHash } from 'crypto'
 import * as http from 'http'
-import * as LRU from 'lru-cache'
 import * as fileType from 'file-type'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
@@ -17,7 +16,6 @@ import { DEFAULT_FALLBACK_IMAGE_URL, isEmptyImageUrl } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
-
 
 export const AcceptedContentTypes = [
     'image/gif',
@@ -63,7 +61,10 @@ export function readStream(stream: NodeJS.ReadableStream) {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
         stream.on('data', (chunk) => chunks.push(chunk))
-        stream.on('error', reject)
+        stream.on('error', (err) => {
+            if ((stream as any).destroy) { (stream as any).destroy() }
+            reject(err)
+        })
         stream.on('end', () => resolve(Buffer.concat(chunks)))
     })
 }
@@ -105,24 +106,6 @@ export function base58Enc(value: string): string {
 
 export function base58Dec(value: string): string {
     return multihash.fromB58String(value).toString('utf8')
-}
-
-const cache = new LRU({
-    max: 500,
-    length: (n: string | Buffer, key: string) => n.length,
-    maxAge: 1000 * 60 * 60,
-})
-
-export function setCacheSize(size: number) {
-    cache.max = size
-}
-
-export function cacheGet(key: string): any {
-    return cache.get(key)
-}
-
-export function cacheSet(key: string, val: string | Buffer) {
-    return cache.set(key, val)
 }
 
 export interface NeedleResponse extends http.IncomingMessage {
@@ -252,7 +235,6 @@ export function getDefaultUrlAndParams(customUrl?: string): { url: URL, urlParam
     return { url, urlParams }
 }
 
-
 export function getProxyImageLimits() {
     return {
         maxWidth: safeParseInt(config.get('proxy_store.max_image_width')) || 1280,
@@ -315,17 +297,26 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
-    return Sharp(buffer, { failOnError: false, animated }).jpeg({
-        quality: 80, force: false
-    }).png({
-        quality: 80, compressionLevel: 9, force: false
-    }).heif({
-        compression: 'hevc', force: false
-    }).webp({
-        quality: 80, alphaQuality: 80, force: false
-    }).avif({
-        quality: 50, effort: 4, force: false
-    })
+    return Sharp(buffer, { failOnError: false, animated })
+}
+
+export function assertPublicUrl(url: URL): void {
+    const hostname = url.hostname
+    if (
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname === '::1' ||
+        hostname === '[::1]' ||
+        hostname.startsWith('10.') ||
+        hostname.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+        hostname === '169.254.169.254' ||
+        hostname.endsWith('.local') ||
+        url.protocol === 'file:' ||
+        url.protocol === 'ftp:'
+    ) {
+        throw new APIError({ code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' })
+    }
 }
 
 export function storeRemove(store: AbstractBlobStore, key: string): Promise<void> {
