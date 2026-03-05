@@ -390,11 +390,11 @@ export async function proxyHandler(ctx: KoaContext) {
                 ctx.log
             )
             metadata = metaResult.metadata
+            origData = metaResult.buffer
+            contentType = await mimeMagic(origData)
+            isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
             if (metaResult.isFallback) {
-                origData = metaResult.buffer
                 isDefaultImage = true
-                contentType = await mimeMagic(origData)
-                isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
             }
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})

@@ -26,11 +26,9 @@ export async function resizeImageWithOptions(
         )
         meta = metadata
         isFallback = fallbackUsed
-        if (isFallback) {
-            origData = buffer
-            contentType = await mimeMagic(origData)
-            isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
-        }
+        origData = buffer
+        contentType = await mimeMagic(origData)
+        isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }

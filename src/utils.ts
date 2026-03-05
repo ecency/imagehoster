@@ -301,19 +301,28 @@ export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
 }
 
 export function assertPublicUrl(url: URL): void {
+    // Only allow http and https
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new APIError({ code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' })
+    }
     const hostname = url.hostname
+    const lower = hostname.toLowerCase()
     if (
-        hostname === 'localhost' ||
-        hostname.startsWith('127.') ||
-        hostname === '::1' ||
-        hostname === '[::1]' ||
-        hostname.startsWith('10.') ||
-        hostname.startsWith('192.168.') ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
-        hostname.startsWith('169.254.') ||
-        hostname.endsWith('.local') ||
-        url.protocol === 'file:' ||
-        url.protocol === 'ftp:'
+        lower === 'localhost' ||
+        lower === '0.0.0.0' ||
+        lower.startsWith('127.') ||
+        lower.startsWith('10.') ||
+        lower.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(lower) ||
+        lower.startsWith('169.254.') ||
+        lower.endsWith('.local') ||
+        // IPv6 loopback and unspecified
+        lower === '::1' || lower === '[::1]' ||
+        lower === '::' || lower === '[::]' ||
+        // IPv6 link-local (fe80::/10)
+        lower.startsWith('fe80:') || lower.startsWith('[fe80:') ||
+        // IPv6 ULA (fc00::/7 = fc00:: through fdff::)
+        /^[\[]?f[cd]/.test(lower)
     ) {
         throw new APIError({ code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' })
     }
