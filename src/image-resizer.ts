@@ -1,7 +1,10 @@
 // utils/image-resizer.ts
 import * as Sharp from 'sharp'
 import { APIError } from './error'
-import { buildSharpPipeline, getProxyImageLimits, OutputFormat, ProxyOptions, safeParseInt, ScalingMode } from './utils'
+import {
+    buildSharpPipeline, getProxyImageLimits, mimeMagic,
+    OutputFormat, ProxyOptions, safeParseInt, ScalingMode,
+} from './utils'
 
 export async function resizeImageWithOptions(
     origData: Buffer,
@@ -13,22 +16,25 @@ export async function resizeImageWithOptions(
     fallbackUrl: string,
     logger: any
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
-    const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
-    const image = buildSharpPipeline(origData, isAnimated)
+    let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
     let meta: Sharp.Metadata
     let isFallback = false
     try {
-        const { metadata, isFallback: fallbackUsed } = await import('./utils').then((mod) =>
+        const { metadata, buffer, isFallback: fallbackUsed } = await import('./utils').then((mod) =>
             mod.getSharpMetadataWithRetry(origData, urlString, urlParams, userAgent, fallbackUrl, logger)
         )
         meta = metadata
         isFallback = fallbackUsed
+        origData = buffer
+        contentType = await mimeMagic(origData)
+        isAnimated = (metadata.pages != null ? metadata.pages : 1) > 1
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }
 
     APIError.assert(meta.width && meta.height, APIError.Code.InvalidImage)
+    const image = buildSharpPipeline(origData, isAnimated)
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width = safeParseInt(options.width)

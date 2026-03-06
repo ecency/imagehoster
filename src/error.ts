@@ -117,6 +117,6 @@ export async function errorMiddleware(ctx: KoaContext, next: () => Promise<any>)
         ctx.status = error.statusCode
         ctx['api_error'] = error
         ctx.body = {error}
-        ctx.app.emit('error', error, ctx.app)
+        ctx.app.emit('error', error, ctx)
     }
 }

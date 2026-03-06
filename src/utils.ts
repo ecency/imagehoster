@@ -4,9 +4,8 @@ import { AbstractBlobStore, BlobKey } from 'abstract-blob-store'
 import * as cloudflare from 'cloudflare'
 import * as config from 'config'
 import { createHash } from 'crypto'
-import * as http from 'http'
-import * as LRU from 'lru-cache'
 import * as fileType from 'file-type'
+import * as http from 'http'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
 import * as Sharp from 'sharp'
@@ -17,7 +16,6 @@ import { DEFAULT_FALLBACK_IMAGE_URL, isEmptyImageUrl } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
-
 
 export const AcceptedContentTypes = [
     'image/gif',
@@ -63,7 +61,10 @@ export function readStream(stream: NodeJS.ReadableStream) {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
         stream.on('data', (chunk) => chunks.push(chunk))
-        stream.on('error', reject)
+        stream.on('error', (err) => {
+            if ((stream as any).destroy) { (stream as any).destroy() }
+            reject(err)
+        })
         stream.on('end', () => resolve(Buffer.concat(chunks)))
     })
 }
@@ -105,24 +106,6 @@ export function base58Enc(value: string): string {
 
 export function base58Dec(value: string): string {
     return multihash.fromB58String(value).toString('utf8')
-}
-
-const cache = new LRU({
-    max: 500,
-    length: (n: string | Buffer, key: string) => n.length,
-    maxAge: 1000 * 60 * 60,
-})
-
-export function setCacheSize(size: number) {
-    cache.max = size
-}
-
-export function cacheGet(key: string): any {
-    return cache.get(key)
-}
-
-export function cacheSet(key: string, val: string | Buffer) {
-    return cache.set(key, val)
 }
 
 export interface NeedleResponse extends http.IncomingMessage {
@@ -252,7 +235,6 @@ export function getDefaultUrlAndParams(customUrl?: string): { url: URL, urlParam
     return { url, urlParams }
 }
 
-
 export function getProxyImageLimits() {
     return {
         maxWidth: safeParseInt(config.get('proxy_store.max_image_width')) || 1280,
@@ -315,17 +297,76 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
-    return Sharp(buffer, { failOnError: false, animated }).jpeg({
-        quality: 80, force: false
-    }).png({
-        quality: 80, compressionLevel: 9, force: false
-    }).heif({
-        compression: 'hevc', force: false
-    }).webp({
-        quality: 80, alphaQuality: 80, force: false
-    }).avif({
-        quality: 50, effort: 4, force: false
-    })
+    return Sharp(buffer, { failOnError: false, animated })
+}
+
+function isPrivateIPv4(host: string): boolean {
+    return (
+        host === 'localhost' ||
+        host === '0.0.0.0' ||
+        host.startsWith('127.') ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+        host.startsWith('169.254.') ||
+        host.endsWith('.local')
+    )
+}
+
+function mappedIPv6ToDotted(hexTail: string): string | undefined {
+    // hexTail is e.g. "7f00:1" (Node normalizes/compresses hex)
+    const parts = hexTail.split(':')
+    if (parts.length !== 2) { return undefined }
+    const hi = parts[0].padStart(4, '0')
+    const lo = parts[1].padStart(4, '0')
+    if (hi.length !== 4 || lo.length !== 4) { return undefined }
+    return [
+        parseInt(hi.slice(0, 2), 16),
+        parseInt(hi.slice(2, 4), 16),
+        parseInt(lo.slice(0, 2), 16),
+        parseInt(lo.slice(2, 4), 16),
+    ].join('.')
+}
+
+export function assertPublicUrl(url: URL): void {
+    const err = { code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' }
+    // Only allow http and https
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new APIError(err)
+    }
+    // Strip brackets (IPv6) and trailing dot (FQDN)
+    const lower = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
+
+    if (isPrivateIPv4(lower)) {
+        throw new APIError(err)
+    }
+
+    // IPv6 loopback and unspecified
+    if (lower === '::1' || lower === '::') {
+        throw new APIError(err)
+    }
+    // IPv6 link-local fe80::/10 (fe80:: through febf::)
+    if (/^fe[89ab][0-9a-f]:/.test(lower)) {
+        throw new APIError(err)
+    }
+    // IPv6 ULA fc00::/7 (fc00:: through fdff::) — only match IPv6 literals (contain :)
+    if (/^f[cd][0-9a-f]{2}:/.test(lower)) {
+        throw new APIError(err)
+    }
+
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d or ::ffff:XXYY:ZZWW)
+    const mapped = lower.match(/^::ffff:(.+)$/)
+    if (mapped) {
+        const tail = mapped[1]
+        if (tail.includes('.')) {
+            // Dotted form: ::ffff:127.0.0.1
+            if (isPrivateIPv4(tail)) { throw new APIError(err) }
+        } else {
+            // Hex form: ::ffff:7f00:1 (Node normalizes to this)
+            const dotted = mappedIPv6ToDotted(tail)
+            if (dotted && isPrivateIPv4(dotted)) { throw new APIError(err) }
+        }
+    }
 }
 
 export function storeRemove(store: AbstractBlobStore, key: string): Promise<void> {

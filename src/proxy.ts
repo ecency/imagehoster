@@ -16,6 +16,7 @@ import {serveOrBuildFallbackImage} from './fallback'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {
     AcceptedContentTypes,
+    assertPublicUrl,
     buildSharpPipeline,
     fetchUrl,
     getDefaultUrlAndParams,
@@ -192,6 +193,10 @@ export async function proxyHandler(ctx: KoaContext) {
     if (urlString.includes('https://img.esteem.ws/')) {
         urlString = `https://steemitimages.com/0x0/${urlString}`
     }
+    if (process.env.NODE_ENV !== 'test') {
+        assertPublicUrl(url)
+    }
+
     // where the original image is/will be stored
     let origStore: AbstractBlobStore
     let origKey: string
@@ -231,7 +236,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 ctx.log.error({err, origKey, msg: 'unable to remove original on invalidate'})
             }
         }
-        await purgeCache(proxyRequestPurgeUrl)
+        purgeCache(proxyRequestPurgeUrl)
         ctx.tag({ invalidate: true })
     }
     // check if content is same with user cache
@@ -368,12 +373,11 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     let rv: Buffer
-    const isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
+    let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
         rv = origData
     } else {
 
-        const image = buildSharpPipeline(origData, isAnimated)
         let metadata: Sharp.Metadata
         try {
             const metaResult = await getSharpMetadataWithRetry(
@@ -384,12 +388,11 @@ export async function proxyHandler(ctx: KoaContext) {
                 DefaultAvatar,
                 ctx.log
             )
-            // We don't replace `origData` with `metaResult.buffer` because the Sharp pipeline
-            // has already been initialized with the original buffer.
-            // The fallback fetch is used solely to get metadata in case the original fails.
-
             metadata = metaResult.metadata
-            if (!isDefaultImage && metaResult.isFallback) {
+            origData = metaResult.buffer
+            contentType = await mimeMagic(origData)
+            isAnimated = (metadata.pages != null ? metadata.pages : 1) > 1
+            if (metaResult.isFallback) {
                 isDefaultImage = true
             }
         } catch (err) {
@@ -408,6 +411,7 @@ export async function proxyHandler(ctx: KoaContext) {
                     metadata: 'fallback-failed' } })
         }
         APIError.assert(metadata.width && metadata.height, APIError.Code.InvalidImage)
+        const image = buildSharpPipeline(origData, isAnimated)
 
         const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
         let width: number | undefined = safeParseInt(options.width)
@@ -437,7 +441,12 @@ export async function proxyHandler(ctx: KoaContext) {
 
         switch (options.mode) {
             case ScalingMode.Cover:
-                image.rotate().resize(width, height, {fit: 'cover'})
+                if (bothUnspecified) {
+                    // User didn't request specific dimensions — preserve aspect ratio
+                    image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
+                } else {
+                    image.rotate().resize(width, height, {fit: 'cover'})
+                }
                 break
             case ScalingMode.Fit:
                 // Only set defaults if BOTH dimensions are undefined

@@ -9,9 +9,9 @@ import * as RateLimiter from 'ratelimiter'
 import {URL} from 'url'
 
 import {accountBlacklist} from './blacklist'
-import {getAccount, getProfile, KoaContext, redisClient, rpcClient, uploadStore} from './common'
+import {getAccount, getProfile, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
-import {AcceptedContentTypes, readStream, storeExists, storeWrite} from './utils'
+import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
 
 const SERVICE_URL = new URL(config.get('service_url'))
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
@@ -114,6 +114,9 @@ export async function uploadHsHandler(ctx: KoaContext) {
 
     APIError.assert(AcceptedContentTypes.includes(file.mime), APIError.Code.InvalidImage)
 
+    const actualMime = await mimeMagic(data)
+    APIError.assert(AcceptedContentTypes.includes(actualMime), APIError.Code.InvalidImage)
+
     const imageHash = createHash('sha256')
         .update('ImageSigningChallenge')
         .update(data)
@@ -142,7 +145,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
                 timestamp: tokenObj.timestamp,
         })
         const hash = cryptoUtils.sha256(message)
-        const username = tokenObj.authors[0]
+        const username = tokenObj.authors[0].toLowerCase()
 
         const [account]: ExtendedAccount[] = await getAccount(username, false)
         APIError.assert(account, APIError.Code.NoSuchAccount)
@@ -181,14 +184,16 @@ export async function uploadHsHandler(ctx: KoaContext) {
         APIError.assert(validSignature, APIError.Code.InvalidSignature)
         APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
-        let limit: RateLimit = {total: 0, remaining: Infinity, reset: 0}
-        try {
-            limit = await getRatelimit(account.name)
-        } catch (error) {
-            ctx.log.warn(error, 'unable to enforce upload rate limits')
+        if (redisClient) {
+            let limit: RateLimit
+            try {
+                limit = await getRatelimit(account.name)
+            } catch (error) {
+                ctx.log.error(error, 'unable to enforce upload rate limits')
+                throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+            }
+            APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         }
-
-        APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
 
         // Use get_profile for accurate reputation (get_accounts returns incorrect data)
         const profile = await getProfile(username, false)
@@ -242,6 +247,9 @@ export async function uploadHandler(ctx: KoaContext) {
     // extra check if client manges to lie about the content-length
     APIError.assert((file.stream as any).truncated !== true,
                     APIError.Code.PayloadTooLarge)
+
+    const actualMime2 = await mimeMagic(data)
+    APIError.assert(AcceptedContentTypes.includes(actualMime2), APIError.Code.InvalidImage)
 
     const imageHash = createHash('sha256')
         .update('ImageSigningChallenge')
@@ -335,14 +343,16 @@ export async function uploadHandler(ctx: KoaContext) {
     APIError.assert(validSignature, APIError.Code.InvalidSignature)
     APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
-    let limit: RateLimit = {total: 0, remaining: Infinity, reset: 0}
-    try {
-        limit = await getRatelimit(account.name)
-    } catch (error) {
-        ctx.log.warn(error, 'unable to enforce upload rate limits')
+    if (redisClient) {
+        let limit: RateLimit
+        try {
+            limit = await getRatelimit(account.name)
+        } catch (error) {
+            ctx.log.error(error, 'unable to enforce upload rate limits')
+            throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
+        }
+        APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
     }
-
-    APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
 
     // Use get_profile for accurate reputation (get_accounts returns incorrect data)
     const profile = await getProfile(ctx.params['username'].toLowerCase(), false)

@@ -1,8 +1,9 @@
 /** Dynamic blacklist service that fetches from remote JSON. */
 
 import * as config from 'config'
-import { fetchUrl } from './utils'
+import { URL } from 'url'
 import { logger } from './logger'
+import { fetchUrl } from './utils'
 
 interface BlacklistData {
     images?: string[]
@@ -29,6 +30,21 @@ const cache: BlacklistCache = {
 // Fallback to static blacklists (imported lazily to avoid circular deps)
 let staticImageBlacklist: string[] = []
 let staticAccountBlacklist: string[] = []
+
+function normalizeUrl(url: string): string {
+    try {
+        const parsed = new URL(url)
+        // new URL() already lowercases scheme and hostname (case-insensitive per RFC)
+        // Preserve path case (case-sensitive) and query params (part of resource identity)
+        parsed.hash = ''
+        if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/')) {
+            parsed.pathname = parsed.pathname.slice(0, -1)
+        }
+        return parsed.toString()
+    } catch {
+        return url
+    }
+}
 
 const CACHE_TTL = Number.parseInt(config.get('blacklist.cache_ttl') || '300000') // 5 minutes default
 const MAX_FAIL_COUNT = 5
@@ -112,7 +128,7 @@ async function updateCache(): Promise<boolean> {
     if (imageUrl) {
         const data = await fetchBlacklistData(imageUrl)
         if (data && data.images && Array.isArray(data.images)) {
-            cache.images = new Set(data.images)
+            cache.images = new Set(data.images.map(normalizeUrl))
             updated = true
             logger.info({ count: cache.images.size }, 'image blacklist updated')
         } else {
@@ -156,11 +172,11 @@ async function ensureFreshCache(): Promise<void> {
  * Initialize blacklist service with static fallbacks
  */
 export function initBlacklistService(staticImages: string[], staticAccounts: string[]) {
-    staticImageBlacklist = staticImages
+    staticImageBlacklist = staticImages.map(normalizeUrl)
     staticAccountBlacklist = staticAccounts
 
     // Initialize cache with static data
-    cache.images = new Set(staticImages)
+    cache.images = new Set(staticImageBlacklist)
     cache.accounts = new Set(staticAccounts)
     cache.lastFetch = Date.now()
 
@@ -187,14 +203,15 @@ export function initBlacklistService(staticImages: string[], staticAccounts: str
  */
 export async function isImageBlacklisted(url: string): Promise<boolean> {
     await ensureFreshCache()
+    const normalized = normalizeUrl(url)
 
     // Check dynamic cache first
-    if (cache.images.has(url)) {
+    if (cache.images.has(normalized)) {
         return true
     }
 
     // Fallback to static list
-    if (staticImageBlacklist.includes(url)) {
+    if (staticImageBlacklist.includes(normalized)) {
         return true
     }
 
@@ -224,7 +241,8 @@ export async function isAccountBlacklisted(account: string): Promise<boolean> {
  * Synchronous check (uses cached data only, suitable for high-frequency checks)
  */
 export function isImageBlacklistedSync(url: string): boolean {
-    return cache.images.has(url) || staticImageBlacklist.includes(url)
+    const normalized = normalizeUrl(url)
+    return cache.images.has(normalized) || staticImageBlacklist.includes(normalized)
 }
 
 /**
