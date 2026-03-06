@@ -334,8 +334,8 @@ export function assertPublicUrl(url: URL): void {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw new APIError(err)
     }
-    // Node keeps brackets for IPv6 in hostname — strip them
-    const lower = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    // Strip brackets (IPv6) and trailing dot (FQDN)
+    const lower = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '')
 
     if (isPrivateIPv4(lower)) {
         throw new APIError(err)

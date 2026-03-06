@@ -391,7 +391,7 @@ export async function proxyHandler(ctx: KoaContext) {
             metadata = metaResult.metadata
             origData = metaResult.buffer
             contentType = await mimeMagic(origData)
-            isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
+            isAnimated = (metadata.pages != null ? metadata.pages : 1) > 1
             if (metaResult.isFallback) {
                 isDefaultImage = true
             }
@@ -441,7 +441,12 @@ export async function proxyHandler(ctx: KoaContext) {
 
         switch (options.mode) {
             case ScalingMode.Cover:
-                image.rotate().resize(width, height, {fit: 'cover'})
+                if (bothUnspecified) {
+                    // User didn't request specific dimensions — preserve aspect ratio
+                    image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
+                } else {
+                    image.rotate().resize(width, height, {fit: 'cover'})
+                }
                 break
             case ScalingMode.Fit:
                 // Only set defaults if BOTH dimensions are undefined
