@@ -193,8 +193,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (urlString.includes('https://img.esteem.ws/')) {
         urlString = `https://steemitimages.com/0x0/${urlString}`
     }
-    // Only enforce SSRF protection in production (service not on localhost)
-    if (SERVICE_URL.hostname !== 'localhost' && SERVICE_URL.hostname !== '127.0.0.1') {
+    if (process.env.NODE_ENV !== 'test') {
         assertPublicUrl(url)
     }
 

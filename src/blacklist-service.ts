@@ -34,14 +34,15 @@ let staticAccountBlacklist: string[] = []
 function normalizeUrl(url: string): string {
     try {
         const parsed = new URL(url)
-        parsed.search = ''
+        // new URL() already lowercases scheme and hostname (case-insensitive per RFC)
+        // Preserve path case (case-sensitive) and query params (part of resource identity)
         parsed.hash = ''
         if (parsed.pathname.length > 1 && parsed.pathname.endsWith('/')) {
             parsed.pathname = parsed.pathname.slice(0, -1)
         }
-        return parsed.toString().toLowerCase()
+        return parsed.toString()
     } catch {
-        return url.toLowerCase()
+        return url
     }
 }
 

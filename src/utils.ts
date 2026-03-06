@@ -300,31 +300,72 @@ export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
     return Sharp(buffer, { failOnError: false, animated })
 }
 
+function isPrivateIPv4(host: string): boolean {
+    return (
+        host === 'localhost' ||
+        host === '0.0.0.0' ||
+        host.startsWith('127.') ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+        host.startsWith('169.254.') ||
+        host.endsWith('.local')
+    )
+}
+
+function mappedIPv6ToDotted(hexTail: string): string | undefined {
+    // hexTail is e.g. "7f00:1" (Node normalizes/compresses hex)
+    const parts = hexTail.split(':')
+    if (parts.length !== 2) { return undefined }
+    const hi = parts[0].padStart(4, '0')
+    const lo = parts[1].padStart(4, '0')
+    if (hi.length !== 4 || lo.length !== 4) { return undefined }
+    return [
+        parseInt(hi.slice(0, 2), 16),
+        parseInt(hi.slice(2, 4), 16),
+        parseInt(lo.slice(0, 2), 16),
+        parseInt(lo.slice(2, 4), 16),
+    ].join('.')
+}
+
 export function assertPublicUrl(url: URL): void {
+    const err = { code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' }
     // Only allow http and https
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new APIError({ code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' })
+        throw new APIError(err)
     }
-    const hostname = url.hostname
-    const lower = hostname.toLowerCase()
-    if (
-        lower === 'localhost' ||
-        lower === '0.0.0.0' ||
-        lower.startsWith('127.') ||
-        lower.startsWith('10.') ||
-        lower.startsWith('192.168.') ||
-        /^172\.(1[6-9]|2\d|3[01])\./.test(lower) ||
-        lower.startsWith('169.254.') ||
-        lower.endsWith('.local') ||
-        // IPv6 loopback and unspecified
-        lower === '::1' || lower === '[::1]' ||
-        lower === '::' || lower === '[::]' ||
-        // IPv6 link-local (fe80::/10)
-        lower.startsWith('fe80:') || lower.startsWith('[fe80:') ||
-        // IPv6 ULA (fc00::/7 = fc00:: through fdff::)
-        /^[\[]?f[cd]/.test(lower)
-    ) {
-        throw new APIError({ code: APIError.Code.InvalidProxyUrl, message: 'Private URLs not allowed' })
+    // Node keeps brackets for IPv6 in hostname — strip them
+    const lower = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+
+    if (isPrivateIPv4(lower)) {
+        throw new APIError(err)
+    }
+
+    // IPv6 loopback and unspecified
+    if (lower === '::1' || lower === '::') {
+        throw new APIError(err)
+    }
+    // IPv6 link-local fe80::/10 (fe80:: through febf::)
+    if (/^fe[89ab][0-9a-f]:/.test(lower)) {
+        throw new APIError(err)
+    }
+    // IPv6 ULA fc00::/7 (fc00:: through fdff::) — only match IPv6 literals (contain :)
+    if (/^f[cd][0-9a-f]{2}:/.test(lower)) {
+        throw new APIError(err)
+    }
+
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d or ::ffff:XXYY:ZZWW)
+    const mapped = lower.match(/^::ffff:(.+)$/)
+    if (mapped) {
+        const tail = mapped[1]
+        if (tail.includes('.')) {
+            // Dotted form: ::ffff:127.0.0.1
+            if (isPrivateIPv4(tail)) { throw new APIError(err) }
+        } else {
+            // Hex form: ::ffff:7f00:1 (Node normalizes to this)
+            const dotted = mappedIPv6ToDotted(tail)
+            if (dotted && isPrivateIPv4(dotted)) { throw new APIError(err) }
+        }
     }
 }
 
