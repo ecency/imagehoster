@@ -1,6 +1,6 @@
 /** Application constants and magic strings centralized in one location. */
 
-import * as config from 'config'
+import config from 'config'
 
 /** Service base URL from configuration */
 export const SERVICE_BASE_URL = config.get('service_url') as string

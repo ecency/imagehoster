@@ -1,5 +1,5 @@
 // utils/image-resizer.ts
-import * as Sharp from 'sharp'
+import Sharp from 'sharp'
 import { APIError } from './error'
 import {
     buildSharpPipeline, getProxyImageLimits, mimeMagic,

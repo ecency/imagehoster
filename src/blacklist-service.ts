@@ -1,6 +1,6 @@
 /** Dynamic blacklist service that fetches from remote JSON. */
 
-import * as config from 'config'
+import config from 'config'
 import { URL } from 'url'
 import { logger } from './logger'
 import { fetchUrl } from './utils'

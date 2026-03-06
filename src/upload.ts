@@ -1,15 +1,14 @@
 /** Uploads file to blob store. */
 import {cryptoUtils, ExtendedAccount, PrivateKey, PublicKey, Signature} from '@hiveio/dhive'
-import * as Busboy from 'busboy'
-import * as config from 'config'
+import Busboy from 'busboy'
+import config from 'config'
 import {createHash} from 'crypto'
 import * as http from 'http'
 import * as multihash from 'multihashes'
-import * as RateLimiter from 'ratelimiter'
 import {URL} from 'url'
 
 import {accountBlacklist} from './blacklist'
-import {getAccount, getProfile, KoaContext, redisClient, uploadStore} from './common'
+import {getAccount, getProfile, getRatelimit, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
 
@@ -29,16 +28,17 @@ if (new URL('http://blä.se').toString() !== 'http://xn--bl-wia.se/') {
  */
 async function parseMultipart(request: http.IncomingMessage) {
     return new Promise<{stream: NodeJS.ReadableStream, mime: string, name: string}>((resolve, reject) => {
-        const form = new Busboy({
+        const form = Busboy({
             headers: request.headers,
             limits: {
                 files: 1,
                 fileSize: MAX_IMAGE_SIZE,
             }
         })
-        form.on('file', (field, stream, name, encoding, mime) => {
-            name = name.replace(/[^a-z0-9.]/gi, '_').replace(/_{2,}/g, '_').toLowerCase()
-            resolve({stream, mime, name})
+        form.on('file', (field, stream, info) => {
+            const raw = info.filename || ''
+            const name = raw.replace(/[^a-z0-9.]/gi, '_').replace(/_{2,}/g, '_').toLowerCase()
+            resolve({stream, mime: info.mimeType, name})
         })
         form.on('error', reject)
         form.on('finish', () => {
@@ -48,35 +48,6 @@ async function parseMultipart(request: http.IncomingMessage) {
     })
 }
 
-interface RateLimit {
-    remaining: number
-    reset: number
-    total: number
-}
-
-/**
- * Get ratelimit info for account name.
- */
-async function getRatelimit(account: string) {
-    return new Promise<any>((resolve, reject) => {
-        if (!redisClient) {
-            throw new Error('Redis not configured')
-        }
-        const limit = new RateLimiter({
-            db: redisClient,
-            duration: UPLOAD_LIMITS.duration,
-            id: account,
-            max: UPLOAD_LIMITS.max,
-        })
-        limit.get((error, result) => {
-            if (error) {
-                reject(error)
-            } else {
-                resolve(result)
-            }
-        })
-    })
-}
 const b64uLookup = {
     '/': '_', _: '/', '+': '-', '-': '+', '=': '.', '.': '=',
 }
@@ -138,7 +109,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         && signedMessage.app
     ) {
 
-        const signature = tokenObj.signatures[0];
+        const signature = tokenObj.signatures[0]
         const message = JSON.stringify({
                 signed_message: signedMessage,
                 authors: tokenObj.authors,
@@ -185,14 +156,14 @@ export async function uploadHsHandler(ctx: KoaContext) {
         APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
         if (redisClient) {
-            let limit: RateLimit
             try {
-                limit = await getRatelimit(account.name)
+                const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+                APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
             } catch (error) {
+                if (error instanceof APIError) throw error
                 ctx.log.error(error, 'unable to enforce upload rate limits')
                 throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
             }
-            APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         }
 
         // Use get_profile for accurate reputation (get_accounts returns incorrect data)
@@ -344,14 +315,14 @@ export async function uploadHandler(ctx: KoaContext) {
     APIError.assert(!accountBlacklist.includes(account.name), APIError.Code.Blacklisted)
 
     if (redisClient) {
-        let limit: RateLimit
         try {
-            limit = await getRatelimit(account.name)
+            const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+            APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         } catch (error) {
+            if (error instanceof APIError) throw error
             ctx.log.error(error, 'unable to enforce upload rate limits')
             throw new APIError({ code: APIError.Code.InternalError, message: 'Rate limiting unavailable' })
         }
-        APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
     }
 
     // Use get_profile for accurate reputation (get_accounts returns incorrect data)

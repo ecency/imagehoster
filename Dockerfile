@@ -1,4 +1,4 @@
-FROM node:18-bullseye AS build
+FROM node:20-bookworm AS build
 
 WORKDIR /app
 
@@ -23,15 +23,15 @@ COPY . .
 RUN make lib
 
 # --- Runtime image ---
-FROM node:18-slim
+FROM node:20-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-  libvips \
+  libvips42 \
   libheif1 \
   libde265-0 \
-  libdav1d6 \
+  libdav1d7 \
   libaom3 \
   wget \
   && rm -rf /var/lib/apt/lists/*

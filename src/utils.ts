@@ -1,14 +1,13 @@
 /** Misc utils. */
 
 import { AbstractBlobStore, BlobKey } from 'abstract-blob-store'
-import * as cloudflare from 'cloudflare'
-import * as config from 'config'
+import config from 'config'
 import { createHash } from 'crypto'
 import * as fileType from 'file-type'
 import * as http from 'http'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
-import * as Sharp from 'sharp'
+import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { imageBlacklist } from './blacklist'
@@ -90,12 +89,19 @@ export function storeExists(store: AbstractBlobStore, key: BlobKey) {
     })
 }
 
-export function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    // Use direct buffer upload for S3 stores (avoids stream double-buffering)
+    if ('putBuffer' in store && typeof (store as any).putBuffer === 'function') {
+        const k = typeof key === 'string' ? key : (key as any).key
+        await (store as any).putBuffer(k, buf)
+        return { key: k }
+    }
     return new Promise((resolve, reject) => {
         const stream = store.createWriteStream(key, (error, metadata) => {
             if (error) { reject(error) } else { resolve(metadata) }
         })
-        stream.write(data)
+        stream.write(buf)
         stream.end()
     })
 }
@@ -250,10 +256,19 @@ export function purgeCache(value: string) {
     }
     const CF_KEY = config.get('cloudflare_token') as string
     const CF_ZONE = config.get('cloudflare_zone') as string
-    const cf = new cloudflare({ token: CF_KEY })
-    cf.zones.purgeCache(CF_ZONE, { files: [value] }).catch((err) => {
-        // Log but don't throw - cache purging is not critical
-        logger.error({ err }, 'Cloudflare cache purge failed')
+    fetch(`https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${CF_KEY}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ files: [value] }),
+    }).then((res) => {
+        if (!res.ok) {
+            logger.error({ status: res.status, url: value }, 'Cloudflare cache purge HTTP error')
+        }
+    }).catch((err) => {
+        logger.error({ err }, 'Cloudflare cache purge network error')
     })
 }
 

@@ -1,6 +1,6 @@
 import {AbstractBlobStore} from 'abstract-blob-store'
-import * as etag from 'etag'
-import * as Sharp from 'sharp'
+import etag from 'etag'
+import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {KoaContext} from './common'
 import {getImageKey, mimeMagic, OutputFormat, ProxyOptions, ScalingMode, storeExists, storeWrite} from './utils'

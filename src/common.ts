@@ -1,15 +1,15 @@
 /** Misc shared instances. */
 import {Client, ExtendedAccount} from '@hiveio/dhive'
 import {AbstractBlobStore} from 'abstract-blob-store'
-import * as config from 'config'
-import {IRouterContext} from 'koa-router'
-import * as Redis from 'redis'
+import config from 'config'
+import { RouterContext } from '@koa/router'
+import { createClient } from 'redis'
 import {cache} from './cache'
 import {APIError} from './error'
 import {logger} from './logger'
 
 /** Koa context extension with explicit property types. */
-export interface KoaContext extends IRouterContext {
+export interface KoaContext extends RouterContext {
     log: typeof logger
     tag: (metadata: any) => void
     req_id: string
@@ -69,7 +69,7 @@ export const getProfile = async (user, isCached= true) => {
       try {
         profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
         cache.set(`${user}:profile`, profile, 30)
-      } catch (e) {
+      } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
         if (e.info && JSON.stringify(e.info).includes('does not exist')) {
           throw e
@@ -80,23 +80,79 @@ export const getProfile = async (user, isCached= true) => {
     return profile
 }
 
-/** Redis client. */
-export let redisClient: Redis.RedisClient | undefined
+/** Redis client — connection is awaited before use. */
+export let redisClient: ReturnType<typeof createClient> | undefined
+export let redisReady: Promise<void> | undefined
 if (config.has('redis_url') && config.get('redis_url')) {
     const redisOptions: any = {
-        url: config.get('redis_url') as string
+        url: config.get('redis_url') as string,
     }
     if (config.has('redis_password')) {
         redisOptions.password = config.get('redis_password') as string
     }
-    redisClient = Redis.createClient(redisOptions)
+    redisClient = createClient(redisOptions)
+    redisClient.on('error', (err) => {
+        logger.error({ err }, 'Redis client error')
+    })
+    redisReady = redisClient.connect().then(() => {
+        logger.info('Redis connected')
+    }).catch((err) => {
+        logger.error({ err }, 'Redis initial connection failed, rate limiting will fail until reconnect')
+    })
 } else {
     logger.warn('redis not configured, will not rate-limit uploads')
 }
 
+/** Sliding-window rate limiter using Redis sorted sets (no legacy mode needed). */
+export interface RateLimit {
+    remaining: number
+    reset: number
+    total: number
+}
+
+export async function getRatelimit(account: string, max: number, duration: number): Promise<RateLimit> {
+    if (!redisClient) {
+        throw new Error('Redis not configured')
+    }
+    if (redisReady) {
+        await redisReady
+    }
+    if (!redisClient.isReady) {
+        throw new Error('Redis not connected')
+    }
+    const key = `limit:${account}`
+    const now = Date.now() * 1000 // microseconds
+    const start = now - duration * 1000
+    const member = `${now}:${Math.random().toString(36).slice(2, 10)}`
+
+    const results = await redisClient.multi()
+        .zRemRangeByScore(key, 0, start)
+        .zCard(key)
+        .zAdd(key, { score: now, value: member })
+        .zRange(key, 0, 0)
+        .zRange(key, -max, -max)
+        .zRemRangeByRank(key, 0, -(max + 1))
+        .pExpire(key, duration)
+        .exec()
+
+    const count = results[1] as number
+    const oldest = parseInt(results[3] as any) || now
+    const oldestInRange = parseInt(results[4] as any)
+    const resetMicro = (isNaN(oldestInRange) ? oldest : oldestInRange) + duration * 1000
+
+    return {
+        remaining: count < max ? max - count : 0,
+        reset: Math.floor(resetMicro / 1000000),
+        total: max,
+    }
+}
+
 /** Blob storage. */
 
-let S3Client: any
+import { S3Client } from '@aws-sdk/client-s3'
+import { S3BlobStore } from './s3-store'
+
+let s3Client: S3Client | undefined
 function loadStore(key: string): AbstractBlobStore {
     const conf = config.get(key) as any
     if (conf.type === 'fs') {
@@ -106,28 +162,21 @@ function loadStore(key: string): AbstractBlobStore {
         logger.warn('using memory store for %s', key)
         return require('abstract-blob-store')()
     } else if (conf.type === 's3') {
-        if (!S3Client) {
-            const aws = require('aws-sdk')
-
-            // Use new unified credentials, fallback to legacy credentials for backward compatibility
-            const accessKeyId = config.get('S3_ACCESS_KEY_ID')
-            const secretAccessKey = config.get('S3_SECRET_ACCESS_KEY')
-            const endpoint = config.get('S3_ENDPOINT')
-            const region = config.get('S3_REGION')
-
-            S3Client = new aws.S3({
-                accessKeyId,
-                secretAccessKey,
-                endpoint,
-                region,
-                s3ForcePathStyle: true, // needed with minio?
-                signatureVersion: 'v4'
+        if (!s3Client) {
+            s3Client = new S3Client({
+                credentials: {
+                    accessKeyId: config.get('S3_ACCESS_KEY_ID') as string,
+                    secretAccessKey: config.get('S3_SECRET_ACCESS_KEY') as string,
+                },
+                endpoint: config.get('S3_ENDPOINT') as string,
+                region: config.get('S3_REGION') as string,
+                forcePathStyle: true,
             })
         }
-        return require('s3-blob-store')({
-            client: S3Client,
+        return new S3BlobStore({
+            client: s3Client,
             bucket: conf.get('s3_bucket'),
-        })
+        }) as any
     } else {
         throw new Error(`Invalid storage type: ${ conf.type }`)
     }

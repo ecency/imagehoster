@@ -1,13 +1,13 @@
 /** Serve files from upload store. */
 
-import * as config from 'config'
+import config from 'config'
 import {readStream, storeWrite} from './utils'
 import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
 import {imageBlacklist} from './blacklist'
 import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, SERVICE_BASE_URL} from './constants'
 import {fetchUrl, NeedleResponse} from './utils'
-import * as Sharp from 'sharp'
+import Sharp from 'sharp'
 
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
 
@@ -39,9 +39,9 @@ export async function serveHandler(ctx: KoaContext) {
     APIError.assertParams(ctx.params, ['hash'])
 
     let _hash = ctx.params['hash']
-    let _filename = ctx.params['filename']
+    const _filename = ctx.params['filename']
 
-    let urlString = `${SERVICE_BASE_URL}/${_hash}/${_filename}`
+    const urlString = `${SERVICE_BASE_URL}/${_hash}/${_filename}`
     if (imageBlacklist.includes(urlString) || isEmptyImageUrl(urlString)) {
         _hash = DEFAULT_AVATAR_HASH
     }

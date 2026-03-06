@@ -1,9 +1,8 @@
 /** Serve user avatars. */
 
-import { Account } from '@hiveio/dhive'
 import { AbstractBlobStore } from 'abstract-blob-store'
-import * as config from 'config'
-import * as etag from 'etag'
+import config from 'config'
+import etag from 'etag'
 import {URL} from 'url'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {resizeImageWithOptions} from './image-resizer'
@@ -155,7 +154,6 @@ async function handleAvatar(ctx: KoaContext) {
   } else {
     ctx.tag({ store: 'fetch' })
     try {
-      // tslint:disable-next-line:max-line-length
       const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultAvatar, ctx.log)
       const res = result.res
       isFetchFallback = result.isFallback

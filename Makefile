@@ -20,7 +20,7 @@ reports:
 coverage: node_modules reports
 	NODE_ENV=test nyc -r html -r text -e .ts -i ts-node/register \
 		--report-dir reports/coverage \
-		mocha --reporter nyan --require ts-node/register test/*.ts
+		mocha --reporter nyan --require ts-node/register --exit test/*.ts
 
 .PHONY: devserver
 devserver: node_modules
@@ -28,23 +28,23 @@ devserver: node_modules
 
 .PHONY: test
 test: node_modules
-	@NODE_ENV=test mocha --require ts-node/register test/*.ts --grep '$(grep)'
+	@NODE_ENV=test mocha --require ts-node/register test/*.ts --exit --grep '$(grep)'
 
 .PHONY: ci-test
 ci-test: node_modules reports
 	yarn audit
-	tslint -p tsconfig.json -c tslint.json
+	eslint 'src/**/*.ts'
 	NODE_ENV=test nyc -r lcov -e .ts -i ts-node/register \
 		--report-dir reports/coverage \
 		mocha --require ts-node/register \
 		--timeout 30000 \
 		--reporter $$([ -n "$$CI" ] && echo "mocha-junit-reporter" || echo "tap") \
 		--reporter-options mochaFile=./reports/unit-tests/junit.xml \
-		test/*.ts
+		--exit test/*.ts
 
 .PHONY: lint
 lint: node_modules
-	tslint -p tsconfig.json -c tslint.json -t stylish --fix
+	eslint 'src/**/*.ts' --fix
 
 node_modules: package.json
 	yarn install --non-interactive --frozen-lockfile

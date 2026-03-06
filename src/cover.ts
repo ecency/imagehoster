@@ -1,8 +1,8 @@
 /** Serve user covers. */
 
 import { AbstractBlobStore } from 'abstract-blob-store'
-import * as config from 'config'
-import * as etag from 'etag'
+import config from 'config'
+import etag from 'etag'
 import {URL} from 'url'
 
 import { getProfile, KoaContext, proxyStore, uploadStore } from './common'
@@ -153,7 +153,6 @@ async function handleCover(ctx: KoaContext) {
   } else {
     ctx.tag({ store: 'fetch' })
     try {
-      // tslint:disable-next-line:max-line-length
       const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultCover, ctx.log)
       const res = result.res
       isFetchFallback = result.isFallback

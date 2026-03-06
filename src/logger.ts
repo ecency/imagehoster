@@ -1,10 +1,9 @@
 /** Logging things */
 
 import * as Bunyan from 'bunyan'
-import * as config from 'config'
+import config from 'config'
 
 import {KoaContext} from './common'
-import {APIError} from './error'
 
 const level: Bunyan.LogLevel = config.get('log_level')
 const output: string = config.get('log_output')

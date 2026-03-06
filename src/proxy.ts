@@ -1,11 +1,11 @@
 /** Resizing image proxy. */
 
 import {AbstractBlobStore} from 'abstract-blob-store'
-import * as config from 'config'
+import config from 'config'
 import {createHash} from 'crypto'
-import * as etag from 'etag'
+import etag from 'etag'
 import * as multihash from 'multihashes'
-import * as Sharp from 'sharp'
+import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
