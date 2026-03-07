@@ -23,6 +23,7 @@ export class S3BlobStore {
             Key: key,
         })).then((res) => {
             const body = res.Body as Readable
+            body.on('error', (err) => passthrough.destroy(err))
             body.pipe(passthrough)
         }).catch((err) => {
             passthrough.destroy(err)

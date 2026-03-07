@@ -1,12 +1,16 @@
 /** Misc shared instances. */
 import {Client, ExtendedAccount} from '@hiveio/dhive'
 import {AbstractBlobStore} from 'abstract-blob-store'
+import cluster from 'cluster'
 import config from 'config'
 import { RouterContext } from '@koa/router'
 import { createClient } from 'redis'
 import {cache} from './cache'
 import {APIError} from './error'
 import {logger} from './logger'
+
+const numWorkers = Number.parseInt(config.get('num_workers'))
+const isPrimaryOnly = cluster.isPrimary && numWorkers > 1
 
 /** Koa context extension with explicit property types. */
 export interface KoaContext extends RouterContext {
@@ -80,10 +84,10 @@ export const getProfile = async (user, isCached= true) => {
     return profile
 }
 
-/** Redis client — connection is awaited before use. */
+/** Redis client — only created in worker processes. */
 export let redisClient: ReturnType<typeof createClient> | undefined
 export let redisReady: Promise<void> | undefined
-if (config.has('redis_url') && config.get('redis_url')) {
+if (!isPrimaryOnly && config.has('redis_url') && config.get('redis_url')) {
     const redisOptions: any = {
         url: config.get('redis_url') as string,
     }
@@ -99,7 +103,7 @@ if (config.has('redis_url') && config.get('redis_url')) {
     }).catch((err) => {
         logger.error({ err }, 'Redis initial connection failed, rate limiting will fail until reconnect')
     })
-} else {
+} else if (!isPrimaryOnly) {
     logger.warn('redis not configured, will not rate-limit uploads')
 }
 
@@ -136,8 +140,10 @@ export async function getRatelimit(account: string, max: number, duration: numbe
         .exec()
 
     const count = results[1] as number
-    const oldest = parseInt(results[3] as any) || now
-    const oldestInRange = parseInt(results[4] as any)
+    const oldestArr = results[3] as string[]
+    const rangeArr = results[4] as string[]
+    const oldest = oldestArr.length > 0 ? parseInt(oldestArr[0], 10) : now
+    const oldestInRange = rangeArr.length > 0 ? parseInt(rangeArr[0], 10) : NaN
     const resetMicro = (isNaN(oldestInRange) ? oldest : oldestInRange) + duration * 1000
 
     return {
@@ -147,7 +153,7 @@ export async function getRatelimit(account: string, max: number, duration: numbe
     }
 }
 
-/** Blob storage. */
+/** Blob storage — only initialized in worker processes. */
 
 import { S3Client } from '@aws-sdk/client-s3'
 import { S3BlobStore } from './s3-store'
@@ -182,5 +188,6 @@ function loadStore(key: string): AbstractBlobStore {
     }
 }
 
-export const uploadStore = loadStore('upload_store')
-export const proxyStore = loadStore('proxy_store')
+// Primary process only manages workers — no stores needed
+export const uploadStore = isPrimaryOnly ? (undefined as any as AbstractBlobStore) : loadStore('upload_store')
+export const proxyStore = isPrimaryOnly ? (undefined as any as AbstractBlobStore) : loadStore('proxy_store')
