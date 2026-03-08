@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libvips42 \
   libheif1 \
   libde265-0 \
-  libdav1d7 \
+  libdav1d6 \
   libaom3 \
   wget \
   && rm -rf /var/lib/apt/lists/*
@@ -41,8 +41,6 @@ RUN groupadd -r app && useradd -r -g app -d /app app && chown app:app /app
 COPY --from=build --chown=app:app /app/lib lib
 COPY --from=build --chown=app:app /app/config config
 COPY --from=build --chown=app:app /app/node_modules node_modules
-COPY --from=build --chown=app:app /app/healthCheck.ts healthCheck.ts
-
 USER app
 
 EXPOSE 8800
