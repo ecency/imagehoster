@@ -32,6 +32,6 @@ ENV PORT=8800
 ENV NODE_ENV=production
 
 HEALTHCHECK --interval=20s --timeout=10s --start-period=5s \
-  CMD wget -nv -t1 --spider "http://localhost:8800/healthcheck" || exit 1
+  CMD /bin/sh -c 'wget -nv -t1 --spider "http://localhost:${PORT}/healthcheck" || exit 1'
 
 CMD ["node", "lib/app.js"]
