@@ -9,17 +9,27 @@ import sharp from 'sharp'
 import {app} from './../src/app'
 
 describe('avatar', function() {
-    const port = 63205
+    let port: number
+    let imagePort: number
     const server = http.createServer(app.callback())
-    const imagePort = port + 1
 
     // Serve test.jpg as avatar image
     const imageServer = http.createServer((req, res) => {
         fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
     })
 
-    before((done) => { server.listen(port, 'localhost', done) })
-    before((done) => { imageServer.listen(imagePort, 'localhost', done) })
+    before((done) => {
+        server.listen(0, 'localhost', () => {
+            port = (server.address() as any).port
+            done()
+        })
+    })
+    before((done) => {
+        imageServer.listen(0, 'localhost', () => {
+            imagePort = (imageServer.address() as any).port
+            done()
+        })
+    })
     after((done) => { server.close(done) })
     after((done) => { imageServer.close(done) })
 

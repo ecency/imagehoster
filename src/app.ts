@@ -64,7 +64,10 @@ async function main() {
     }
 
     const server = http.createServer(app.callback())
-    const listen = (port: any) => new Promise<void>((resolve) => server.listen(port, resolve))
+    const listen = (port: any) => new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(port, resolve)
+    })
     const close = () => new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()))
 
     let numWorkers = Number.parseInt(config.get('num_workers'))

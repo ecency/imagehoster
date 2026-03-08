@@ -10,9 +10,9 @@ import {app} from './../src/app'
 import {base58Enc} from './../src/utils'
 
 describe('proxy formats', function() {
-    const port = 63205
+    let port: number
+    let imagePort: number
     const server = http.createServer(app.callback())
-    const imagePort = port + 1
 
     let serveFile = 'test.jpg'
     const imageServer = http.createServer((req, res) => {
@@ -25,8 +25,18 @@ describe('proxy formats', function() {
         }
     })
 
-    before((done) => { server.listen(port, 'localhost', done) })
-    before((done) => { imageServer.listen(imagePort, 'localhost', done) })
+    before((done) => {
+        server.listen(0, 'localhost', () => {
+            port = (server.address() as any).port
+            done()
+        })
+    })
+    before((done) => {
+        imageServer.listen(0, 'localhost', () => {
+            imagePort = (imageServer.address() as any).port
+            done()
+        })
+    })
     after((done) => { server.close(done) })
     after((done) => { imageServer.close(done) })
 

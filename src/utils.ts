@@ -266,6 +266,8 @@ export function purgeCache(value: string) {
     }).then((res) => {
         if (!res.ok) {
             logger.error({ status: res.status, url: value }, 'Cloudflare cache purge HTTP error')
+        } else {
+            logger.debug({ url: value }, 'Cloudflare cache purged')
         }
     }).catch((err) => {
         logger.error({ err }, 'Cloudflare cache purge network error')

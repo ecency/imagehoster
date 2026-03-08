@@ -49,5 +49,8 @@
     "onchange": "^7.1.0",
     "ts-node": "^10.9.2",
     "typescript": "~5.7.0"
+  },
+  "resolutions": {
+    "@types/koa": "^2.15.0"
   }
 }

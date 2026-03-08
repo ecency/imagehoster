@@ -11,10 +11,15 @@ import {app} from './../src/app'
 import {uploadImage} from './upload'
 
 describe('serve', function() {
-    const port = 63205
+    let port: number
     const server = http.createServer(app.callback())
 
-    before((done) => { server.listen(port, 'localhost', done) })
+    before((done) => {
+        server.listen(0, 'localhost', () => {
+            port = (server.address() as any).port
+            done()
+        })
+    })
     after((done) => { server.close(done) })
 
     it('should serve uploaded image by hash', async function() {
@@ -65,8 +70,9 @@ describe('serve', function() {
     })
 
     it('should return 404 for non-existent hash', async function() {
-        this.slow(2000)
-        this.timeout(15000)
+        // This test makes external HTTP fallback calls, so needs generous timeout
+        this.slow(5000)
+        this.timeout(30000)
         const res = await needle('get', `http://localhost:${port}/DQmNonExistentHashThatDoesNotExistAnywhere12345/test.jpg`)
         assert.equal(res.statusCode, 404)
     })

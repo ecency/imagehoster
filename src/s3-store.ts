@@ -22,6 +22,10 @@ export class S3BlobStore {
             Bucket: this.bucket,
             Key: key,
         })).then((res) => {
+            if (!res.Body || typeof (res.Body as any).pipe !== 'function') {
+                passthrough.destroy(new Error('S3 response body is not a readable stream'))
+                return
+            }
             const body = res.Body as Readable
             body.on('error', (err) => passthrough.destroy(err))
             body.pipe(passthrough)

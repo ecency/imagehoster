@@ -36,10 +36,14 @@ RUN apt-get update && apt-get install -y \
   wget \
   && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /app/lib lib
-COPY --from=build /app/config config
-COPY --from=build /app/node_modules node_modules
-COPY --from=build /app/healthCheck.ts healthCheck.ts
+RUN groupadd -r app && useradd -r -g app -d /app app && chown app:app /app
+
+COPY --from=build --chown=app:app /app/lib lib
+COPY --from=build --chown=app:app /app/config config
+COPY --from=build --chown=app:app /app/node_modules node_modules
+COPY --from=build --chown=app:app /app/healthCheck.ts healthCheck.ts
+
+USER app
 
 EXPOSE 8800
 ENV PORT=8800

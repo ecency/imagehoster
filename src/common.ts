@@ -189,5 +189,5 @@ function loadStore(key: string): AbstractBlobStore {
 }
 
 // Primary process only manages workers — no stores needed
-export const uploadStore = isPrimaryOnly ? (undefined as any as AbstractBlobStore) : loadStore('upload_store')
-export const proxyStore = isPrimaryOnly ? (undefined as any as AbstractBlobStore) : loadStore('proxy_store')
+export const uploadStore: AbstractBlobStore = isPrimaryOnly ? undefined! : loadStore('upload_store')
+export const proxyStore: AbstractBlobStore = isPrimaryOnly ? undefined! : loadStore('proxy_store')
