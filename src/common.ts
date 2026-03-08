@@ -25,7 +25,7 @@ export interface KoaContext extends RouterContext {
     referrer?: string // Koa request referrer alias
 }
 
-/** Steemd (jussi) RPC client. */
+/** hived (jussi) RPC client. */
 export const rpcClient = new Client([config.get('rpc_node'),
       'https://api.deathwing.me',
       'https://rpc.mahdiyari.info',
@@ -162,8 +162,9 @@ let s3Client: S3Client | undefined
 function loadStore(key: string): AbstractBlobStore {
     const conf = config.get(key) as any
     if (conf.type === 'fs') {
-        logger.warn('using file store for %s', key)
-        return require('fs-blob-store')('/mnt/eproxy-bucket')
+        const fsPath = conf.get('s3_bucket') || '/mnt/eproxy-bucket'
+        logger.warn('using file store for %s at %s', key, fsPath)
+        return require('fs-blob-store')(fsPath)
     } else if (conf.type === 'memory') {
         logger.warn('using memory store for %s', key)
         return require('abstract-blob-store')()

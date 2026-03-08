@@ -5,15 +5,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
   build-essential \
   git \
-  curl \
-  libvips-dev \
-  libheif-dev \
-  libde265-dev \
-  libaom-dev \
-  libx265-dev \
-  libdav1d-dev \
-  pkg-config \
-  wget \
+  python3 \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json yarn.lock ./
@@ -23,16 +15,11 @@ COPY . .
 RUN make lib
 
 # --- Runtime image ---
-FROM node:20-slim
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  libvips42 \
-  libheif1 \
-  libde265-0 \
-  libdav1d6 \
-  libaom3 \
   wget \
   && rm -rf /var/lib/apt/lists/*
 
