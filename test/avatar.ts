@@ -2,21 +2,13 @@ import 'mocha'
 import assert from 'assert'
 import * as http from 'http'
 import needle from 'needle'
-import * as path from 'path'
-import * as fs from 'fs'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
 
 describe('avatar', function() {
     let port: number
-    let imagePort: number
     const server = http.createServer(app.callback())
-
-    // Serve test.jpg as avatar image
-    const imageServer = http.createServer((req, res) => {
-        fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
-    })
 
     before((done) => {
         server.listen(0, 'localhost', () => {
@@ -24,14 +16,7 @@ describe('avatar', function() {
             done()
         })
     })
-    before((done) => {
-        imageServer.listen(0, 'localhost', () => {
-            imagePort = (imageServer.address() as any).port
-            done()
-        })
-    })
     after((done) => { server.close(done) })
-    after((done) => { imageServer.close(done) })
 
     it('should serve avatar for known user', async function() {
         this.slow(2000)

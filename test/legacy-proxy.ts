@@ -20,17 +20,15 @@ describe('legacy-proxy', function() {
     before((done) => {
         server.listen(0, 'localhost', () => {
             port = (server.address() as any).port
-            done()
+            imageServer.listen(0, 'localhost', () => {
+                imagePort = (imageServer.address() as any).port
+                done()
+            })
         })
     })
-    before((done) => {
-        imageServer.listen(0, 'localhost', () => {
-            imagePort = (imageServer.address() as any).port
-            done()
-        })
+    after((done) => {
+        server.close(() => imageServer.close(done))
     })
-    after((done) => { server.close(done) })
-    after((done) => { imageServer.close(done) })
 
     it('should redirect with correct dimensions in URL', async function() {
         const res = await needle('get',

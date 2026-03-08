@@ -27,7 +27,7 @@ FROM node:20-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
   libvips42 \
   libheif1 \
   libde265-0 \

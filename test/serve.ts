@@ -8,6 +8,8 @@ import * as crypto from 'crypto'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
+import {errorMiddleware} from './../src/error'
+import {serveHandler} from './../src/serve'
 import {uploadImage} from './upload'
 
 describe('serve', function() {
@@ -78,9 +80,16 @@ describe('serve', function() {
     })
 
     it('should reject non-GET methods', async function() {
-        // POST to /:hash/:filename matches /:username/:signature (upload route)
-        // so it returns an upload error, not 405
-        const res = await needle('post', `http://localhost:${port}/DQmSomeHash/test.jpg`, {})
-        assert(res.statusCode >= 400, 'should return error status')
+        const ctx: any = {
+            method: 'POST',
+            params: { hash: 'DQmSomeHash', filename: 'test.jpg' },
+            tag() {},
+            app: { emit() {} },
+        }
+
+        await errorMiddleware(ctx, () => serveHandler(ctx))
+
+        assert.equal(ctx.status, 405)
+        assert.equal(ctx.body.error.toJSON().name, 'invalid_method')
     })
 })

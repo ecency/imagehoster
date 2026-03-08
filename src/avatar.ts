@@ -21,6 +21,7 @@ import {
   ScalingMode,
   storeExists,
   storeRemove,
+  storeRemoveByPrefix,
   storeWrite,
   supportsAvif,
   supportsWebP,
@@ -64,6 +65,7 @@ async function handleAvatar(ctx: KoaContext) {
   const avatarRequestPurgeUrl = (() => {
     const purgeUrl = new URL(ctx.request.url, new URL(config.get('service_url')).origin)
     purgeUrl.searchParams.delete('invalidate')
+    purgeUrl.searchParams.delete('ignorecache')
     return purgeUrl.toString()
   })()
 
@@ -126,11 +128,10 @@ async function handleAvatar(ctx: KoaContext) {
   if (invalidate) {
     ctx.log.debug('invalidate requested, removing cached images')
     try {
-      if (await storeExists(proxyStore, imageKey)) {
-        await storeRemove(proxyStore, imageKey)
-      }
+      const removed = await storeRemoveByPrefix(proxyStore, `${origKey}_`)
+      ctx.log.debug({ imagePrefix: `${origKey}_`, removed }, 'removed resized avatar variants on invalidate')
     } catch (err) {
-      ctx.log.error({ err, imageKey }, 'unable to remove resized avatar on invalidate')
+      ctx.log.error({ err, imagePrefix: `${origKey}_` }, 'unable to remove resized avatar on invalidate')
     }
     try {
       if (!origIsUpload && await storeExists(origStore, origKey)) {

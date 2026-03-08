@@ -14,8 +14,8 @@ function createMockRedis(state: { count: number; oldest?: string; rangeEntry?: s
         pExpire: () => multiChain,
         exec: async () => [
             0,                                              // [0] zRemRangeByScore result
-            state.count,                                    // [1] zCard result
-            1,                                              // [2] zAdd result
+            1,                                              // [1] zAdd result
+            state.count,                                    // [2] zCard result (post-add)
             state.oldest ? [state.oldest] : [],             // [3] zRange 0 0
             state.rangeEntry ? [state.rangeEntry] : [],     // [4] zRange -max -max
             0,                                              // [5] zRemRangeByRank

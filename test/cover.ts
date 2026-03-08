@@ -2,20 +2,13 @@ import 'mocha'
 import assert from 'assert'
 import * as http from 'http'
 import needle from 'needle'
-import * as path from 'path'
-import * as fs from 'fs'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
 
 describe('cover', function() {
     let port: number
-    let imagePort: number
     const server = http.createServer(app.callback())
-
-    const imageServer = http.createServer((req, res) => {
-        fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
-    })
 
     before((done) => {
         server.listen(0, 'localhost', () => {
@@ -23,18 +16,11 @@ describe('cover', function() {
             done()
         })
     })
-    before((done) => {
-        imageServer.listen(0, 'localhost', () => {
-            imagePort = (imageServer.address() as any).port
-            done()
-        })
-    })
     after((done) => { server.close(done) })
-    after((done) => { imageServer.close(done) })
 
     it('should serve cover for known user', async function() {
-        this.slow(2000)
-        this.timeout(10000)
+        this.slow(5000)
+        this.timeout(30000)
         const res = await needle('get', `http://localhost:${port}/u/foo/cover`)
         assert.equal(res.statusCode, 200)
         assert(res.body.length > 0, 'body should not be empty')

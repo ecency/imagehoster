@@ -19,7 +19,20 @@ function createMockS3() {
             switch (name) {
                 case 'PutObjectCommand': {
                     const body = command.input.Body
-                    store.set(`${bucket}/${key}`, Buffer.isBuffer(body) ? body : Buffer.from(body))
+                    if (Buffer.isBuffer(body)) {
+                        store.set(`${bucket}/${key}`, body)
+                    } else if (body && typeof body.pipe === 'function') {
+                        // Stream body — collect chunks
+                        const chunks: Buffer[] = []
+                        await new Promise<void>((resolve, reject) => {
+                            body.on('data', (chunk: Buffer) => chunks.push(chunk))
+                            body.on('end', () => resolve())
+                            body.on('error', reject)
+                        })
+                        store.set(`${bucket}/${key}`, Buffer.concat(chunks))
+                    } else {
+                        store.set(`${bucket}/${key}`, Buffer.from(body))
+                    }
                     return {}
                 }
                 case 'GetObjectCommand': {
@@ -109,12 +122,15 @@ describe('S3BlobStore', function() {
             // Mock an S3 response where body stream errors mid-transfer
             const errorS3 = {
                 send: async (command: any) => {
+                    let pushed = false
                     const body = new Readable({
                         read() {
-                            this.push(Buffer.from('partial'))
-                            this.push(null)
-                            // Emit error after data is flushed
-                            process.nextTick(() => this.destroy(new Error('S3 connection reset')))
+                            if (!pushed) {
+                                pushed = true
+                                this.push(Buffer.from('partial'))
+                                // Destroy with error instead of ending — no push(null)
+                                process.nextTick(() => this.destroy(new Error('S3 connection reset')))
+                            }
                         }
                     })
                     return { Body: body }

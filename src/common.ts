@@ -131,15 +131,15 @@ export async function getRatelimit(account: string, max: number, duration: numbe
 
     const results = await redisClient.multi()
         .zRemRangeByScore(key, 0, start)
-        .zCard(key)
         .zAdd(key, { score: now, value: member })
+        .zCard(key)
         .zRange(key, 0, 0)
         .zRange(key, -max, -max)
         .zRemRangeByRank(key, 0, -(max + 1))
         .pExpire(key, duration)
         .exec()
 
-    const count = results[1] as number
+    const count = results[2] as number
     const oldestArr = results[3] as string[]
     const rangeArr = results[4] as string[]
     const oldest = oldestArr.length > 0 ? parseInt(oldestArr[0], 10) : now
