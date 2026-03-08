@@ -28,6 +28,8 @@ export const AcceptedContentTypes = [
     'image/bmp',
     'image/apng',
     'image/avif',
+    'image/heic',
+    'image/heif',
 ]
 
 export function parseBool(input: any): boolean {

@@ -3,7 +3,7 @@ import etag from 'etag'
 import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {KoaContext} from './common'
-import {getImageKey, mimeMagic, OutputFormat, ProxyOptions, ScalingMode, storeExists, storeWrite} from './utils'
+import {getImageKey, mimeMagic, OutputFormat, ProxyOptions, readStream, ScalingMode, storeExists, storeWrite} from './utils'
 
 export async function serveOrBuildFallbackImage(
     ctx: KoaContext,
@@ -15,16 +15,23 @@ export async function serveOrBuildFallbackImage(
         mode: ScalingMode
         format: OutputFormat
     },
-    keyPrefix = 'default-avatar'
+    keyPrefix = 'default-avatar',
+    alsoStoreAs?: string
 ) {
     ctx.tag({handler: 'fallback'})
     const fallbackKey = getImageKey(keyPrefix, options as ProxyOptions)
     ctx.set('ETag', etag(fallbackKey))
     ctx.log.error({ fallbackKey, msg: 'serveOrBuildFallbackImage, falling back to default'})
 
-    // If already exists in store
+    // If already exists in store, serve and also cache under alsoStoreAs if needed
     if (await storeExists(store, fallbackKey)) {
         ctx.log.error('streaming fallback %s from store', fallbackKey)
+        if (alsoStoreAs && !await storeExists(store, alsoStoreAs)) {
+            try {
+                const buf = await readStream(store.createReadStream(fallbackKey))
+                await storeWrite(store, alsoStoreAs, buf)
+            } catch (_e) { /* best effort */ }
+        }
         const file = store.createReadStream(fallbackKey)
         const { head, stream } = await streamHead(file, { bytes: 16384 })
         const mimeType = await mimeMagic(head)
@@ -76,6 +83,9 @@ export async function serveOrBuildFallbackImage(
     const rv = await image.toBuffer()
     try {
         await storeWrite(store, fallbackKey, rv)
+        if (alsoStoreAs) {
+            await storeWrite(store, alsoStoreAs, rv)
+        }
     } catch (err) {
         ctx.log.error({ err, fallbackKey }, 'failed to store fallback image')
         // Continue serving - storage failure shouldn't block response

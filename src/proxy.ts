@@ -505,7 +505,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 })
                 return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
-                })
+                }, 'default-avatar', imageKey)
             }
             isDefaultImage = true
             throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
