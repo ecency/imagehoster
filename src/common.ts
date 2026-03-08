@@ -169,12 +169,14 @@ function loadStore(key: string): AbstractBlobStore {
         return require('abstract-blob-store')()
     } else if (conf.type === 's3') {
         if (!s3Client) {
+            const rawEndpoint = config.get('S3_ENDPOINT') as string
+            const endpoint = rawEndpoint.includes('://') ? rawEndpoint : `https://${rawEndpoint}`
             s3Client = new S3Client({
                 credentials: {
                     accessKeyId: config.get('S3_ACCESS_KEY_ID') as string,
                     secretAccessKey: config.get('S3_SECRET_ACCESS_KEY') as string,
                 },
-                endpoint: config.get('S3_ENDPOINT') as string,
+                endpoint,
                 region: config.get('S3_REGION') as string,
                 forcePathStyle: true,
             })
