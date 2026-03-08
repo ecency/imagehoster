@@ -95,7 +95,8 @@ export class S3BlobStore {
     }
 
     async removeByPrefix(prefix: string): Promise<number> {
-        const keys: string[] = []
+        let count = 0
+        let chunk: string[] = []
         let continuationToken: string | undefined
 
         do {
@@ -106,22 +107,28 @@ export class S3BlobStore {
             }))
             for (const item of res.Contents || []) {
                 if (item.Key) {
-                    keys.push(item.Key)
+                    chunk.push(item.Key)
+                    if (chunk.length >= 1000) {
+                        await this.s3.send(new DeleteObjectsCommand({
+                            Bucket: this.bucket,
+                            Delete: { Objects: chunk.map((Key) => ({ Key })) },
+                        }))
+                        count += chunk.length
+                        chunk = []
+                    }
                 }
             }
             continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined
         } while (continuationToken)
 
-        for (let i = 0; i < keys.length; i += 1000) {
-            const chunk = keys.slice(i, i + 1000)
+        if (chunk.length > 0) {
             await this.s3.send(new DeleteObjectsCommand({
                 Bucket: this.bucket,
-                Delete: {
-                    Objects: chunk.map((Key) => ({ Key })),
-                },
+                Delete: { Objects: chunk.map((Key) => ({ Key })) },
             }))
+            count += chunk.length
         }
 
-        return keys.length
+        return count
     }
 }
