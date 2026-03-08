@@ -47,7 +47,7 @@ pm2 start ecosystem.config.js
 - **Framework:** Koa 2 + TypeScript
 - **Image Processing:** Sharp (libvips)
 - **Blockchain:** Hive (@hiveio/dhive)
-- **Storage:** S3-compatible (Backblaze B2, MinIO, AWS S3, DigitalOcean Spaces)
+- **Storage:** S3-compatible via AWS SDK v3 (Backblaze B2, MinIO, AWS S3, DigitalOcean Spaces)
 - **Cache:** Redis (rate limiting) + node-cache (RPC data) + LRU-cache (metadata)
 - **Logging:** Bunyan structured logging
 
@@ -115,8 +115,8 @@ GET /p/:url?width=W&height=H&mode=M&format=F
   - `cover` (default) - Center-crop to exact dimensions
   - `fit` - Aspect-preserved resize (no crop)
 - `format` - Output format:
-  - `match` (default) - Automatic based on Accept header
-  - `jpeg`, `png`, `webp` - Force specific format
+  - `match` (default) - Automatic based on Accept header (prefers AVIF > WebP > original)
+  - `jpeg`, `png`, `webp`, `avif` - Force specific format
 
 **Cache Control:**
 - `ignorecache=1` - Bypass cache for this request
@@ -207,7 +207,7 @@ Works with any S3-compatible provider (AWS S3, Backblaze B2, MinIO, DigitalOcean
 ```toml
 S3_ACCESS_KEY_ID = ''
 S3_SECRET_ACCESS_KEY = ''
-S3_ENDPOINT = 's3.us-west-000.backblazeb2.com'
+S3_ENDPOINT = 's3.us-west-000.backblazeb2.com'  # https:// auto-prepended if missing
 S3_REGION = 'us-west-000'
 
 [upload_store]
@@ -352,8 +352,8 @@ Workers share Redis rate limiter state and coordinate via node.js cluster module
 
 Multi-stage Dockerfile optimized for production:
 
-**Build stage:** Installs libvips, libheif, libaom for image processing
-**Runtime stage:** Slim image with only runtime dependencies
+**Build stage:** Node 20 with native build tools (sharp bundles its own libvips)
+**Runtime stage:** Node 20 slim with minimal runtime dependencies
 
 ```bash
 # Build image
@@ -438,7 +438,9 @@ src/
   avatar.ts           - User avatar endpoint
   cover.ts            - User cover endpoint
   serve.ts            - Upload serving
+  fallback.ts         - Fallback image building and serving
   fetch-image.ts      - Fallback fetch logic
+  s3-store.ts         - S3 blob store (AWS SDK v3)
   blacklist.ts        - Blacklist file loading
   blacklist-service.ts - Dynamic blacklist fetching
   utils.ts            - Helpers (base58, MIME, etc.)
@@ -474,8 +476,8 @@ make lint
 make lib
 ```
 
-**Linter:** TSLint (TODO: migrate to ESLint)
-**TypeScript:** 2.7.1 (TODO: upgrade to 5.x)
+**Linter:** ESLint
+**TypeScript:** 5.7
 
 ## Production Checklist
 
@@ -502,7 +504,7 @@ make lib
 - **Input validation** - All parameters validated before processing
 - **Size limits** - 30MB max upload, 2000x2000 max dimensions
 - **Safe fallbacks** - Malformed URLs return default images, not errors
-- **Content-Type detection** - Server-side validation via libmagic
+- **Content-Type detection** - Server-side validation via file-type
 - **No arbitrary code execution** - All image processing via Sharp (sandboxed)
 
 ## Performance Tips
