@@ -412,37 +412,15 @@ export function storeRemove(store: AbstractBlobStore, key: string): Promise<void
 }
 
 async function listFsStoreKeys(root: string, prefix: string): Promise<string[]> {
-    const matches: string[] = []
-
-    async function walk(dir: string): Promise<void> {
-        let entries: fs.Dirent[]
-        try {
-            entries = await fs.promises.readdir(dir, { withFileTypes: true })
-        } catch (err: any) {
-            if (err && err.code === 'ENOENT') {
-                return
-            }
-            throw err
+    try {
+        const entries = await fs.promises.readdir(root)
+        return entries.filter((name) => name.startsWith(prefix))
+    } catch (err: any) {
+        if (err && err.code === 'ENOENT') {
+            return []
         }
-
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name)
-            if (entry.isDirectory()) {
-                await walk(fullPath)
-                continue
-            }
-            if (!entry.isFile()) {
-                continue
-            }
-            const key = path.relative(root, fullPath).split(path.sep).join('/')
-            if (key.startsWith(prefix)) {
-                matches.push(key)
-            }
-        }
+        throw err
     }
-
-    await walk(root)
-    return matches
 }
 
 export async function storeRemoveByPrefix(store: AbstractBlobStore, prefix: string): Promise<number> {
