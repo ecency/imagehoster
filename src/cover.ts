@@ -1,8 +1,8 @@
 /** Serve user covers. */
 
 import { AbstractBlobStore } from 'abstract-blob-store'
-import * as config from 'config'
-import * as etag from 'etag'
+import config from 'config'
+import etag from 'etag'
 import {URL} from 'url'
 
 import { getProfile, KoaContext, proxyStore, uploadStore } from './common'
@@ -20,6 +20,7 @@ import {
   ScalingMode,
   storeExists,
   storeRemove,
+  storeRemoveByPrefix,
   storeWrite,
   supportsAvif,
   supportsWebP,
@@ -64,6 +65,7 @@ async function handleCover(ctx: KoaContext) {
   const coverRequestPurgeUrl = (() => {
     const purgeUrl = new URL(ctx.request.url, new URL(config.get('service_url')).origin)
     purgeUrl.searchParams.delete('invalidate')
+    purgeUrl.searchParams.delete('ignorecache')
     return purgeUrl.toString()
   })()
 
@@ -125,11 +127,10 @@ async function handleCover(ctx: KoaContext) {
   if (invalidate) {
     ctx.log.debug('invalidate requested, removing cached images')
     try {
-      if (await storeExists(proxyStore, imageKey)) {
-        await storeRemove(proxyStore, imageKey)
-      }
+      const removed = await storeRemoveByPrefix(proxyStore, `${origKey}_`)
+      ctx.log.debug({ imagePrefix: `${origKey}_`, removed }, 'removed resized cover variants on invalidate')
     } catch (err) {
-      ctx.log.error({ err, imageKey }, 'unable to remove resized cover on invalidate')
+      ctx.log.error({ err, imagePrefix: `${origKey}_` }, 'unable to remove resized cover on invalidate')
     }
     try {
       if (!origIsUpload && await storeExists(origStore, origKey)) {
@@ -153,7 +154,6 @@ async function handleCover(ctx: KoaContext) {
   } else {
     ctx.tag({ store: 'fetch' })
     try {
-      // tslint:disable-next-line:max-line-length
       const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultCover, ctx.log)
       const res = result.res
       isFetchFallback = result.isFallback

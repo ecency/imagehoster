@@ -1,5 +1,6 @@
 import 'mocha'
-import * as assert from 'assert'
+import blobStore from 'abstract-blob-store'
+import assert from 'assert'
 import { createHash } from 'crypto'
 import { URL } from 'url'
 
@@ -21,6 +22,8 @@ import {
     isBlacklistedUrl,
     ScalingMode,
     OutputFormat,
+    storeRemoveByPrefix,
+    storeWrite,
 } from './../src/utils'
 
 import {
@@ -361,6 +364,24 @@ describe('utils', function() {
             const url = new URL('https://example.com/image.jpg?width=100&ignorecache=1')
             const result = sanitizeIgnoreInvalidateParams(url)
             assert(result.toString().includes('width=100'))
+        })
+    })
+
+    describe('storeRemoveByPrefix', function() {
+        it('should remove all matching cached variants from memory store', async function() {
+            const store = new (blobStore as any)()
+            await storeWrite(store as any, 'Uabc_100x100', Buffer.from('a'))
+            await storeWrite(store as any, 'Uabc_Fit_WEBP_100', Buffer.from('b'))
+            await storeWrite(store as any, 'Uabc_Cover_AVIF_256', Buffer.from('c'))
+            await storeWrite(store as any, 'Uxyz_100x100', Buffer.from('d'))
+
+            const removed = await storeRemoveByPrefix(store as any, 'Uabc_')
+
+            assert.equal(removed, 3)
+            assert.equal((store as any).data['Uabc_100x100'], undefined)
+            assert.equal((store as any).data['Uabc_Fit_WEBP_100'], undefined)
+            assert.equal((store as any).data['Uabc_Cover_AVIF_256'], undefined)
+            assert(Buffer.isBuffer((store as any).data['Uxyz_100x100']))
         })
     })
 

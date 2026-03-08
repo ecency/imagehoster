@@ -1,11 +1,10 @@
-import * as cors from '@koa/cors'
+import cors from '@koa/cors'
 import * as Bunyan from 'bunyan'
-import * as cluster from 'cluster'
-import * as config from 'config'
+import cluster from 'cluster'
+import config from 'config'
 import * as http from 'http'
-import * as Koa from 'koa'
+import Koa from 'koa'
 import * as os from 'os'
-import * as util from 'util'
 
 import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
@@ -55,26 +54,29 @@ app.use(cors({origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']}))
 app.use(routes)
-app.use((ctx: Koa.Context) => {
+app.use((_ctx: Koa.Context) => {
     throw new APIError({code: APIError.Code.NotFound})
 })
 
 async function main() {
-    if (cluster.isMaster) {
+    if (cluster.isPrimary) {
         logger.info({version}, 'starting service')
     }
 
     const server = http.createServer(app.callback())
-    const listen = util.promisify(server.listen).bind(server)
-    const close = util.promisify(server.close).bind(server)
+    const listen = (port: any) => new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(port, resolve)
+    })
+    const close = () => new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()))
 
     let numWorkers = Number.parseInt(config.get('num_workers'))
     if (numWorkers === 0) {
         numWorkers = os.cpus().length
     }
-    const isMaster = cluster.isMaster && numWorkers > 1
+    const isPrimary = cluster.isPrimary && numWorkers > 1
 
-    if (isMaster) {
+    if (isPrimary) {
         logger.info('spawning %d workers', numWorkers)
         for (let i = 0; i < numWorkers; i++) {
             cluster.fork()
@@ -106,7 +108,7 @@ async function main() {
     }
 
     const exit = async () => {
-        if (!isMaster) {
+        if (!isPrimary) {
             await close()
         }
         return 0

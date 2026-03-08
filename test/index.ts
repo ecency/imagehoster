@@ -1,5 +1,5 @@
 import 'mocha'
-import * as assert from 'assert'
+import assert from 'assert'
 import {PrivateKey} from '@hiveio/dhive'
 
 import {rpcClient} from './../src/common'
@@ -83,7 +83,7 @@ before(() => {
     _client.call = async (api: string, method: string, params: any = []) => {
         const apiMethod = `${ api }-${ method }`
         switch (apiMethod) {
-            case 'database_api-get_accounts':
+            case 'condenser_api-get_accounts':
                 assert.equal(params.length, 1, 'can only mock single account lookups')
                 return [mockAccounts[params[0]]]
             case 'bridge-get_profile':

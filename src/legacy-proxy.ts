@@ -1,5 +1,4 @@
 /** Legacy proxy API redirects. */
-import * as config from 'config'
 import * as querystring from 'querystring'
 import {URL} from 'url'
 

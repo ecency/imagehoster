@@ -1,14 +1,15 @@
 /** Misc utils. */
 
 import { AbstractBlobStore, BlobKey } from 'abstract-blob-store'
-import * as cloudflare from 'cloudflare'
-import * as config from 'config'
+import config from 'config'
 import { createHash } from 'crypto'
 import * as fileType from 'file-type'
+import * as fs from 'fs'
 import * as http from 'http'
 import * as multihash from 'multihashes'
 import * as needle from 'needle'
-import * as Sharp from 'sharp'
+import * as path from 'path'
+import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { imageBlacklist } from './blacklist'
@@ -27,6 +28,8 @@ export const AcceptedContentTypes = [
     'image/bmp',
     'image/apng',
     'image/avif',
+    'image/heic',
+    'image/heif',
 ]
 
 export function parseBool(input: any): boolean {
@@ -90,12 +93,27 @@ export function storeExists(store: AbstractBlobStore, key: BlobKey) {
     })
 }
 
-export function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+interface PutBufferStore {
+    putBuffer(key: string, buf: Buffer): Promise<void>
+}
+
+function hasPutBuffer(store: any): store is PutBufferStore {
+    return typeof store.putBuffer === 'function'
+}
+
+export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    // Use direct buffer upload for S3 stores (avoids stream double-buffering)
+    if (hasPutBuffer(store)) {
+        const k = typeof key === 'string' ? key : (key as any).key
+        await store.putBuffer(k, buf)
+        return { key: k }
+    }
     return new Promise((resolve, reject) => {
         const stream = store.createWriteStream(key, (error, metadata) => {
             if (error) { reject(error) } else { resolve(metadata) }
         })
-        stream.write(data)
+        stream.write(buf)
         stream.end()
     })
 }
@@ -244,16 +262,31 @@ export function getProxyImageLimits() {
     }
 }
 
-export function purgeCache(value: string) {
+export function purgeCache(value: string | string[]) {
     if (!config.has('cloudflare_token') || !config.has('cloudflare_zone')) {
         return
     }
     const CF_KEY = config.get('cloudflare_token') as string
     const CF_ZONE = config.get('cloudflare_zone') as string
-    const cf = new cloudflare({ token: CF_KEY })
-    cf.zones.purgeCache(CF_ZONE, { files: [value] }).catch((err) => {
-        // Log but don't throw - cache purging is not critical
-        logger.error({ err }, 'Cloudflare cache purge failed')
+    const files = Array.isArray(value) ? value : [value]
+    if (files.length === 0) {
+        return
+    }
+    fetch(`https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache`, {
+        method: 'POST',
+        headers: {
+            'Authorization': `Bearer ${CF_KEY}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ files }),
+    }).then((res) => {
+        if (!res.ok) {
+            logger.error({ status: res.status, files }, 'Cloudflare cache purge HTTP error')
+        } else {
+            logger.debug({ files }, 'Cloudflare cache purged')
+        }
+    }).catch((err) => {
+        logger.error({ err, files }, 'Cloudflare cache purge network error')
     })
 }
 
@@ -378,4 +411,44 @@ export function storeRemove(store: AbstractBlobStore, key: string): Promise<void
             resolve()
         })
     })
+}
+
+async function listFsStoreKeys(root: string, prefix: string): Promise<string[]> {
+    try {
+        const entries = await fs.promises.readdir(root)
+        return entries.filter((name) => name.startsWith(prefix))
+    } catch (err: any) {
+        if (err && err.code === 'ENOENT') {
+            return []
+        }
+        throw err
+    }
+}
+
+export async function storeRemoveByPrefix(store: AbstractBlobStore, prefix: string): Promise<number> {
+    const customRemoveByPrefix = (store as any).removeByPrefix
+    if (typeof customRemoveByPrefix === 'function') {
+        return await customRemoveByPrefix.call(store, prefix)
+    }
+
+    const memoryData = (store as any).data
+    if (memoryData && typeof memoryData === 'object') {
+        const keys = Object.keys(memoryData).filter((key) => key.startsWith(prefix))
+        for (const key of keys) {
+            delete memoryData[key]
+        }
+        return keys.length
+    }
+
+    const root = (store as any).path
+    if (typeof root === 'string') {
+        const keys = await listFsStoreKeys(root, prefix)
+        for (const key of keys) {
+            await storeRemove(store, key)
+        }
+        return keys.length
+    }
+
+    logger.warn({ prefix }, 'store does not support prefix invalidation')
+    return 0
 }

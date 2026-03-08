@@ -110,10 +110,8 @@ export class APIError extends Error {
 export async function errorMiddleware(ctx: KoaContext, next: () => Promise<any>) {
     try {
         await next()
-    } catch (error) {
-        if (!(error instanceof APIError)) {
-            error = new APIError({cause: error})
-        }
+    } catch (err) {
+        const error = err instanceof APIError ? err : new APIError({cause: err})
         ctx.status = error.statusCode
         ctx['api_error'] = error
         ctx.body = {error}

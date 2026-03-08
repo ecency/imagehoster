@@ -1,11 +1,11 @@
 /** Resizing image proxy. */
 
 import {AbstractBlobStore} from 'abstract-blob-store'
-import * as config from 'config'
+import config from 'config'
 import {createHash} from 'crypto'
-import * as etag from 'etag'
+import etag from 'etag'
 import * as multihash from 'multihashes'
-import * as Sharp from 'sharp'
+import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
@@ -34,6 +34,7 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
+    storeRemoveByPrefix,
     storeWrite,
     supportsAvif,
     supportsWebP
@@ -118,13 +119,18 @@ export async function proxyHandler(ctx: KoaContext) {
             { code: APIError.Code.Deplorable, message: 'Forbidden: invalid invalidate key' }
         )
     }
-    const proxyRequestPurgeUrl = (() => {
+    const cleanUrl = ctx.params.url.replace(/\.(webp|png)$/, '')
+    const proxyRequestPurgeUrls = (() => {
         const purgeUrl = new URL(ctx.request.url, SERVICE_URL.origin)
         purgeUrl.searchParams.delete('invalidate')
-        return purgeUrl.toString()
+        purgeUrl.searchParams.delete('ignorecache')
+        const urls = new Set<string>([purgeUrl.toString()])
+        for (const suffix of ['', '.png', '.webp']) {
+            purgeUrl.pathname = `/p/${cleanUrl}${suffix}`
+            urls.add(purgeUrl.toString())
+        }
+        return [...urls]
     })()
-
-    const cleanUrl = ctx.params.url.replace(/\.(webp|png)$/, '')
     let url = parseProxiedUrl(cleanUrl)
     let urlParams = cleanUrl
     let isDefaultImage = false
@@ -223,10 +229,10 @@ export async function proxyHandler(ctx: KoaContext) {
     ctx.tag({imageKey})
     if (options.invalidate) {
         try {
-            await storeRemove(proxyStore, imageKey)
-            ctx.log.debug({ image: imageKey }, 'removed resized file due to invalidate')
+            const removed = await storeRemoveByPrefix(proxyStore, `${origKey}_`)
+            ctx.log.debug({ imagePrefix: `${origKey}_`, removed }, 'removed resized files due to invalidate')
         } catch (err) {
-            ctx.log.error({err, msg: 'unable to remove resized on invalidate', imageKey})
+            ctx.log.error({err, msg: 'unable to remove resized on invalidate', imagePrefix: `${origKey}_`})
         }
         if (!origIsUpload) {
             try {
@@ -236,7 +242,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 ctx.log.error({err, origKey, msg: 'unable to remove original on invalidate'})
             }
         }
-        purgeCache(proxyRequestPurgeUrl)
+        purgeCache(proxyRequestPurgeUrls)
         ctx.tag({ invalidate: true })
     }
     // check if content is same with user cache
@@ -499,7 +505,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 })
                 return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
-                })
+                }, 'default-avatar', imageKey)
             }
             isDefaultImage = true
             throw new APIError({ cause: err, code: APIError.Code.InvalidImage })

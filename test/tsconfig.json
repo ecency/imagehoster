@@ -1,9 +1,12 @@
 {
   "compilerOptions": {
-    "lib": ["esnext"],
+    "lib": ["ES2022"],
     "module": "commonjs",
     "moduleResolution": "node",
-    "target": "esnext"
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noImplicitAny": false
   },
   "include": [
     "*.ts"
