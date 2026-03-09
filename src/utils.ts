@@ -279,11 +279,12 @@ export function purgeCache(value: string | string[]) {
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({ files }),
-    }).then((res) => {
-        if (!res.ok) {
-            logger.error({ status: res.status, files }, 'Cloudflare cache purge HTTP error')
+    }).then(async (res) => {
+        const body = await res.json().catch(() => null) as any
+        if (!res.ok || (body && !body.success)) {
+            logger.error({ status: res.status, body, files }, 'Cloudflare cache purge failed')
         } else {
-            logger.debug({ files }, 'Cloudflare cache purged')
+            logger.info({ files }, 'Cloudflare cache purged')
         }
     }).catch((err) => {
         logger.error({ err, files }, 'Cloudflare cache purge network error')
