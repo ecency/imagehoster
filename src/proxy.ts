@@ -494,7 +494,13 @@ export async function proxyHandler(ctx: KoaContext) {
             rv = await image.toBuffer()
         } catch (err) {
             ctx.log.error({ err, urlString, imageKey, msg: 'sharp.toBuffer() failed' })
-            if (origFromCache) {
+            if (origIsUpload) {
+                // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
+                // but browsers likely can — serve the original unresized bytes
+                ctx.log.warn({origKey, msg: 'serving original upload bytes after toBuffer failure'})
+                rv = origData
+                contentType = await mimeMagic(origData)
+            } else if (origFromCache) {
                 ctx.log.warn({origKey, msg: 'purging corrupt cached original after toBuffer failure'})
                 try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
@@ -503,9 +509,10 @@ export async function proxyHandler(ctx: KoaContext) {
                 return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
                 }, 'default-avatar', imageKey)
+            } else {
+                isDefaultImage = true
+                throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
             }
-            isDefaultImage = true
-            throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
         }
 
         if (!isDefaultImage) {
