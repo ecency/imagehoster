@@ -55,7 +55,7 @@ export async function legacyProxyHandler(ctx: KoaContext) {
     const b58url = base58Enc(url.toString())
 
     ctx.status = 301
-    ctx.redirect(`/p/${ b58url }.png?${ qs }`)
+    ctx.redirect(`/p/${ b58url }?${ qs }`)
 }
 
 /**
