@@ -20,7 +20,6 @@ import {
   ScalingMode,
   storeExists,
   storeRemove,
-  storeRemoveByPrefix,
   storeWrite,
   supportsAvif,
   supportsWebP,
@@ -126,20 +125,17 @@ async function handleCover(ctx: KoaContext) {
   // Invalidate requested: remove cached images and purge CDN for this endpoint URL
   if (invalidate) {
     ctx.log.debug('invalidate requested, removing cached images')
-    try {
-      const removed = await storeRemoveByPrefix(proxyStore, `${origKey}_`)
-      ctx.log.debug({ imagePrefix: `${origKey}_`, removed }, 'removed resized cover variants on invalidate')
-    } catch (err) {
-      ctx.log.error({ err, imagePrefix: `${origKey}_` }, 'unable to remove resized cover on invalidate')
-    }
-    try {
-      if (!origIsUpload && await storeExists(origStore, origKey)) {
-        await storeRemove(origStore, origKey)
-      }
-    } catch (err) {
-      ctx.log.error({ err, origKey }, 'unable to remove original cover on invalidate')
-    }
     purgeCache(coverRequestPurgeUrl)
+    // Delete all known cover variants directly — no directory scan needed
+    const coverFormats = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF]
+    for (const f of coverFormats) {
+      const key = getImageKey(origKey, { width: COVER_WIDTH, height: COVER_HEIGHT, mode: ScalingMode.Fit, format: f })
+      try { await storeRemove(proxyStore, key) } catch (_e) { /* may not exist */ }
+    }
+    ctx.log.debug({ origKey }, 'removed known cover variants on invalidate')
+    if (!origIsUpload) {
+      try { await storeRemove(origStore, origKey) } catch (_e) { /* may not exist */ }
+    }
   }
 
   let origData: Buffer

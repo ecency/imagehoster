@@ -34,7 +34,6 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
-    storeRemoveByPrefix,
     storeWrite,
     supportsAvif,
     supportsWebP
@@ -228,29 +227,20 @@ export async function proxyHandler(ctx: KoaContext) {
     ctx.set('ETag', etag(imageKey))
     ctx.tag({imageKey})
     if (options.invalidate) {
-        // Purge CDN first (fire-and-forget), then delete local files in background
+        // Purge CDN first (fire-and-forget)
         purgeCache(proxyRequestPurgeUrls)
         ctx.tag({ invalidate: true })
-        // Local file deletion runs in background — don't block the response
-        const invalidatePrefix = `${origKey}_`
-        const invalidateIsUpload = origIsUpload
-        const invalidateOrigStore = origStore
-        ;(async () => {
+        // Delete only the specific requested variant and the original — no directory scan
+        try {
+            await storeRemove(proxyStore, imageKey)
+            ctx.log.debug({ imageKey }, 'removed resized imageKey due to invalidate')
+        } catch (_e) { /* may not exist */ }
+        if (!origIsUpload) {
             try {
-                const removed = await storeRemoveByPrefix(proxyStore, invalidatePrefix)
-                ctx.log.debug({ imagePrefix: invalidatePrefix, removed }, 'removed resized files due to invalidate')
-            } catch (err) {
-                ctx.log.error({err, msg: 'unable to remove resized on invalidate', imagePrefix: invalidatePrefix})
-            }
-            if (!invalidateIsUpload) {
-                try {
-                    await storeRemove(invalidateOrigStore, origKey)
-                    ctx.log.debug({ image: origKey }, 'removed original file due to invalidate')
-                } catch (err) {
-                    ctx.log.error({err, origKey, msg: 'unable to remove original on invalidate'})
-                }
-            }
-        })()
+                await storeRemove(origStore, origKey)
+                ctx.log.debug({ image: origKey }, 'removed original due to invalidate')
+            } catch (_e) { /* may not exist */ }
+        }
     }
     // check if content is same with user cache
     if (ctx.fresh && !shouldBypassCache) {

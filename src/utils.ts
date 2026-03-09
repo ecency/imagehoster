@@ -413,16 +413,27 @@ export function storeRemove(store: AbstractBlobStore, key: string): Promise<void
     })
 }
 
-async function listFsStoreKeys(root: string, prefix: string): Promise<string[]> {
+/** Stream directory entries and delete matches in-place — O(1) memory. */
+async function removeFsKeysByPrefix(store: AbstractBlobStore, root: string, prefix: string): Promise<number> {
+    let dir
     try {
-        const entries = await fs.promises.readdir(root)
-        return entries.filter((name) => name.startsWith(prefix))
+        dir = await fs.promises.opendir(root)
     } catch (err: any) {
-        if (err && err.code === 'ENOENT') {
-            return []
-        }
+        if (err && err.code === 'ENOENT') { return 0 }
         throw err
     }
+    let count = 0
+    for await (const entry of dir) {
+        if (entry.name.startsWith(prefix)) {
+            try {
+                await storeRemove(store, entry.name)
+                count++
+            } catch (err) {
+                logger.error({ err, key: entry.name }, 'failed to remove key during prefix deletion')
+            }
+        }
+    }
+    return count
 }
 
 export async function storeRemoveByPrefix(store: AbstractBlobStore, prefix: string): Promise<number> {
@@ -442,11 +453,7 @@ export async function storeRemoveByPrefix(store: AbstractBlobStore, prefix: stri
 
     const root = (store as any).path
     if (typeof root === 'string') {
-        const keys = await listFsStoreKeys(root, prefix)
-        for (const key of keys) {
-            await storeRemove(store, key)
-        }
-        return keys.length
+        return await removeFsKeysByPrefix(store, root, prefix)
     }
 
     logger.warn({ prefix }, 'store does not support prefix invalidation')

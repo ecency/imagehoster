@@ -21,7 +21,6 @@ import {
   ScalingMode,
   storeExists,
   storeRemove,
-  storeRemoveByPrefix,
   storeWrite,
   supportsAvif,
   supportsWebP,
@@ -127,20 +126,20 @@ async function handleAvatar(ctx: KoaContext) {
   // Invalidate requested: remove cached images and purge CDN for this endpoint URL
   if (invalidate) {
     ctx.log.debug('invalidate requested, removing cached images')
-    try {
-      const removed = await storeRemoveByPrefix(proxyStore, `${origKey}_`)
-      ctx.log.debug({ imagePrefix: `${origKey}_`, removed }, 'removed resized avatar variants on invalidate')
-    } catch (err) {
-      ctx.log.error({ err, imagePrefix: `${origKey}_` }, 'unable to remove resized avatar on invalidate')
-    }
-    try {
-      if (!origIsUpload && await storeExists(origStore, origKey)) {
-        await storeRemove(origStore, origKey)
-      }
-    } catch (err) {
-      ctx.log.error({ err, origKey }, 'unable to remove original avatar on invalidate')
-    }
     purgeCache(avatarRequestPurgeUrl)
+    // Delete all known avatar variants directly — no directory scan needed
+    const avatarSizes = [64, 128, 256, 512]
+    const avatarFormats = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF]
+    for (const s of avatarSizes) {
+      for (const f of avatarFormats) {
+        const key = getImageKey(origKey, { width: s, height: s, mode: ScalingMode.Cover, format: f })
+        try { await storeRemove(proxyStore, key) } catch (_e) { /* may not exist */ }
+      }
+    }
+    ctx.log.debug({ origKey }, 'removed known avatar variants on invalidate')
+    if (!origIsUpload) {
+      try { await storeRemove(origStore, origKey) } catch (_e) { /* may not exist */ }
+    }
   }
 
   let origData: Buffer
