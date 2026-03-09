@@ -5,7 +5,7 @@ Production-ready Hive blockchain-powered image hosting and proxying service with
 ## Features
 
 - **Blockchain Authentication** - Hive signature verification and HiveSigner OAuth support
-- **Smart Image Processing** - Automatic resizing, format conversion, WebP content negotiation
+- **Smart Image Processing** - Automatic resizing, format conversion, AVIF/WebP content negotiation with full HDR AVIF support
 - **Multi-Level Caching** - HTTP caching, in-memory, storage-backed with CDN integration
 - **Intelligent Fallbacks** - Multi-source image fetching with automatic retry
 - **Rate Limiting** - Redis-backed per-account upload quotas
@@ -300,19 +300,23 @@ Token format (base64url-encoded JSON):
 
 ## Features in Detail
 
-### WebP Content Negotiation
+### AVIF/WebP Content Negotiation
 
-Service automatically serves WebP format when client sends `Accept: image/webp` header. No need for separate `/webp/` endpoints.
+Service automatically serves the best format based on the client's `Accept` header, preferring AVIF > WebP > original format. No need for separate format-specific endpoints.
 
 ```bash
-# Modern browser automatically gets WebP
-curl -H "Accept: image/webp,*/*" https://images.ecency.com/u/username/avatar
+# Modern browser automatically gets AVIF or WebP
+curl -H "Accept: image/avif,image/webp,*/*" https://images.ecency.com/u/username/avatar
 
 # Older browser gets original format
 curl https://images.ecency.com/u/username/avatar
 ```
 
 Response includes `Vary: Accept` header for proper CDN caching.
+
+### HDR AVIF Support
+
+The Docker image builds libvips from source with dav1d (AV1 decoder) for full AVIF support, including HDR gain map images (MA1A brand) commonly produced by modern cameras. Sharp's bundled libvips uses libaom which cannot decode these bitstreams.
 
 ### Fallback System
 
@@ -352,8 +356,9 @@ Workers share Redis rate limiter state and coordinate via node.js cluster module
 
 Multi-stage Dockerfile optimized for production:
 
-**Build stage:** Node 20 with native build tools (sharp bundles its own libvips)
-**Runtime stage:** Node 20 slim with minimal runtime dependencies
+**Stage 1 (vips-builder):** Builds libvips from source with dav1d (AV1 decoder), libaom (AV1 encoder), and libheif for full AVIF/HEIF support including HDR gain map images
+**Stage 2 (build):** Node 20 with app compilation, replaces Sharp's bundled libvips with custom build
+**Stage 3 (runtime):** Node 20 slim with minimal runtime dependencies
 
 ```bash
 # Build image
