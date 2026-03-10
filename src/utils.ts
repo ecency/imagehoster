@@ -166,7 +166,7 @@ export interface ProxyOptions {
 
 export function getImageKey(origKey: string, options: ProxyOptions): string {
     if (options.mode === ScalingMode.Fit && options.format === OutputFormat.Match) {
-        return `${origKey}_${options.width || 0}x${options.height || 0}`
+        return `${origKey}_${options.width || 0}x${options.height || 0}${options.blur ? '_blur' : ''}`
     }
     const rv = [origKey, ScalingMode[options.mode], OutputFormat[options.format]]
     if (options.width) { rv.push(options.width.toFixed(0)) }

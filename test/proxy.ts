@@ -94,7 +94,7 @@ describe('proxy', function() {
 
     it('should return tiny blur placeholder', async function() {
         this.slow(1000)
-        serveImage = false
+        serveImage = true
         const imageUrl = base58Enc(`http://localhost:${ port+1 }/test.jpg`)
         const res = await needle('get', `http://localhost:${ port }/p/${ imageUrl }?blur=1`)
         const image = sharp(res.body)
