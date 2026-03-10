@@ -161,15 +161,17 @@ export interface ProxyOptions {
     format: OutputFormat
     ignorecache?: number
     invalidate?: number
+    blur?: boolean
 }
 
 export function getImageKey(origKey: string, options: ProxyOptions): string {
     if (options.mode === ScalingMode.Fit && options.format === OutputFormat.Match) {
-        return `${origKey}_${options.width || 0}x${options.height || 0}`
+        return `${origKey}_${options.width || 0}x${options.height || 0}${options.blur ? '_blur' : ''}`
     }
     const rv = [origKey, ScalingMode[options.mode], OutputFormat[options.format]]
     if (options.width) { rv.push(options.width.toFixed(0)) }
     if (options.height) { rv.push(options.height.toFixed(0)) }
+    if (options.blur) { rv.push('blur') }
     return rv.join('_')
 }
 export function getUrlHashKey(input: string): string {
