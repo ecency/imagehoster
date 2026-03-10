@@ -99,7 +99,8 @@ function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): P
         default:
             format = OutputFormat.Match
     }
-    return {width, height, mode, format, ignorecache, invalidate}
+    const blur = query['blur'] === '1' || query['blur'] === 'true'
+    return {width, height, mode, format, ignorecache, invalidate, blur}
 }
 
 export async function proxyHandler(ctx: KoaContext) {
@@ -488,6 +489,12 @@ export async function proxyHandler(ctx: KoaContext) {
                 default:
                     break
             }
+        }
+
+        // Blur placeholder: tiny ~20px wide JPEG for LQIP
+        if (options.blur) {
+            image.resize(20, undefined, { fit: 'inside' }).blur(2).jpeg({ quality: 15, force: true })
+            contentType = 'image/jpeg'
         }
 
         try {

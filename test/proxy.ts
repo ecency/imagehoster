@@ -92,6 +92,18 @@ describe('proxy', function() {
         assert.equal(meta.space, 'srgb')
     })
 
+    it('should return tiny blur placeholder', async function() {
+        this.slow(1000)
+        serveImage = false
+        const imageUrl = base58Enc(`http://localhost:${ port+1 }/test.jpg`)
+        const res = await needle('get', `http://localhost:${ port }/p/${ imageUrl }?blur=1`)
+        const image = sharp(res.body)
+        const meta = await image.metadata()
+        assert.equal(meta.format, 'jpeg')
+        assert(meta.width! <= 20, `blur width should be <=20, got ${meta.width}`)
+        assert(res.body.length < 2000, `blur image should be small, got ${res.body.length} bytes`)
+    })
+
     it('should resolve double proxied images', async function() {
         this.slow(1000)
         serveImage = false
