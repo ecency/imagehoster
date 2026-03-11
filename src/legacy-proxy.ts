@@ -43,6 +43,17 @@ export async function legacyProxyHandler(ctx: KoaContext) {
         url = new URL(DEFAULT_FALLBACK_IMAGE_URL)
     }
 
+    // Koa's router splits at '?', so any query params from the embedded URL
+    // end up in ctx.query. Restore them to the URL before base58 encoding.
+    // Only our proxy-specific params should be excluded.
+    const PROXY_PARAMS = new Set(['format', 'mode', 'width', 'height', 'ignorecache', 'invalidate', 'blur'])
+    const query = ctx.query as {[key: string]: any}
+    for (const [key, value] of Object.entries(query)) {
+        if (!PROXY_PARAMS.has(key)) {
+            url.searchParams.set(key, value as string)
+        }
+    }
+
     const options: {[key: string]: any} = {
         format: 'match',
         mode: 'fit',
