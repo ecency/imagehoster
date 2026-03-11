@@ -395,7 +395,14 @@ export async function proxyHandler(ctx: KoaContext) {
             metadata = metaResult.metadata
             origData = metaResult.buffer
             contentType = await mimeMagic(origData)
-            isAnimated = (metadata.pages != null ? metadata.pages : 1) > 1
+            // Use metadata.pages when available; if null, fall back to content-type detection
+            // (conservative: assume GIF/APNG are animated when pages can't be determined)
+            const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
+            if (metadata.pages != null) {
+                isAnimated = metadata.pages > 1
+            } else {
+                isAnimated = isGifOrApng
+            }
             if (metaResult.isFallback) {
                 isDefaultImage = true
             }
@@ -415,6 +422,12 @@ export async function proxyHandler(ctx: KoaContext) {
                     metadata: 'fallback-failed' } })
         }
         APIError.assert(metadata.width && metadata.height, APIError.Code.InvalidImage)
+
+        // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
+        // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
+        if (isAnimated && !options.blur) {
+            rv = origData
+        } else {
         const image = buildSharpPipeline(origData, isAnimated)
 
         const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
@@ -464,31 +477,27 @@ export async function proxyHandler(ctx: KoaContext) {
                 break
         }
 
-        // Skip format conversion for animated images (GIF/APNG) to preserve animation
-        // Animated AVIF/WebP encoding is too slow for a proxy and may lose frames
-        if (!isAnimated) {
-            switch (options.format) {
-                case OutputFormat.Match:
-                    break
-                case OutputFormat.JPEG:
-                    image.jpeg({force: true})
-                    contentType = 'image/jpeg'
-                    break
-                case OutputFormat.PNG:
-                    image.png({force: true})
-                    contentType = 'image/png'
-                    break
-                case OutputFormat.WEBP:
-                    contentType = 'image/webp'
-                    image.webp({quality: 80, alphaQuality: 80, force: true})
-                    break
-                case OutputFormat.AVIF:
-                    contentType = 'image/avif'
-                    image.avif({quality: 50, effort: 4, force: true})
-                    break
-                default:
-                    break
-            }
+        switch (options.format) {
+            case OutputFormat.Match:
+                break
+            case OutputFormat.JPEG:
+                image.jpeg({force: true})
+                contentType = 'image/jpeg'
+                break
+            case OutputFormat.PNG:
+                image.png({force: true})
+                contentType = 'image/png'
+                break
+            case OutputFormat.WEBP:
+                contentType = 'image/webp'
+                image.webp({quality: 80, alphaQuality: 80, force: true})
+                break
+            case OutputFormat.AVIF:
+                contentType = 'image/avif'
+                image.avif({quality: 50, effort: 4, force: true})
+                break
+            default:
+                break
         }
 
         // Blur placeholder: tiny ~20px wide JPEG for LQIP
@@ -521,6 +530,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
             }
         }
+        } // end non-animated Sharp pipeline
 
         if (!isDefaultImage) {
             ctx.log.debug('storing converted %s', imageKey)

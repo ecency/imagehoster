@@ -28,12 +28,26 @@ export async function resizeImageWithOptions(
         isFallback = fallbackUsed
         origData = buffer
         contentType = await mimeMagic(origData)
-        isAnimated = (metadata.pages != null ? metadata.pages : 1) > 1
+        // Use metadata.pages when available; if null, fall back to content-type detection
+        // (conservative: assume GIF/APNG are animated when pages can't be determined)
+        const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
+        if (metadata.pages != null) {
+            isAnimated = metadata.pages > 1
+        } else {
+            isAnimated = isGifOrApng
+        }
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }
 
     APIError.assert(meta.width && meta.height, APIError.Code.InvalidImage)
+
+    // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
+    // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
+    if (isAnimated) {
+        return { buffer: origData, contentType, isFallback }
+    }
+
     const image = buildSharpPipeline(origData, isAnimated)
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
@@ -64,32 +78,29 @@ export async function resizeImageWithOptions(
             break
     }
 
-    // Skip format conversion for animated images to preserve animation
-    if (!isAnimated) {
-        switch (options.format) {
-            case OutputFormat.Match:
-                if (contentType === 'image/svg+xml' || contentType === 'image/svg') {
-                    contentType = 'image/png'
-                    image.png({ quality: 80, compressionLevel: 9, force: true })
-                }
-                break
-            case OutputFormat.WEBP:
-                contentType = 'image/webp'
-                image.webp({ quality: 80, alphaQuality: 80 })
-                break
-            case OutputFormat.JPEG:
-                contentType = 'image/jpeg'
-                image.jpeg({ quality: 80, force: true })
-                break
-            case OutputFormat.PNG:
+    switch (options.format) {
+        case OutputFormat.Match:
+            if (contentType === 'image/svg+xml' || contentType === 'image/svg') {
                 contentType = 'image/png'
-                image.png({ quality: 80, force: true, compressionLevel: 9 })
-                break
-            case OutputFormat.AVIF:
-                contentType = 'image/avif'
-                image.avif({ quality: 50, effort: 4, force: true })
-                break
-        }
+                image.png({ quality: 80, compressionLevel: 9, force: true })
+            }
+            break
+        case OutputFormat.WEBP:
+            contentType = 'image/webp'
+            image.webp({ quality: 80, alphaQuality: 80 })
+            break
+        case OutputFormat.JPEG:
+            contentType = 'image/jpeg'
+            image.jpeg({ quality: 80, force: true })
+            break
+        case OutputFormat.PNG:
+            contentType = 'image/png'
+            image.png({ quality: 80, force: true, compressionLevel: 9 })
+            break
+        case OutputFormat.AVIF:
+            contentType = 'image/avif'
+            image.avif({ quality: 50, effort: 4, force: true })
+            break
     }
 
     const buffer = await image.toBuffer()
