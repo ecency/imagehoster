@@ -1,22 +1,35 @@
 import { URL } from 'url'
 import { assertPublicUrl, fetchUrl, NeedleResponse } from './utils'
 
-const fallbackDomains = [
-    '', // original
-    'https://images.hive.blog/0x0/',
-    'https://steemitimages.com/0x0/',
-    'https://wsrv.nl/?url=',
-    'https://img.leopedia.io/0x0/',
-    'https://images.hive.blog/p/',
-    'https://steemitimages.com/p/',
-]
-
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
-    return fallbackDomains.map((domain) => {
-        if (!domain) { return urlString }
-        if (domain.endsWith('/p/')) { return domain + urlParams }
-        return domain + urlString
-    })
+    const hasQuery = urlString.indexOf('?') !== -1
+    const urls: string[] = [
+        urlString, // original URL first
+        // /p/ routes use base58 encoding — safely preserves query params
+        'https://images.hive.blog/p/' + urlParams,
+        'https://steemitimages.com/p/' + urlParams,
+    ]
+    // 0x0/ routes embed the URL in the path — query params get stripped
+    // by the receiving proxy's router, so only useful for URLs without query params
+    if (!hasQuery) {
+        urls.push(
+            'https://images.hive.blog/0x0/' + urlString,
+            'https://steemitimages.com/0x0/' + urlString,
+            'https://img.leopedia.io/0x0/' + urlString,
+        )
+    }
+    // wsrv.nl needs URL-encoded value to preserve query params
+    urls.push('https://wsrv.nl/?url=' + encodeURIComponent(urlString))
+    // Add 0x0/ routes last as extra attempts for URLs with query params
+    // (they'll lose the params but might still work for non-authenticated URLs)
+    if (hasQuery) {
+        urls.push(
+            'https://images.hive.blog/0x0/' + urlString,
+            'https://steemitimages.com/0x0/' + urlString,
+            'https://img.leopedia.io/0x0/' + urlString,
+        )
+    }
+    return urls
 }
 
 export async function fetchImageWithFallbacks(

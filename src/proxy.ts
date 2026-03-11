@@ -303,7 +303,8 @@ export async function proxyHandler(ctx: KoaContext) {
             res = result.res
             if (result.isFallback) { isDefaultImage = true }
             origData = res.body
-            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage) {
+            // Don't write fallback data to uploadStore — could corrupt original hash
+            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
                     await storeWrite(origStore, origKey, origData)
@@ -312,7 +313,7 @@ export async function proxyHandler(ctx: KoaContext) {
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing PayloadTooLarge original %s', origKey)
+                ctx.log.debug('not-storing original %s (upload=%s, default=%s)', origKey, origIsUpload, isDefaultImage)
             }
             contentType = await mimeMagic(origData)
         }
@@ -363,7 +364,8 @@ export async function proxyHandler(ctx: KoaContext) {
 
         APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
 
-        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage) {
+        // Don't write fallback data to uploadStore — could corrupt original hash
+        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload) {
             ctx.log.debug('storing original image %s', origKey)
             try {
                 await storeWrite(origStore, origKey, origData)
@@ -372,7 +374,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing PayloadTooLarge original %s', origKey)
+            ctx.log.debug('not-storing original %s (upload=%s, default=%s)', origKey, origIsUpload, isDefaultImage)
         }
     }
 

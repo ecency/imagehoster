@@ -1,15 +1,12 @@
 /** Serve files from upload store. */
 
-import config from 'config'
-import {readStream, storeWrite} from './utils'
+import {readStream} from './utils'
 import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
 import {imageBlacklist} from './blacklist'
 import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, SERVICE_BASE_URL} from './constants'
 import {fetchUrl, NeedleResponse} from './utils'
 import Sharp from 'sharp'
-
-const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
 
 function detectMimeType(metadata: Sharp.Metadata): string {
     switch (metadata.format) {
@@ -70,17 +67,10 @@ export async function serveHandler(ctx: KoaContext) {
 
             buffer = res.body
 
-            if (res.bytes <= MAX_IMAGE_SIZE) {
-                ctx.log.debug('storing original %s', ctx.params['hash'])
-                try {
-                    await storeWrite(uploadStore, ctx.params['hash'], buffer)
-                } catch (err) {
-                    ctx.log.error({ err, hash: ctx.params['hash'] }, 'failed to store served image')
-                    // Continue serving - storage failure shouldn't block response
-                }
-            } else {
-                ctx.log.debug('notstoring PayloadTooLarge original %s', ctx.params['hash'])
-            }
+            // Do NOT write fallback-fetched data to uploadStore — the fetched image
+            // may be processed/resized by the proxy or a default fallback image,
+            // which would permanently corrupt the original upload hash.
+            // Only the upload handler should write to uploadStore.
 
             // still send 404 to force frontend retry proxy
             ctx.res.writeHead(404, 'Not Found')
