@@ -5,7 +5,6 @@ import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
 import {imageBlacklist} from './blacklist'
 import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, SERVICE_BASE_URL} from './constants'
-import {fetchUrl, NeedleResponse} from './utils'
 import Sharp from 'sharp'
 
 function detectMimeType(metadata: Sharp.Metadata): string {
@@ -47,41 +46,15 @@ export async function serveHandler(ctx: KoaContext) {
     try {
         buffer = await readStream(uploadStore.createReadStream(_hash))
     } catch (error) {
-        // fallback to Hive/Steemit if not found locally
-        try {
-            ctx.log.debug({url: ctx.params['hash']}, 'fetching from hive.blog image')
-            let res: NeedleResponse = await fetchUrl(`https://images.hive.blog/0x0/${urlString}`, {
-                parse_response: false,
-                follow_max: 5,
-                user_agent: 'SteemitProxy/1.0 (+https://github.com/steemit/imagehoster)',
-            } as any)
-
-            if (Math.floor((res.statusCode || 404) / 100) !== 2) {
-                ctx.log.debug({url: urlString}, 'fetching from steemitimages image')
-                res = await fetchUrl(`https://steemitimages.com/0x0/${urlString}`, {
-                    parse_response: false,
-                    follow_max: 5,
-                    user_agent: 'SteemitProxy/1.0 (+https://github.com/steemit/imagehoster)',
-                } as any)
-            }
-
-            buffer = res.body
-
-            // Do NOT write fallback-fetched data to uploadStore — the fetched image
-            // may be processed/resized by the proxy or a default fallback image,
-            // which would permanently corrupt the original upload hash.
-            // Only the upload handler should write to uploadStore.
-
-            // still send 404 to force frontend retry proxy
-            ctx.res.writeHead(404, 'Not Found')
-            ctx.res.end()
-            return
-
-        } catch (err) {
-            ctx.res.writeHead(404, 'Not Found')
-            ctx.res.end()
-            return
-        }
+        // File not found in uploadStore — return 404 to let the client
+        // retry via the proxy path (/p/) which has a full fallback chain.
+        // Do NOT fetch from external proxies and write to uploadStore here —
+        // the fetched data may be processed/resized or a default fallback,
+        // which would permanently corrupt the original upload hash.
+        ctx.log.debug({hash: _hash}, 'not found in uploadStore, returning 404')
+        ctx.res.writeHead(404, 'Not Found')
+        ctx.res.end()
+        return
     }
 
     let mimeType = 'application/octet-stream'

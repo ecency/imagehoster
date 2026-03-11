@@ -250,8 +250,9 @@ export function parseProxiedUrl(value: string): URL {
 }
 
 export function getDefaultUrlAndParams(customUrl?: string): { url: URL, urlParams: string } {
-    const url = new URL(customUrl || config.get('default_avatar') as string)
-    const urlParams = 'vM1pGHgNcyCbee5hzZJ19JZfuFzCeUv7mVFKdbzGrntDxJQjefptCVeKGsJnTRuspM7ZCQNsZPYavwqkqhFzqyp8hgu9UfPdQtqjeZ5vtuTMwqp59vtT39W12n1qMu1EXZwzJpN'
+    const urlStr = customUrl || config.get('default_avatar') as string
+    const url = new URL(urlStr)
+    const urlParams = base58Enc(url.toString())
     return { url, urlParams }
 }
 

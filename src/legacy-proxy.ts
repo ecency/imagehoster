@@ -45,11 +45,13 @@ export async function legacyProxyHandler(ctx: KoaContext) {
 
     // Koa's router splits at '?', so any query params from the embedded URL
     // end up in ctx.query. Restore them to the URL before base58 encoding.
-    // Only our proxy-specific params should be excluded.
-    const PROXY_PARAMS = new Set(['format', 'mode', 'width', 'height', 'ignorecache', 'invalidate', 'blur'])
+    // The legacy format gets width/height from the path and hardcodes format/mode,
+    // so ALL query params belong to the original URL.
     const query = ctx.query as {[key: string]: any}
     for (const [key, value] of Object.entries(query)) {
-        if (!PROXY_PARAMS.has(key)) {
+        if (Array.isArray(value)) {
+            for (const v of value) { url.searchParams.append(key, v) }
+        } else {
             url.searchParams.set(key, value as string)
         }
     }
