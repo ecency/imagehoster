@@ -351,7 +351,6 @@ export async function proxyHandler(ctx: KoaContext) {
             isDefaultImage = true
             return await serveOrBuildFallbackImage(
                 ctx,
-                proxyStore,
                 fallbackBuffer,
                 {
                     width: options.width,
@@ -416,7 +415,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
                     parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
                 })
-                return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
+                return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
                 })
             }
@@ -524,9 +523,9 @@ export async function proxyHandler(ctx: KoaContext) {
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
                     parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
                 })
-                return await serveOrBuildFallbackImage(ctx, proxyStore, fallbackRes.body, {
+                return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
-                }, 'default-avatar', imageKey)
+                })
             } else {
                 isDefaultImage = true
                 throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
