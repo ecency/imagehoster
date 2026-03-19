@@ -52,6 +52,9 @@ max_image_size = 30000000 # 25mb
 redis_url = 'redis://172.18.0.2'
 # redis_password = '' # Set in config/local-development.toml
 
+# sentry error tracking (optional)
+# sentry_dsn = '' # Set in config/local-development.toml or production.toml
+
 # cloudflare cache purging (optional)
 # cloudflare_token = '' # Set in config/local-development.toml
 # cloudflare_zone = '' # Set in config/local-development.toml

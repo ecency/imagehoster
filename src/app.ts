@@ -6,6 +6,7 @@ import * as http from 'http'
 import Koa from 'koa'
 import * as os from 'os'
 
+import './sentry' // Initialize Sentry early
 import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
 import {logger, loggerMiddleware} from './logger'

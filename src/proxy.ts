@@ -14,6 +14,7 @@ import {applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix, EMPTY
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {fetchImageWithFallbacks} from './fetch-image'
+import {captureImageFailure} from './sentry'
 import {
     AcceptedContentTypes,
     assertPublicUrl,
@@ -333,6 +334,7 @@ export async function proxyHandler(ctx: KoaContext) {
             isDefaultImage = result.isFallback
         } catch (err) {
             ctx.log.error({ err, urlString, msg: 'fetchImageWithFallbacks failed'})
+            captureImageFailure('all_fallbacks_failed', ctx, { urlString, error: String(err) })
             throw new APIError({ code: APIError.Code.InvalidImage, info: { fallback: 'true' } })
         }
 
@@ -342,6 +344,7 @@ export async function proxyHandler(ctx: KoaContext) {
 
         if (!AcceptedContentTypes.includes(contentType)) {
             ctx.log.error({ url: urlString, type: contentType, msg: 'Unsupported content type, defaulted'})
+            captureImageFailure('unsupported_content_type', ctx, { urlString, contentType })
             const fallbackRes = await fetchUrl(DefaultAvatar, {
                 parse_response: false,
                 follow_max: 3,
@@ -409,6 +412,7 @@ export async function proxyHandler(ctx: KoaContext) {
             }
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
+            captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
             if (origFromCache) {
                 ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
                 try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
@@ -511,6 +515,7 @@ export async function proxyHandler(ctx: KoaContext) {
             rv = await image.toBuffer()
         } catch (err) {
             ctx.log.error({ err, urlString, imageKey, msg: 'sharp.toBuffer() failed' })
+            captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
             if (origIsUpload) {
                 // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
                 // but browsers likely can — serve the original unresized bytes

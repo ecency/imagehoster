@@ -1,5 +1,6 @@
 import { URL } from 'url'
 import { assertPublicUrl, fetchUrl, NeedleResponse } from './utils'
+import { captureImageFailure } from './sentry'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -109,5 +110,6 @@ export async function fetchImageWithFallbacks(
         ctxLog.error(e, 'Failed to fetch default fallback image')
     }
 
+    captureImageFailure('all_mirrors_exhausted', {}, { urlString, urlParams, triedUrls: buildFallbackUrls(urlString, urlParams).length })
     throw new Error('All fallbacks failed, including default image')
 }
