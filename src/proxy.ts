@@ -523,17 +523,17 @@ export async function proxyHandler(ctx: KoaContext) {
                 rv = origData
                 contentType = await mimeMagic(origData)
             } else if (origFromCache) {
-                ctx.log.warn({origKey, msg: 'purging corrupt cached original after toBuffer failure'})
-                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
-                const fallbackRes = await fetchUrl(DefaultAvatar, {
-                    parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
-                })
-                return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
-                    width: options.width, height: options.height, mode: options.mode, format: options.format,
-                })
+                // Sharp can't process this image (e.g. truncated JPEG) but browsers
+                // are lenient and will render it fine — serve the original bytes
+                ctx.log.warn({origKey, msg: 'serving original bytes after toBuffer failure on cached image'})
+                try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
+                rv = origData
+                contentType = await mimeMagic(origData)
             } else {
-                isDefaultImage = true
-                throw new APIError({ cause: err, code: APIError.Code.InvalidImage })
+                // Sharp can't process but browsers are lenient — serve original bytes
+                ctx.log.warn({origKey, msg: 'serving original bytes after toBuffer failure on fetched image'})
+                rv = origData
+                contentType = await mimeMagic(origData)
             }
         }
         } // end non-animated Sharp pipeline
