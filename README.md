@@ -59,7 +59,7 @@ pm2 start ecosystem.config.js
 
 Images are content-addressed using multihash:
 - Upload keys: `D{base58(sha256(image_data))}`
-- Proxy keys: `U{base58(sha1(url))}`
+- Proxy keys: `U{base58(multihash(sha1(url)))}`
 - Resized keys: `{key}_{mode}_{format}_{width}_{height}`
 
 ## API Endpoints
@@ -163,7 +163,7 @@ GET /:widthx:height/:url         Legacy proxy (redirects to /p/)
 GET /webp/*                      Legacy WebP routes (redirect to modern endpoints)
 ```
 
-These redirect with 301 status to modern endpoints for backward compatibility.
+These redirect with 301 status to modern endpoints for backward compatibility. Legacy proxy requests are served but **not stored** to prevent abuse of the open proxy as free image hosting.
 
 ## Configuration
 
@@ -323,13 +323,15 @@ The Docker image builds libvips from source with dav1d (AV1 decoder) for full AV
 When primary source fails, tries multiple mirrors in order:
 
 1. Original URL
-2. `images.hive.blog`
-3. `steemitimages.com`
-4. `wsrv.nl` (third-party proxy)
-5. `img.leopedia.io`
-6. Default fallback image
+2. `images.hive.blog/p/` (base58, preserves query params)
+3. `steemitimages.com/p/` (base58, preserves query params)
+4. `images.hive.blog/0x0/` (for URLs without query params)
+5. `steemitimages.com/0x0/`
+6. `img.leopedia.io/0x0/`
+7. `wsrv.nl` (third-party proxy, URL-encoded)
+8. Default fallback image
 
-Each attempt has 5-second timeout. First successful response is returned.
+Each attempt has 10-second timeout. First successful response is returned.
 
 ### URL Replacements
 
@@ -445,6 +447,7 @@ src/
   serve.ts            - Upload serving
   fallback.ts         - Fallback image building and serving
   fetch-image.ts      - Fallback fetch logic
+  sentry.ts           - Sentry error tracking integration
   s3-store.ts         - S3 blob store (AWS SDK v3)
   blacklist.ts        - Blacklist file loading
   blacklist-service.ts - Dynamic blacklist fetching
@@ -514,14 +517,9 @@ make lib
 
 ## Performance Tips
 
-1. **Use Cloudflare or CDN** - Cache at edge for 99%+ hit rate
-2. **Enable Redis caching** - Reduces Hive RPC load
-3. **Increase LRU cache size** - Edit `max: 500` in utils.ts
-4. **Use S3 for proxy store** - Better than filesystem for large scale
-5. **Tune worker count** - Start with CPU count, adjust based on load
-6. **Monitor memory usage** - Sharp can use significant RAM for large images
-7. **Set longer account cache TTL** - Increase from 30s to 5 minutes
-8. **Use WebP content negotiation** - 30-50% bandwidth savings
+1. **Tune worker count** - Start with CPU count, adjust based on load
+2. **Monitor memory usage** - Sharp can use significant RAM for large images (full buffering, no streaming)
+3. **AVIF/WebP content negotiation** - Automatic via Accept header, 30-50% bandwidth savings
 
 ## License
 
