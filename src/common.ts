@@ -180,14 +180,16 @@ export async function getRatelimit(account: string, max: number, duration: numbe
 
 import { S3Client } from '@aws-sdk/client-s3'
 import { S3BlobStore } from './s3-store'
+import { ShardedFsStore } from './sharded-fs-store'
 
 let s3Client: S3Client | undefined
 function loadStore(key: string): AbstractBlobStore {
     const conf = config.get(key) as any
     if (conf.type === 'fs') {
-        const fsPath = conf.get('s3_bucket') || '/mnt/eproxy-bucket'
-        logger.warn('using file store for %s at %s', key, fsPath)
-        return require('fs-blob-store')(fsPath)
+        const fsPath = conf.get('s3_bucket')
+        if (!fsPath) { throw new Error(`${key}.s3_bucket path is required for fs store type`) }
+        logger.warn('using sharded file store for %s at %s', key, fsPath)
+        return new ShardedFsStore(fsPath) as any
     } else if (conf.type === 'memory') {
         logger.warn('using memory store for %s', key)
         return require('abstract-blob-store')()
