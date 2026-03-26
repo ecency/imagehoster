@@ -42,7 +42,7 @@ export const getAccount = async (user, isCached= true) => {
     let account = isCached ? cache.get(`${user}:account`) : undefined
     if (account === undefined && user.length <= 16) {
       account = await rpcClient.database.getAccounts([user])
-      cache.set(`${user}:account`, account, 30)
+      cache.set(`${user}:account`, account, 300)
     }
     return account as ExtendedAccount[]
 }
@@ -72,7 +72,7 @@ export const getProfile = async (user, isCached= true) => {
     if (profile === undefined && user.length <= 16) {
       try {
         profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
-        cache.set(`${user}:profile`, profile, 30)
+        cache.set(`${user}:profile`, profile, 300)
       } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
         if (e.info && JSON.stringify(e.info).includes('does not exist')) {

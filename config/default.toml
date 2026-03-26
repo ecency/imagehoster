@@ -68,7 +68,7 @@ redis_url = 'redis://172.18.0.2'
 # Falls back to local JSON files (blacklist-images.json, blacklist-accounts.json) if fetch fails
 # JSON format: { "images": ["url1", "url2", ...], "accounts": ["user1", "user2", ...], "updated": "ISO8601", "version": "1.0" }
 [blacklist]
-cache_ttl = 300000 # 5 minutes in ms
+cache_ttl = 1800000 # 30 minutes in ms
 images_url = 'https://ecency.com/dmca/dmca-images.json'
 accounts_url = 'https://ecency.com/dmca/dmca-accounts.json'
 
