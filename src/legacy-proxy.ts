@@ -64,6 +64,7 @@ export async function legacyProxyHandler(ctx: KoaContext) {
     if (width > 0) { options['width'] = width }
     if (height > 0) { options['height'] = height }
 
+    options['_src'] = 'legacy'
     const qs = querystring.stringify(options)
     const b58url = base58Enc(url.toString())
 

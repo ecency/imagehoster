@@ -111,6 +111,7 @@ export async function proxyHandler(ctx: KoaContext) {
     APIError.assertParams(ctx.params, ['url'])
 
     const acceptHeader = ctx.get('accept') || ''
+    const isLegacy = ctx.query['_src'] === 'legacy'
     const options = parseOptions(ctx.query, acceptHeader)
     const shouldBypassCache = !!(options.ignorecache || options.invalidate)
     if (options.invalidate) {
@@ -305,7 +306,7 @@ export async function proxyHandler(ctx: KoaContext) {
             if (result.isFallback) { isDefaultImage = true }
             origData = res.body
             // Don't write fallback data to uploadStore — could corrupt original hash
-            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload) {
+            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
                     await storeWrite(origStore, origKey, origData)
@@ -314,7 +315,7 @@ export async function proxyHandler(ctx: KoaContext) {
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing original %s (upload=%s, default=%s)', origKey, origIsUpload, isDefaultImage)
+                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
             }
             contentType = await mimeMagic(origData)
         }
@@ -367,7 +368,7 @@ export async function proxyHandler(ctx: KoaContext) {
         APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
 
         // Don't write fallback data to uploadStore — could corrupt original hash
-        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload) {
+        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
             ctx.log.debug('storing original image %s', origKey)
             try {
                 await storeWrite(origStore, origKey, origData)
@@ -376,7 +377,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing original %s (upload=%s, default=%s)', origKey, origIsUpload, isDefaultImage)
+            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
         }
     }
 
@@ -538,7 +539,7 @@ export async function proxyHandler(ctx: KoaContext) {
         }
         } // end non-animated Sharp pipeline
 
-        if (!isDefaultImage) {
+        if (!isDefaultImage && !isLegacy) {
             ctx.log.debug('storing converted %s', imageKey)
             try {
                 await storeWrite(proxyStore, imageKey, rv)

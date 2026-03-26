@@ -58,8 +58,12 @@ describe('proxy', function() {
     })
 
     it('should proxy stored image when source is gone', async function() {
+        // First, store via /p/ route (legacy routes no longer store)
+        const imageUrl = base58Enc(`http://localhost:${ port+1 }/test.jpg`)
+        await needle('get', `http://localhost:${ port }/p/${ imageUrl }?width=100&mode=fit`)
+        // Now disable source and verify cached image is served
         serveImage = false
-        const res = await needle('get', `http://localhost:${ port }/100x0/http://localhost:${ port+1 }/test.jpg`)
+        const res = await needle('get', `http://localhost:${ port }/p/${ imageUrl }?width=100&mode=fit`)
         const image = sharp(res.body)
         const meta = await image.metadata()
         assert.equal(meta.width, 100)
