@@ -37,12 +37,30 @@ export const rpcClient = new Client([config.get('rpc_node'),
     failoverThreshold: 2
 })
 
+/** Try to get a value from Redis shared cache. */
+async function redisGet(key: string): Promise<any | undefined> {
+    if (!redisClient?.isReady) return undefined
+    try {
+        const val = await redisClient.get(key)
+        return val ? JSON.parse(val) : undefined
+    } catch { return undefined }
+}
+
+/** Set a value in Redis shared cache with TTL in seconds. */
+async function redisSet(key: string, value: any, ttl: number): Promise<void> {
+    if (!redisClient?.isReady) return
+    try {
+        await redisClient.setEx(key, ttl, JSON.stringify(value))
+    } catch { /* best effort */ }
+}
+
 /** Get account with full authority data (for signature verification) */
 export const getAccount = async (user, isCached= true) => {
-    let account = isCached ? cache.get(`${user}:account`) : undefined
+    const cacheKey = `profile:account:${user}`
+    let account = isCached ? await redisGet(cacheKey) : undefined
     if (account === undefined && user.length <= 16) {
       account = await rpcClient.database.getAccounts([user])
-      cache.set(`${user}:account`, account, 300)
+      await redisSet(cacheKey, account, 300)
     }
     return account as ExtendedAccount[]
 }
@@ -68,11 +86,12 @@ export interface HiveProfile {
 
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
 export const getProfile = async (user, isCached= true) => {
-    let profile = isCached ? cache.get(`${user}:profile`) as HiveProfile : undefined
+    const cacheKey = `profile:hive:${user}`
+    let profile = isCached ? await redisGet(cacheKey) as HiveProfile : undefined
     if (profile === undefined && user.length <= 16) {
       try {
         profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
-        cache.set(`${user}:profile`, profile, 300)
+        await redisSet(cacheKey, profile, 300)
       } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
         if (e.info && JSON.stringify(e.info).includes('does not exist')) {
