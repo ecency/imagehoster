@@ -39,7 +39,9 @@ export const rpcClient = new Client([config.get('rpc_node'),
 
 /** Try to get a value from Redis shared cache. */
 async function redisGet(key: string): Promise<any | undefined> {
-    if (!redisClient?.isReady) return undefined
+    if (!redisClient) return undefined
+    if (redisReady) await redisReady
+    if (!redisClient.isReady) return undefined
     try {
         const val = await redisClient.get(key)
         return val ? JSON.parse(val) : undefined
@@ -48,7 +50,9 @@ async function redisGet(key: string): Promise<any | undefined> {
 
 /** Set a value in Redis shared cache with TTL in seconds. */
 async function redisSet(key: string, value: any, ttl: number): Promise<void> {
-    if (!redisClient?.isReady) return
+    if (!redisClient) return
+    if (redisReady) await redisReady
+    if (!redisClient.isReady) return
     try {
         await redisClient.setEx(key, ttl, JSON.stringify(value))
     } catch { /* best effort */ }
