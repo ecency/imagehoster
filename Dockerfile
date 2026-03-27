@@ -25,7 +25,7 @@ RUN cd /tmp && \
   ninja -C build install && \
   ldconfig
 
-# Build libaom (AV1 encoder — needed for AVIF output)
+# Build libaom (AV1 encoder — fallback, also needed for HEIC/HEIF compatibility)
 ARG LIBAOM_VERSION=3.11.0
 RUN cd /tmp && \
   git clone --depth 1 --branch v${LIBAOM_VERSION} https://aomedia.googlesource.com/aom && \

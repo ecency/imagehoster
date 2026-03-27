@@ -113,6 +113,7 @@ export async function errorMiddleware(ctx: KoaContext, next: () => Promise<any>)
     } catch (err) {
         const error = err instanceof APIError ? err : new APIError({cause: err})
         ctx.status = error.statusCode
+        ctx.set('Cache-Control', 'no-cache')
         ctx['api_error'] = error
         ctx.body = {error}
         ctx.app.emit('error', error, ctx)

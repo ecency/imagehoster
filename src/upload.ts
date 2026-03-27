@@ -118,7 +118,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         const hash = cryptoUtils.sha256(message)
         const username = tokenObj.authors[0].toLowerCase()
 
-        const [account]: ExtendedAccount[] = await getAccount(username, false)
+        const [account]: ExtendedAccount[] = await getAccount(username)
         APIError.assert(account, APIError.Code.NoSuchAccount)
         ctx.log.warn('uploading app %s', signedMessage.app)
 
@@ -227,7 +227,7 @@ export async function uploadHandler(ctx: KoaContext) {
         .update(data)
         .digest()
 
-    const [account]: ExtendedAccount[] = await getAccount(ctx.params['username'].toLowerCase(), false)
+    const [account]: ExtendedAccount[] = await getAccount(ctx.params['username'].toLowerCase())
     APIError.assert(account, APIError.Code.NoSuchAccount)
 
     let validSignature = false

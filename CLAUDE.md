@@ -61,6 +61,7 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - Scaling modes: `cover` (center-crop) and `fit` (aspect-preserve)
 - Output formats: `match`, `jpeg`, `png`, `webp`, `avif`
 - Format auto-negotiation: prefers AVIF > WebP > match based on Accept header
+- AVIF encoding: quality 50, effort 3 (balances CPU vs compression — effort 4 is 6x slower for <1% size reduction)
 - Max dimensions enforced: standard (1280x1280) and custom (2000x2000)
 - Fallback system: attempts multiple mirror URLs if primary source fails
 - Animated GIF/APNG: bypasses Sharp pipeline entirely to preserve animation (Sharp strips frames)
@@ -76,22 +77,24 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 
 **Storage Abstraction** (src/common.ts, src/s3-store.ts)
 - Upload store: S3-compatible (B2/Backblaze by default)
-- Proxy store: Filesystem or S3
+- Proxy store: Sharded filesystem (src/sharded-fs-store.ts) — distributes files into subdirectories by first 4 chars of key, backwards-compatible with flat layout via automatic migration
 - Configurable via `upload_store` and `proxy_store` in config
-- Two separate S3 clients (S3ClientU for uploads, S3ClientP for proxy)
 - Custom S3 store implementation using @aws-sdk/client-s3 v3
+- Migration script: `scripts/migrate-to-shards.sh` for bulk migration of flat proxy store to sharded layout
 
 **Hive Integration** (src/common.ts)
 - RPC client with failover across multiple Hive API nodes
-- Account fetching with 120s cache (node-cache)
-- Signature verification against blockchain account posting authority
+- Account/profile fetching cached in Redis (300s TTL), shared across all workers
+- Negative cache: failed RPC lookups cached as null for 30s to prevent thundering herd
+- Signature verification against blockchain account posting authority (uses cached account data)
 
 **Fallback System** (src/fallback.ts, src/fetch-image.ts)
 - Multiple mirror attempt strategy for failed image fetches
-- Mirror chain: original URL → images.hive.blog/p/ → steemitimages.com/p/ → images.hive.blog/0x0/ → steemitimages.com/0x0/ → img.leopedia.io/0x0/ → wsrv.nl
+- HTTPS upgrade: http:// URLs are tried as https:// first (many servers block HTTP but serve HTTPS fine, e.g. hivebuzz.me)
+- Mirror chain: HTTPS upgrade → original URL → images.hive.blog/p/ → steemitimages.com/p/ → images.hive.blog/0x0/ → steemitimages.com/0x0/ → img.leopedia.io/0x0/ → wsrv.nl
 - URLs with query params: /p/ routes (base58) tried first (preserves params), /0x0/ routes tried last (lose params)
 - Serves default fallback image if all mirrors fail
-- Cache-Control: 10 minutes for fallback images, 1 year immutable for real images
+- Cache-Control: 2 minutes (max-age=120) for fallback images, 1 hour for successful avatars/covers, 1 year immutable for proxy images
 - Default/fallback images are never stored persistently
 - Sentry tracking: `captureImageFailure()` reports all_fallbacks_failed, unsupported_content_type, metadata_extraction_failed, sharp_tobuffer_failed, all_mirrors_exhausted
 
@@ -142,7 +145,7 @@ Key configuration sections:
 - `rpc_node` - Hive API endpoint
 - `B2_ACCESS_KEY_ID`, `B2_SECRET_ACCESS_KEY`, `b2_url` - B2 storage
 - `MINIO_ACCESS_KEY_ID`, `MINIO_SECRET_ACCESS_KEY`, `minio_url` - MinIO storage
-- `redis_url` - Redis for rate limiting
+- `redis_url` - Redis for rate limiting and shared profile/account cache
 - `upload_limits` - Rate limit config (duration, max, reputation, app credentials)
 - `upload_store`, `proxy_store` - Blob store configurations
 - `max_image_size`, `max_image_width`, `max_image_height` - Size limits
@@ -153,14 +156,26 @@ Key configuration sections:
 
 Environment variables can override TOML values (see config module docs).
 
-## Docker Deployment
+## Deployment
 
+### Docker
 Multi-stage Dockerfile with vips/heif/aom dependencies for image processing:
 - Build stage: Node 20 with native build tools
 - Runtime stage: Node 20-slim with runtime libraries only (libvips42, libdav1d7)
 - Healthcheck: GET /healthcheck every 20s
 - Default port: 8800
-- Non-root runtime user
+
+### Varnish
+VCL template at `config/varnish-user.vcl`.
+- Caches only /u/* (avatars/covers) and ?blur= URLs
+- Passes proxy images and uploads through (cached by Cloudflare instead)
+- Fallback avatars detected by max-age=120, cached only 2 minutes
+- After deploys: ban avatar cache to prevent stale fallbacks
+
+### Cloudflare
+- Page rule: `cache_everything` for the image domain
+- Tiered cache enabled, Polish off, sort query string on, strong ETags on
+- After deploys: purge avatar prefix to clear stale fallbacks
 
 Docker Compose configured for 4 replicas with rolling updates and resource limits.
 

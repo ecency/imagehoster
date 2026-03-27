@@ -4,8 +4,12 @@ import { captureImageFailure } from './sentry'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
+    // Try HTTPS upgrade first for http:// URLs — many servers block HTTP
+    // but serve HTTPS fine (e.g. hivebuzz.me). Keep original HTTP as fallback.
+    const httpsUrl = urlString.startsWith('http://') ? urlString.replace('http://', 'https://') : null
     const urls: string[] = [
-        urlString, // original URL first
+        ...(httpsUrl ? [httpsUrl] : []),
+        urlString, // original URL
         // /p/ routes use base58 encoding — safely preserves query params
         'https://images.hive.blog/p/' + urlParams,
         'https://steemitimages.com/p/' + urlParams,

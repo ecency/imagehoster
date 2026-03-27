@@ -61,12 +61,22 @@ async function redisSet(key: string, value: any, ttl: number): Promise<void> {
 /** Get account with full authority data (for signature verification) */
 export const getAccount = async (user, isCached= true) => {
     const cacheKey = `profile:account:${user}`
-    let account = isCached ? await redisGet(cacheKey) : undefined
-    if (account === undefined && user.length <= 16) {
-      account = await rpcClient.database.getAccounts([user])
-      await redisSet(cacheKey, account, 300)
+    if (isCached) {
+        const cached = await redisGet(cacheKey)
+        if (cached !== undefined) {
+            return (cached === null ? [] : cached) as ExtendedAccount[]
+        }
     }
-    return account as ExtendedAccount[]
+    if (user.length > 16) return [] as ExtendedAccount[]
+    try {
+        const account = await rpcClient.database.getAccounts([user])
+        await redisSet(cacheKey, account, 300)
+        return account as ExtendedAccount[]
+    } catch (e) {
+        logger.error({ err: e, user }, 'Unable to load account from hived')
+        await redisSet(cacheKey, null, 30)
+        return [] as ExtendedAccount[]
+    }
 }
 
 export interface HiveProfile {
@@ -91,18 +101,26 @@ export interface HiveProfile {
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
 export const getProfile = async (user, isCached= true) => {
     const cacheKey = `profile:hive:${user}`
-    let profile = isCached ? await redisGet(cacheKey) as HiveProfile : undefined
-    if (profile === undefined && user.length <= 16) {
-      try {
+    if (isCached) {
+        const cached = await redisGet(cacheKey)
+        if (cached !== undefined) {
+            // null = negative cache (RPC failed), return undefined to trigger fallback
+            return cached === null ? undefined : cached as HiveProfile
+        }
+    }
+    if (user.length > 16) return undefined
+    let profile: HiveProfile | undefined
+    try {
         profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
         await redisSet(cacheKey, profile, 300)
-      } catch (e: any) {
+    } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
         if (e.info && JSON.stringify(e.info).includes('does not exist')) {
           throw e
         }
         logger.error({ err: e, user }, 'Unable to load account profile from hived')
-      }
+        // Cache the failure for 30s to prevent thundering herd on RPC outages
+        await redisSet(cacheKey, null, 30)
     }
     return profile
 }

@@ -118,7 +118,7 @@ async function handleAvatar(ctx: KoaContext) {
     const file = proxyStore.createReadStream(imageKey)
     const { head, stream } = await import('stream-head').then((mod) => mod.default(file, { bytes: 16384 }))
     ctx.set('Content-Type', await mimeMagic(head))
-    ctx.set('Cache-Control', 'public,max-age=3600,stale-while-revalidate=86400')
+    ctx.set('Cache-Control', isProfileFallback ? 'public,max-age=120' : 'public,max-age=3600')
     ctx.body = stream
     return
   }
@@ -214,8 +214,8 @@ async function handleAvatar(ctx: KoaContext) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
     ctx.set('Cache-Control', isFinalFallback
-        ? 'public,max-age=600'
-        : 'public,max-age=3600,stale-while-revalidate=86400')
+        ? 'public,max-age=120'
+        : 'public,max-age=3600')
   }
   ctx.body = rv
 }

@@ -48,7 +48,7 @@ export async function serveOrBuildFallbackImage(
             contentType = 'image/webp'
             break
         case OutputFormat.AVIF:
-            image.avif({ force: true, quality: 50, effort: 4 })
+            image.avif({ force: true, quality: 50, effort: 3 })
             contentType = 'image/avif'
             break
         case OutputFormat.Match:

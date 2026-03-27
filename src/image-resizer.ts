@@ -99,7 +99,7 @@ export async function resizeImageWithOptions(
             break
         case OutputFormat.AVIF:
             contentType = 'image/avif'
-            image.avif({ quality: 50, effort: 4, force: true })
+            image.avif({ quality: 50, effort: 3, force: true })
             break
     }
 
