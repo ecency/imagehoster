@@ -1,13 +1,12 @@
 /**
  * Sharded filesystem blob store.
  *
- * Distributes files into subdirectories based on the first 4 characters
- * of the key. This limits each directory to a manageable number of files
- * instead of millions in one flat dir.
+ * Distributes files into subdirectories based on the first 6 characters
+ * of the key (e.g. 'U5dqrE'). Proxy keys share a common 'U5d' prefix
+ * so only characters 4-6 provide entropy — 6 chars gives ~3,364 buckets.
  *
- * Backwards-compatible: reads check sharded path first, then flat path.
- * When a flat file is found, it is migrated to the sharded path via
- * link() + unlink() (safe for concurrent readers, never overwrites newer data).
+ * Backwards-compatible: reads check 6-char shard first, then flat path.
+ * When a flat file is found, it is migrated to the shard via link() + unlink().
  */
 
 import * as fs from 'fs'
@@ -16,11 +15,11 @@ import { Readable } from 'stream'
 
 import { logger } from './logger'
 
+const SHARD_LEN = 6
+
 function shardDir(key: string): string {
-    // Keys look like 'UQmXyz...' (base58, ~195k buckets) or 'Uabcdef...' (hex, ~4k buckets)
-    // Take first 4 chars as shard directory to keep ~10-50 files per dir at scale
-    if (key.length >= 4) {
-        return key.slice(0, 4)
+    if (key.length >= SHARD_LEN) {
+        return key.slice(0, SHARD_LEN)
     }
     return '_misc'
 }
@@ -52,23 +51,16 @@ export class ShardedFsStore {
         })
     }
 
-    /**
-     * Migrate a flat file to its sharded location.
-     * Uses link() + unlink() instead of rename() to avoid two races:
-     * - link() is a no-op if sPath already exists (EEXIST) → never overwrites newer data
-     * - unlink() on fPath doesn't affect open file descriptors → no ENOENT for concurrent readers
-     */
-    private migrateToShard(key: string, fPath: string, sPath: string) {
-        const dir = path.dirname(sPath)
+    private migrateToShard(key: string, oldPath: string, newPath: string) {
+        const dir = path.dirname(newPath)
         this.ensureDir(dir, (err) => {
             if (err) return
-            fs.link(fPath, sPath, (linkErr) => {
+            fs.link(oldPath, newPath, (linkErr) => {
                 if (linkErr && linkErr.code !== 'EEXIST' && linkErr.code !== 'ENOENT') {
                     logger.warn({ err: linkErr, key }, 'shard migration link failed')
                     return
                 }
-                // Remove flat file — safe even if other readers have open fds (Unix semantics)
-                fs.unlink(fPath, () => {})
+                fs.unlink(oldPath, () => {})
             })
         })
     }
@@ -76,17 +68,14 @@ export class ShardedFsStore {
     createReadStream(opts: any): Readable {
         const key = typeof opts === 'string' ? opts : opts.key
         const sPath = shardedPath(this.path, key)
-        const fPath = flatPath(this.path, key)
 
-        // Try sharded path first — fast path for new/migrated files
         try {
             fs.accessSync(sPath, fs.constants.R_OK)
             return fs.createReadStream(sPath)
-        } catch (_e) {
-            // not in sharded location
-        }
+        } catch (_e) {}
 
-        // Fall back to flat path — migrate in background after stream is open
+        // Fall back to flat path — migrate in background
+        const fPath = flatPath(this.path, key)
         const stream = fs.createReadStream(fPath)
         stream.once('open', () => {
             this.migrateToShard(key, fPath, sPath)
@@ -144,11 +133,8 @@ export class ShardedFsStore {
         const sPath = shardedPath(this.path, key)
 
         fs.unlink(sPath, (err) => {
-            // Always try flat path too — file may exist in either or both locations
             fs.unlink(flatPath(this.path, key), (err2) => {
-                // Success if either unlink succeeded
                 if (!err || !err2) return done(null)
-                // Both failed — report if it's not just ENOENT
                 if (err2.code !== 'ENOENT') return done(err2)
                 if (err.code !== 'ENOENT') return done(err)
                 done(null)
@@ -159,14 +145,10 @@ export class ShardedFsStore {
     async removeByPrefix(prefix: string): Promise<number> {
         let count = 0
 
-        // Always remove from flat root (legacy files)
         count += await this.removePrefixInDir(this.path, prefix)
 
-        // For sharded files: if prefix is long enough to determine the shard,
-        // scan only that shard. Otherwise scan all shard directories.
-        if (prefix.length >= 4) {
-            const shardPath = path.join(this.path, shardDir(prefix))
-            count += await this.removePrefixInDir(shardPath, prefix)
+        if (prefix.length >= SHARD_LEN) {
+            count += await this.removePrefixInDir(path.join(this.path, shardDir(prefix)), prefix)
         } else {
             count += await this.removePrefixInAllShards(prefix)
         }

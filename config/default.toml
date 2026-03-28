@@ -49,7 +49,7 @@ max_image_size = 30000000 # 25mb
 
 # redis db used for ratelimiting uploads
 # redis_url = 'redis://localhost'
-redis_url = 'redis://172.18.0.2'
+redis_url = 'redis://myredis'
 # redis_password = '' # Set in config/local-development.toml
 
 # sentry error tracking (optional)

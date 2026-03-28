@@ -1,23 +1,21 @@
 #!/bin/bash
 #
-# Migrate flat proxy store files into sharded subdirectories.
-# Uses hard link + unlink (same as the runtime migration) so:
-#   - No data copying (instant, same inode)
-#   - Safe for concurrent readers (open fds unaffected by unlink)
-#   - Never overwrites existing sharded files (ln fails with EEXIST)
+# Migrate proxy store files into 6-character sharded subdirectories.
 #
-# Usage:
-#   ./scripts/migrate-to-shards.sh /mnt/eproxy-bucket
-#   ./scripts/migrate-to-shards.sh /mnt/eproxy-bucket --dry-run
-#   ./scripts/migrate-to-shards.sh /mnt/eproxy-bucket --batch=50000
+# Step 1: ./scripts/migrate-to-shards.sh /path --from-old-shards  (4-char → 6-char)
+# Step 2: ./scripts/migrate-to-shards.sh /path                     (flat → 6-char)
+#
+# Uses hard link + unlink: no data copying, safe for concurrent readers.
 #
 # Run with ionice/nice to avoid impacting production:
-#   nice -n 19 ionice -c 3 ./scripts/migrate-to-shards.sh /mnt/eproxy-bucket
+#   nice -n 19 ionice -c 3 ./scripts/migrate-to-shards.sh /path [options]
 
 set -euo pipefail
 
-ROOT="${1:?Usage: $0 /path/to/proxy-store [--dry-run] [--batch=N]}"
+SHARD_LEN=6
+ROOT="${1:?Usage: $0 /path/to/proxy-store [--dry-run] [--batch=N] [--from-old-shards]}"
 DRY_RUN=false
+FROM_OLD_SHARDS=false
 BATCH=0
 MIGRATED=0
 SKIPPED=0
@@ -27,26 +25,19 @@ for arg in "${@:2}"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --batch=*) BATCH="${arg#--batch=}" ;;
+        --from-old-shards) FROM_OLD_SHARDS=true ;;
     esac
 done
 
-if [ ! -d "$ROOT" ]; then
-    echo "Error: $ROOT is not a directory"
-    exit 1
-fi
+[ -d "$ROOT" ] || { echo "Error: $ROOT is not a directory"; exit 1; }
 
-echo "Proxy store: $ROOT"
-echo "Dry run: $DRY_RUN"
-[ "$BATCH" -gt 0 ] 2>/dev/null && echo "Batch limit: $BATCH"
-echo "---"
-
-# Process only regular files in the root directory (not in subdirectories)
-find "$ROOT" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' filepath; do
+migrate_file() {
+    local filepath="$1"
+    local filename
     filename=$(basename "$filepath")
 
-    # Shard directory = first 4 chars of filename
-    if [ ${#filename} -ge 4 ]; then
-        shard="${filename:0:4}"
+    if [ ${#filename} -ge $SHARD_LEN ]; then
+        shard="${filename:0:$SHARD_LEN}"
     else
         shard="_misc"
     fi
@@ -54,41 +45,84 @@ find "$ROOT" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' filepath; do
     shard_dir="$ROOT/$shard"
     shard_path="$shard_dir/$filename"
 
-    # Skip if already exists in shard (don't overwrite)
-    if [ -e "$shard_path" ]; then
+    if [ "$filepath" = "$shard_path" ]; then
         SKIPPED=$((SKIPPED + 1))
-        continue
+        return
+    fi
+
+    if [ -e "$shard_path" ]; then
+        $DRY_RUN || rm -f "$filepath"
+        SKIPPED=$((SKIPPED + 1))
+        return
     fi
 
     if $DRY_RUN; then
-        echo "[dry-run] $filename -> $shard/$filename"
+        echo "[dry-run] $filepath -> $shard/$filename"
         MIGRATED=$((MIGRATED + 1))
     else
-        # Create shard directory if needed
         mkdir -p "$shard_dir" 2>/dev/null || true
-
-        # Hard link then unlink (atomic, no data copy)
         if ln "$filepath" "$shard_path" 2>/dev/null; then
             rm -f "$filepath"
             MIGRATED=$((MIGRATED + 1))
         else
-            # ln can fail with EEXIST if another process migrated it concurrently
             ERRORS=$((ERRORS + 1))
         fi
     fi
 
-    # Progress every 10,000 files
     total=$((MIGRATED + SKIPPED + ERRORS))
     if [ $((total % 10000)) -eq 0 ] && [ $total -gt 0 ]; then
         echo "Progress: migrated=$MIGRATED skipped=$SKIPPED errors=$ERRORS"
     fi
+}
 
-    # Stop at batch limit
-    if [ "$BATCH" -gt 0 ] && [ "$MIGRATED" -ge "$BATCH" ]; then
-        echo "Batch limit reached ($BATCH)"
-        break
-    fi
-done
+echo "Proxy store: $ROOT"
+echo "Shard length: $SHARD_LEN"
+echo "Mode: $($FROM_OLD_SHARDS && echo '4-char → 6-char shards' || echo 'flat → 6-char shards')"
+echo "Dry run: $DRY_RUN"
+[ "$BATCH" -gt 0 ] 2>/dev/null && echo "Batch limit: $BATCH"
+echo "---"
+
+if $FROM_OLD_SHARDS; then
+    # Migrate from old 4-char shard directories to 6-char shards.
+    # Probe possible 4-char dir names via stat (instant) instead of
+    # listing the root directory (millions of flat files = very slow).
+    BASE58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    DONE=false
+    echo "Probing for 4-char shard directories..."
+    for ((c=0; c<${#BASE58}; c++)); do
+        $DONE && break
+        for ((d=0; d<${#BASE58}; d++)); do
+            $DONE && break
+            # All proxy keys start with U5d (multihash sha1 prefix)
+            dirname="U5${BASE58:$c:1}${BASE58:$d:1}"
+            old_shard_dir="$ROOT/$dirname"
+            [ -d "$old_shard_dir" ] || continue
+
+            echo "Processing old shard: $dirname"
+            while IFS= read -r -d '' filepath; do
+                migrate_file "$filepath"
+            done < <(find "$old_shard_dir" -maxdepth 1 -type f -print0)
+
+            if ! $DRY_RUN; then
+                rmdir "$old_shard_dir" 2>/dev/null && echo "Removed empty dir: $dirname" || true
+            fi
+
+            if [ "$BATCH" -gt 0 ] && [ "$MIGRATED" -ge "$BATCH" ]; then
+                echo "Batch limit reached ($BATCH)"
+                DONE=true
+            fi
+        done
+    done
+else
+    # Migrate flat files from root directory
+    while IFS= read -r -d '' filepath; do
+        migrate_file "$filepath"
+        if [ "$BATCH" -gt 0 ] && [ "$MIGRATED" -ge "$BATCH" ]; then
+            echo "Batch limit reached ($BATCH)"
+            break
+        fi
+    done < <(find "$ROOT" -maxdepth 1 -type f -print0)
+fi
 
 echo "---"
 echo "Done: migrated=$MIGRATED skipped=$SKIPPED errors=$ERRORS"
