@@ -83,6 +83,9 @@ export async function resizeImageWithOptions(
             if (contentType === 'image/svg+xml' || contentType === 'image/svg') {
                 contentType = 'image/png'
                 image.png({ quality: 80, compressionLevel: 9, force: true })
+            } else if (contentType === 'image/heic' || contentType === 'image/heif') {
+                contentType = 'image/jpeg'
+                image.jpeg({ quality: 80, force: true })
             }
             break
         case OutputFormat.WEBP:

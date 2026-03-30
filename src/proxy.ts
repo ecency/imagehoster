@@ -485,6 +485,11 @@ export async function proxyHandler(ctx: KoaContext) {
 
         switch (options.format) {
             case OutputFormat.Match:
+                // HEIC/HEIF is not renderable by most browsers — convert to JPEG
+                if (contentType === 'image/heic' || contentType === 'image/heif') {
+                    image.jpeg({quality: 80, force: true})
+                    contentType = 'image/jpeg'
+                }
                 break
             case OutputFormat.JPEG:
                 image.jpeg({force: true})
