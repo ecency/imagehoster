@@ -43,7 +43,22 @@ RUN cd /tmp && \
   make install && \
   ldconfig
 
-# Build libheif (HEIF/AVIF container — links to dav1d for decode, libaom for encode)
+# Build libde265 (HEVC/H.265 decoder — needed for HEIC images from iPhones/cameras)
+ARG LIBDE265_VERSION=1.0.15
+RUN cd /tmp && \
+  git clone --depth 1 --branch v${LIBDE265_VERSION} https://github.com/strukturag/libde265.git && \
+  cd libde265 && \
+  mkdir build && cd build && \
+  cmake .. \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON \
+    -DENABLE_ENCODER=OFF \
+    -DENABLE_DECODER=ON && \
+  make -j$(nproc) && \
+  make install && \
+  ldconfig
+
+# Build libheif (HEIF/AVIF container — links to dav1d for AV1, libde265 for HEVC, libaom for encode)
 ARG LIBHEIF_VERSION=1.19.7
 RUN cd /tmp && \
   git clone --depth 1 --branch v${LIBHEIF_VERSION} https://github.com/strukturag/libheif.git && \
@@ -53,7 +68,9 @@ RUN cd /tmp && \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
     -DWITH_EXAMPLES=OFF \
-    -DWITH_GDK_PIXBUF=OFF && \
+    -DWITH_GDK_PIXBUF=OFF \
+    -DWITH_LIBDE265=ON \
+    -DWITH_LIBDE265_PLUGIN=OFF && \
   make -j$(nproc) && \
   make install && \
   ldconfig

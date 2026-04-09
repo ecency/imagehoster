@@ -60,6 +60,7 @@ export async function serveOrBuildFallbackImage(
     const rv = await image.toBuffer()
 
     ctx.set('Content-Type', contentType)
+    ctx.set('Vary', 'Accept')
     ctx.set('Cache-Control', 'public,max-age=600')
     ctx.body = rv
 }

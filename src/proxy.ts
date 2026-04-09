@@ -270,6 +270,7 @@ export async function proxyHandler(ctx: KoaContext) {
         const {head, stream} = await streamHead(file, {bytes: 16384})
         const mimeType = await mimeMagic(head)
         ctx.set('Content-Type', mimeType)
+        ctx.set('Vary', 'Accept')
         ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
         ctx.body = stream
         return

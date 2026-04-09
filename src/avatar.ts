@@ -118,6 +118,7 @@ async function handleAvatar(ctx: KoaContext) {
     const file = proxyStore.createReadStream(imageKey)
     const { head, stream } = await import('stream-head').then((mod) => mod.default(file, { bytes: 16384 }))
     ctx.set('Content-Type', await mimeMagic(head))
+    ctx.set('Vary', 'Accept')
     ctx.set('Cache-Control', isProfileFallback ? 'public,max-age=120' : 'public,max-age=3600')
     ctx.body = stream
     return
