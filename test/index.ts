@@ -1,8 +1,8 @@
 import 'mocha'
 import assert from 'assert'
-import {PrivateKey} from '@hiveio/dhive'
+import {PrivateKey} from '@ecency/hive-tx'
 
-import {rpcClient} from './../src/common'
+import {rpc} from './../src/common'
 
 export const testKeys = {
     foo: PrivateKey.fromSeed('foo'),
@@ -78,26 +78,26 @@ export const mockProfiles: any = {
 }
 
 before(() => {
-    // mock out dsteem rpc calls
-    const _client = rpcClient as any
-    _client.call = async (api: string, method: string, params: any = []) => {
-        const apiMethod = `${ api }-${ method }`
-        switch (apiMethod) {
-            case 'condenser_api-get_accounts':
-                assert.equal(params.length, 1, 'can only mock single account lookups')
-                return [mockAccounts[params[0]]]
-            case 'bridge-get_profile':
-                const username = params.account || params[0]
+    // mock out hive rpc calls
+    rpc.call = async (method: string, params: any = []) => {
+        switch (method) {
+            case 'condenser_api.get_accounts': {
+                const names = (params as string[][])[0]
+                assert.equal(names.length, 1, 'can only mock single account lookups')
+                return [mockAccounts[names[0]]]
+            }
+            case 'bridge.get_profile': {
+                const username = (params as any).account || (params as any[])[0]
                 return mockProfiles[username] || null
+            }
             default:
-                throw new Error(`No mock data for: ${ apiMethod }`)
+                throw new Error(`No mock data for: ${ method }`)
         }
     }
 })
 
 after(() => {
-    const _client = rpcClient as any
-    _client.call = async () => {
+    rpc.call = async () => {
         throw new Error('RPC CALL AFTER UNIT TESTS')
     }
 })

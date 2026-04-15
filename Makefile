@@ -27,7 +27,7 @@ devserver: node_modules
 	@onchange -i 'src/**/*.ts' 'config/*' -- ts-node src/app.ts | bunyan -o short
 
 .PHONY: test
-# --exit required: @hiveio/dhive Client keeps HTTP sockets alive with no close() API
+# --exit kept as safety net against hanging keepalive sockets from test servers
 test: node_modules
 	@NODE_ENV=test mocha --require ts-node/register test/*.ts --exit --grep '$(grep)'
 

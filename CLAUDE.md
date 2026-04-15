@@ -196,7 +196,7 @@ Tests in `test/` directory use Mocha + ts-node (181 tests). Key test files:
 
 Coverage reports generated with nyc (Istanbul) in `reports/coverage/`.
 
-Note: `--exit` flag needed for Mocha due to dhive Client keepalive sockets. All test files use port 0 with dynamic assignment.
+Note: `--exit` flag kept on Mocha as a safety net against any hanging sockets. All test files use port 0 with dynamic assignment.
 
 ## Important Implementation Notes
 
