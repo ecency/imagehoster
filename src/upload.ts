@@ -296,6 +296,9 @@ export async function uploadHandler(ctx: KoaContext) {
             throw new APIError({code: APIError.Code.InvalidSignature, cause})
         }
 
+        // Only accept posting and active keys for direct uploads.
+        // Owner key is intentionally excluded — using it for routine operations
+        // is a security anti-pattern (owner key compromise = full account takeover).
         const thresholdPosting = account.posting.weight_threshold
         for (const auth of account.posting.key_auths) {
             if (auth[0] === publicKey && auth[1] >= thresholdPosting) {

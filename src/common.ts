@@ -147,7 +147,12 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
     let profile: HiveProfile | undefined
     try {
         profile = await rpc.call<HiveProfile>('bridge.get_profile', {account: user})
-        await redisSet(cacheKey, profile, 300)
+        if (profile) {
+            await redisSet(cacheKey, profile, 300)
+        } else {
+            // Null/undefined result — negative cache with short TTL
+            await redisSet(cacheKey, null, 30)
+        }
     } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
         const errStr = (e && (e.message || '')) + ' ' + (e && e.data ? JSON.stringify(e.data) : '')
