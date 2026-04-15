@@ -66,6 +66,9 @@ export async function serveHandler(ctx: KoaContext) {
     }
 
     ctx.set('Content-Type', mimeType)
+    if (mimeType === 'image/svg+xml') {
+        ctx.set('Content-Disposition', 'attachment')
+    }
     ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
     ctx.body = buffer
 }

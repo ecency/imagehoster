@@ -5,10 +5,9 @@ import needle from 'needle'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
-import {PrivateKey, cryptoUtils} from '@hiveio/dhive'
+import {PrivateKey} from '@ecency/hive-tx'
 
 import {app} from './../src/app'
-import {rpcClient} from './../src/common'
 
 import {testKeys} from './index'
 

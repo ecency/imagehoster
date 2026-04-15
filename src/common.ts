@@ -1,5 +1,5 @@
 /** Misc shared instances. */
-import {Client, ExtendedAccount} from '@hiveio/dhive'
+import {callRPC, config as hiveTxConfig} from '@ecency/hive-tx'
 import {AbstractBlobStore} from 'abstract-blob-store'
 import cluster from 'cluster'
 import config from 'config'
@@ -25,17 +25,52 @@ export interface KoaContext extends RouterContext {
     referrer?: string // Koa request referrer alias
 }
 
-/** hived (jussi) RPC client. */
-export const rpcClient = new Client([config.get('rpc_node'),
-      'https://api.deathwing.me',
-      'https://rpc.mahdiyari.info',
-      'https://api.openhive.network',
-      'https://techcoderx.com',
-      'https://api.syncad.com'
-    ], {
-    timeout: 2000,
-    failoverThreshold: 2
-})
+/** Minimal Hive account type for signature verification. */
+export interface HiveAccountAuthority {
+    weight_threshold: number
+    account_auths: Array<[string, number]>
+    key_auths: Array<[string, number]>
+}
+
+export interface HiveAccount {
+    name: string
+    posting: HiveAccountAuthority
+    active: HiveAccountAuthority
+    owner: HiveAccountAuthority
+    reputation: number | string
+    [k: string]: any
+}
+
+/** hived RPC config — hive-tx uses module-level config, not a client instance. */
+hiveTxConfig.nodes = [
+    config.get('rpc_node') as string,
+    'https://hapi.ecency.com',
+    'https://api.deathwing.me',
+    'https://rpc.mahdiyari.info',
+    'https://api.openhive.network',
+    'https://techcoderx.com',
+    'https://api.syncad.com',
+]
+// Per-request timeout. dhive's effective first-try timeout was ~500ms (hardcoded
+// in client.js fetchTimeout), which caused frequent spurious failovers on slow
+// nodes. hive-tx honors this value directly on the actual fetch.
+// Keep this generous enough to tolerate a slow-but-alive node.
+hiveTxConfig.timeout = 3000
+// Retry budget: hive-tx default is 8, meaning up to 9 attempts per call. That
+// multiplies against `timeout` for a worst-case wall clock of ~27s on total
+// RPC outage — unacceptable for request-path operations (avatar/cover/upload
+// auth). Cap at 2 retries = 3 attempts = ~9s worst case.
+hiveTxConfig.retry = 2
+
+/**
+ * Mockable RPC wrapper. Tests monkey-patch `rpc.call` to return fixtures.
+ * Must be a plain object property (not a frozen export) so reassignment works.
+ */
+export const rpc = {
+    call: async <T = any>(method: string, params?: any[] | object): Promise<T> => {
+        return callRPC<T>(method, params)
+    },
+}
 
 /** Try to get a value from Redis shared cache. */
 async function redisGet(key: string): Promise<any | undefined> {
@@ -59,23 +94,23 @@ async function redisSet(key: string, value: any, ttl: number): Promise<void> {
 }
 
 /** Get account with full authority data (for signature verification) */
-export const getAccount = async (user, isCached= true) => {
+export const getAccount = async (user: string, isCached= true): Promise<HiveAccount[]> => {
     const cacheKey = `profile:account:${user}`
     if (isCached) {
         const cached = await redisGet(cacheKey)
         if (cached !== undefined) {
-            return (cached === null ? [] : cached) as ExtendedAccount[]
+            return (cached === null ? [] : cached) as HiveAccount[]
         }
     }
-    if (user.length > 16) return [] as ExtendedAccount[]
+    if (user.length > 16) return [] as HiveAccount[]
     try {
-        const account = await rpcClient.database.getAccounts([user])
+        const account = await rpc.call<HiveAccount[]>('condenser_api.get_accounts', [[user]])
         await redisSet(cacheKey, account, 300)
-        return account as ExtendedAccount[]
+        return account || []
     } catch (e) {
         logger.error({ err: e, user }, 'Unable to load account from hived')
         await redisSet(cacheKey, null, 30)
-        return [] as ExtendedAccount[]
+        return [] as HiveAccount[]
     }
 }
 
@@ -99,7 +134,7 @@ export interface HiveProfile {
 }
 
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
-export const getProfile = async (user, isCached= true) => {
+export const getProfile = async (user: string, isCached= true): Promise<HiveProfile | undefined> => {
     const cacheKey = `profile:hive:${user}`
     if (isCached) {
         const cached = await redisGet(cacheKey)
@@ -111,11 +146,17 @@ export const getProfile = async (user, isCached= true) => {
     if (user.length > 16) return undefined
     let profile: HiveProfile | undefined
     try {
-        profile = await rpcClient.call('bridge', 'get_profile', {account: user}) as HiveProfile
-        await redisSet(cacheKey, profile, 300)
+        profile = await rpc.call<HiveProfile>('bridge.get_profile', {account: user})
+        if (profile) {
+            await redisSet(cacheKey, profile, 300)
+        } else {
+            // Null/undefined result — negative cache with short TTL
+            await redisSet(cacheKey, null, 30)
+        }
     } catch (e: any) {
         // "account does not exist" errors should propagate so callers can return 404
-        if (e.info && JSON.stringify(e.info).includes('does not exist')) {
+        const errStr = (e && (e.message || '')) + ' ' + (e && e.data ? JSON.stringify(e.data) : '')
+        if (errStr.includes('does not exist')) {
           throw e
         }
         logger.error({ err: e, user }, 'Unable to load account profile from hived')

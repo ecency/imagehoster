@@ -1,5 +1,5 @@
 /** Uploads file to blob store. */
-import {cryptoUtils, ExtendedAccount, PrivateKey, PublicKey, Signature} from '@hiveio/dhive'
+import {PrivateKey, PublicKey, Signature} from '@ecency/hive-tx'
 import Busboy from 'busboy'
 import config from 'config'
 import {createHash} from 'crypto'
@@ -8,7 +8,7 @@ import * as multihash from 'multihashes'
 import {URL} from 'url'
 
 import {accountBlacklist} from './blacklist'
-import {getAccount, getProfile, getRatelimit, KoaContext, redisClient, uploadStore} from './common'
+import {getAccount, getProfile, getRatelimit, HiveAccount, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
 
@@ -87,6 +87,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
 
     const actualMime = await mimeMagic(data)
     APIError.assert(AcceptedContentTypes.includes(actualMime), APIError.Code.InvalidImage)
+    APIError.assert(actualMime !== 'image/svg+xml' && actualMime !== 'image/svg', APIError.Code.InvalidImage)
 
     const imageHash = createHash('sha256')
         .update('ImageSigningChallenge')
@@ -115,10 +116,10 @@ export async function uploadHsHandler(ctx: KoaContext) {
                 authors: tokenObj.authors,
                 timestamp: tokenObj.timestamp,
         })
-        const hash = cryptoUtils.sha256(message)
+        const hash = createHash('sha256').update(message).digest()
         const username = tokenObj.authors[0].toLowerCase()
 
-        const [account]: ExtendedAccount[] = await getAccount(username)
+        const [account]: HiveAccount[] = await getAccount(username)
         APIError.assert(account, APIError.Code.NoSuchAccount)
         ctx.log.warn('uploading app %s', signedMessage.app)
 
@@ -127,13 +128,13 @@ export async function uploadHsHandler(ctx: KoaContext) {
         const broadcasterPrivKey = PrivateKey.fromString(UPLOAD_LIMITS.app_posting_wif)
         const broadcasterPubKey = broadcasterPrivKey.createPublic()
 
-        if (broadcasterPubKey.verify(hash, Signature.fromString(signature))) {
+        if (broadcasterPubKey.verify(hash, Signature.from(signature))) {
             validSignature = true
         }
         // when authorized app account or if signed message with own keys
         if (account && account.name) {
             ['posting', 'active', 'owner'].forEach((type) => {
-                account[type].account_auths.forEach((key: string[]) => {
+                account[type].account_auths.forEach((key: [string, number]) => {
                     if (
                     !validSignature
                     && key[0] === UPLOAD_LIMITS.app_account
@@ -141,10 +142,10 @@ export async function uploadHsHandler(ctx: KoaContext) {
                     validSignature = true
                     }
                 })
-                account[type].key_auths.forEach((key: string[]) => {
+                account[type].key_auths.forEach((key: [string, number]) => {
                     if (
                         !validSignature
-                        && PublicKey.fromString(key[0]).verify(hash, Signature.fromString(signature))
+                        && PublicKey.fromString(key[0]).verify(hash, Signature.from(signature))
                     ) {
                         validSignature = true
                     }
@@ -221,17 +222,18 @@ export async function uploadHandler(ctx: KoaContext) {
 
     const actualMime2 = await mimeMagic(data)
     APIError.assert(AcceptedContentTypes.includes(actualMime2), APIError.Code.InvalidImage)
+    APIError.assert(actualMime2 !== 'image/svg+xml' && actualMime2 !== 'image/svg', APIError.Code.InvalidImage)
 
     const imageHash = createHash('sha256')
         .update('ImageSigningChallenge')
         .update(data)
         .digest()
 
-    const [account]: ExtendedAccount[] = await getAccount(ctx.params['username'].toLowerCase())
+    const [account]: HiveAccount[] = await getAccount(ctx.params['username'].toLowerCase())
     APIError.assert(account, APIError.Code.NoSuchAccount)
 
     let validSignature = false
-    let publicKey
+    let publicKey: string | undefined
 
     if (ctx.params['signature'].startsWith('hive')) {
         const signature = ctx.params['signature'].replace('hive', '').replace('signer', '')
@@ -257,18 +259,18 @@ export async function uploadHandler(ctx: KoaContext) {
                 })
                 const signs = tokenObj.signatures[0]
 
-                const hash = cryptoUtils.sha256(message)
+                const hash = createHash('sha256').update(message).digest()
                 const broadcasterPrivKey = PrivateKey.fromString(UPLOAD_LIMITS.app_posting_wif)
                 const broadcasterPubKey = broadcasterPrivKey.createPublic()
 
-                if (broadcasterPubKey.verify(hash, Signature.fromString(signs))) {
+                if (broadcasterPubKey.verify(hash, Signature.from(signs))) {
                     validSignature = true
                 }
                 if (account && account.name) {
                     ['posting', 'active', 'owner'].forEach((type) => {
-                        account[type].key_auths.forEach((key: string[]) => {
+                        account[type].key_auths.forEach((key: [string, number]) => {
                             if (!validSignature
-                                && PublicKey.fromString(key[0]).verify(hash, Signature.fromString(signs))
+                                && PublicKey.fromString(key[0]).verify(hash, Signature.from(signs))
                             ) {
                                 validSignature = true
                             }
@@ -283,17 +285,20 @@ export async function uploadHandler(ctx: KoaContext) {
     } else {
         let signature: Signature
         try {
-            signature = Signature.fromString(ctx.params['signature'])
+            signature = Signature.from(ctx.params['signature'])
         } catch (cause) {
             throw new APIError({code: APIError.Code.InvalidSignature, cause})
         }
 
         try {
-            publicKey = signature.recover(imageHash).toString()
+            publicKey = signature.getPublicKey(imageHash).toString()
         } catch (cause) {
             throw new APIError({code: APIError.Code.InvalidSignature, cause})
         }
 
+        // Only accept posting and active keys for direct uploads.
+        // Owner key is intentionally excluded — using it for routine operations
+        // is a security anti-pattern (owner key compromise = full account takeover).
         const thresholdPosting = account.posting.weight_threshold
         for (const auth of account.posting.key_auths) {
             if (auth[0] === publicKey && auth[1] >= thresholdPosting) {

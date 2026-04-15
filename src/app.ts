@@ -48,6 +48,7 @@ app.use(errorMiddleware as any)
 
 app.use(async (ctx, next) => {
     ctx.set('X-Content-Type-Options', 'nosniff')
+    ctx.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'")
     await next()
 })
 
