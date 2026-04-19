@@ -46,7 +46,7 @@ pm2 start ecosystem.config.js
 
 - **Framework:** Koa 2 + TypeScript
 - **Image Processing:** Sharp (libvips)
-- **Blockchain:** Hive (@ecency/hive-tx)
+- **Blockchain:** Hive (@ecency/sdk)
 - **Storage:** S3-compatible via AWS SDK v3 (Backblaze B2, MinIO, AWS S3, DigitalOcean Spaces)
 - **Cache:** Redis (rate limiting) + node-cache (RPC data) + LRU-cache (metadata)
 - **Logging:** Bunyan structured logging
@@ -261,7 +261,7 @@ Create signature with posting key:
 
 ```javascript
 const crypto = require('crypto')
-const { PrivateKey } = require('@ecency/hive-tx')
+const { PrivateKey } = require('@ecency/sdk')
 
 const imageData = fs.readFileSync('image.jpg')
 const imageHash = crypto.createHash('sha256')

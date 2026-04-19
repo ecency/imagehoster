@@ -1,5 +1,5 @@
 /** Misc shared instances. */
-import {callRPC, config as hiveTxConfig} from '@ecency/hive-tx'
+import {callRPC, config as hiveTxConfig} from '@ecency/sdk/hive'
 import {AbstractBlobStore} from 'abstract-blob-store'
 import cluster from 'cluster'
 import config from 'config'
@@ -41,7 +41,7 @@ export interface HiveAccount {
     [k: string]: any
 }
 
-/** hived RPC config — hive-tx uses module-level config, not a client instance. */
+/** hived RPC config — @ecency/sdk uses module-level config, not a client instance. */
 hiveTxConfig.nodes = [
     config.get('rpc_node') as string,
     'https://hapi.ecency.com',
@@ -53,10 +53,10 @@ hiveTxConfig.nodes = [
 ]
 // Per-request timeout. dhive's effective first-try timeout was ~500ms (hardcoded
 // in client.js fetchTimeout), which caused frequent spurious failovers on slow
-// nodes. hive-tx honors this value directly on the actual fetch.
+// nodes. @ecency/sdk honors this value directly on the actual fetch.
 // Keep this generous enough to tolerate a slow-but-alive node.
 hiveTxConfig.timeout = 3000
-// Retry budget: hive-tx default is 8, meaning up to 9 attempts per call. That
+// Retry budget: default is 8, meaning up to 9 attempts per call. That
 // multiplies against `timeout` for a worst-case wall clock of ~27s on total
 // RPC outage — unacceptable for request-path operations (avatar/cover/upload
 // auth). Cap at 2 retries = 3 attempts = ~9s worst case.
