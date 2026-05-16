@@ -1,6 +1,6 @@
 import 'mocha'
 import assert from 'assert'
-import {PrivateKey} from '@ecency/hive-tx'
+import {PrivateKey} from '@ecency/sdk/hive'
 
 import {rpc} from './../src/common'
 

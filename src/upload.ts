@@ -1,5 +1,5 @@
 /** Uploads file to blob store. */
-import {PrivateKey, PublicKey, Signature} from '@ecency/hive-tx'
+import {PrivateKey, PublicKey, Signature} from '@ecency/sdk/hive'
 import Busboy from 'busboy'
 import config from 'config'
 import {createHash} from 'crypto'

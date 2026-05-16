@@ -20,6 +20,9 @@ import {
     getOrigKeyFromUrl,
     sanitizeIgnoreInvalidateParams,
     isBlacklistedUrl,
+    isInternalProxyUrl,
+    isInternalServiceUrl,
+    isInternalUploadUrl,
     ScalingMode,
     OutputFormat,
     storeRemoveByPrefix,
@@ -35,6 +38,8 @@ import {
     DEFAULT_FALLBACK_IMAGE_URL,
     DEFAULT_AVATAR_HASH,
     EMPTY_IMAGE_URL_PATTERNS,
+    INTERNAL_SERVICE_ORIGINS,
+    LEGACY_SERVICE_BASE_URL,
 } from './../src/constants'
 
 import { APIError } from './../src/error'
@@ -328,7 +333,7 @@ describe('utils', function() {
 
     describe('getOrigKeyFromUrl', function() {
         it('should extract upload key from path', function() {
-            const url = new URL('https://images.ecency.com/DQmZi174Xz96UrRVBMNRHb6A2FfU3z1HRPwPPQCgSMgdiUT/test.jpg')
+            const url = new URL('https://i.ecency.com/DQmZi174Xz96UrRVBMNRHb6A2FfU3z1HRPwPPQCgSMgdiUT/test.jpg')
             const key = getOrigKeyFromUrl(url, true)
             assert.equal(key, 'DQmZi174Xz96UrRVBMNRHb6A2FfU3z1HRPwPPQCgSMgdiUT')
         })
@@ -393,6 +398,8 @@ describe('constants', function() {
         it('should match exact empty image URL patterns', function() {
             assert.equal(isEmptyImageUrl(SERVICE_BASE_URL + '/0x0/'), true)
             assert.equal(isEmptyImageUrl(SERVICE_BASE_URL + '/0x0'), true)
+            assert.equal(isEmptyImageUrl(LEGACY_SERVICE_BASE_URL + '/0x0/'), true)
+            assert.equal(isEmptyImageUrl(LEGACY_SERVICE_BASE_URL + '/0x0'), true)
         })
 
         it('should not match partial or different URLs', function() {
@@ -407,6 +414,7 @@ describe('constants', function() {
         it('should match URLs starting with empty image pattern', function() {
             assert.equal(startsWithEmptyImagePrefix(SERVICE_BASE_URL + '/0x0/http://example.com'), true)
             assert.equal(startsWithEmptyImagePrefix(SERVICE_BASE_URL + '/0x0/'), true)
+            assert.equal(startsWithEmptyImagePrefix(LEGACY_SERVICE_BASE_URL + '/0x0/http://example.com'), true)
         })
 
         it('should not match other URLs', function() {
@@ -447,6 +455,28 @@ describe('constants', function() {
         })
     })
 
+    describe('internal service URL helpers', function() {
+        it('should treat both public hosts as internal origins', function() {
+            assert(INTERNAL_SERVICE_ORIGINS.includes(new URL(SERVICE_BASE_URL).origin))
+            assert(INTERNAL_SERVICE_ORIGINS.includes(new URL(LEGACY_SERVICE_BASE_URL).origin))
+            assert.equal(isInternalServiceUrl(new URL('https://i.ecency.com/foo')), true)
+            assert.equal(isInternalServiceUrl(new URL('https://images.ecency.com/foo')), true)
+            assert.equal(isInternalServiceUrl(new URL('https://example.com/foo')), false)
+        })
+
+        it('should detect upload URLs on both public hosts', function() {
+            assert.equal(isInternalUploadUrl(new URL('https://i.ecency.com/DQmHash/test.jpg')), true)
+            assert.equal(isInternalUploadUrl(new URL('https://images.ecency.com/DQmHash/test.jpg')), true)
+            assert.equal(isInternalUploadUrl(new URL('https://example.com/DQmHash/test.jpg')), false)
+        })
+
+        it('should detect proxy URLs on both public hosts', function() {
+            assert.equal(isInternalProxyUrl(new URL('https://i.ecency.com/p/abc')), true)
+            assert.equal(isInternalProxyUrl(new URL('https://images.ecency.com/p/abc')), true)
+            assert.equal(isInternalProxyUrl(new URL('https://example.com/p/abc')), false)
+        })
+    })
+
     describe('exported constants', function() {
         it('should have valid SERVICE_BASE_URL', function() {
             assert(SERVICE_BASE_URL.startsWith('http'), 'should be a URL')
@@ -465,10 +495,12 @@ describe('constants', function() {
             assert(DEFAULT_AVATAR_HASH.startsWith('DQm'))
         })
 
-        it('should have two EMPTY_IMAGE_URL_PATTERNS', function() {
-            assert.equal(EMPTY_IMAGE_URL_PATTERNS.length, 2)
-            assert(EMPTY_IMAGE_URL_PATTERNS[0].includes('0x0/'))
-            assert(EMPTY_IMAGE_URL_PATTERNS[1].includes('0x0'))
+        it('should include current and legacy 0x0 URL patterns', function() {
+            assert.equal(EMPTY_IMAGE_URL_PATTERNS.length, 4)
+            assert(EMPTY_IMAGE_URL_PATTERNS.includes(SERVICE_BASE_URL + '/0x0/'))
+            assert(EMPTY_IMAGE_URL_PATTERNS.includes(SERVICE_BASE_URL + '/0x0'))
+            assert(EMPTY_IMAGE_URL_PATTERNS.includes(LEGACY_SERVICE_BASE_URL + '/0x0/'))
+            assert(EMPTY_IMAGE_URL_PATTERNS.includes(LEGACY_SERVICE_BASE_URL + '/0x0'))
         })
     })
 })

@@ -1,5 +1,5 @@
 #
-# Varnish VCL for images.ecency.com
+# Varnish VCL for i.ecency.com
 # Deployed at /etc/varnish/user.vcl on the production server
 #
 # Request flow: Cloudflare -> Nginx (443) -> Varnish (6081) -> Docker imagehoster (8800)
@@ -32,7 +32,12 @@ acl purgers {
     "78.56.0.0"/16;
 }
 sub vcl_recv {
-    if (req.http.host == "images.ecency.com" || req.http.host == "www.images.ecency.com") {
+    if (
+        req.http.host == "i.ecency.com" ||
+        req.http.host == "www.i.ecency.com" ||
+        req.http.host == "images.ecency.com" ||
+        req.http.host == "www.images.ecency.com"
+    ) {
         set req.backend_hint = default;
     }
     if (req.method == "PURGE"){

@@ -10,7 +10,7 @@ import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
 import {KoaContext, proxyStore, uploadStore} from './common'
-import {applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix, EMPTY_IMAGE_URL_PATTERNS} from './constants'
+import {applyUrlReplacements, isEmptyImageUrl, EMPTY_IMAGE_URL_PATTERNS} from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {fetchImageWithFallbacks} from './fetch-image'
@@ -27,6 +27,8 @@ import {
     mimeMagic,
     NeedleResponse,
     OutputFormat,
+    isInternalProxyUrl,
+    isInternalUploadUrl,
     parseProxiedUrl,
     ProxyOptions,
     purgeCache,
@@ -138,7 +140,7 @@ export async function proxyHandler(ctx: KoaContext) {
     let isDefaultImage = false
 
     // resolve double proxied images
-    while (url.origin === SERVICE_URL.origin && url.pathname.slice(0, 2) === '/p') {
+    while (isInternalProxyUrl(url)) {
         const cleanUrl2 = url.pathname.slice(3).replace(/\.(webp|png)$/, '')
         url = parseProxiedUrl(cleanUrl2)
     }
@@ -181,9 +183,12 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     // Handle URLs that start with 0x0/ but have additional content (like proxied URLs)
-    if (startsWithEmptyImagePrefix(urlString)) {
+    const matchedEmptyImagePrefix = EMPTY_IMAGE_URL_PATTERNS.find(
+        (pattern) => pattern.endsWith('/') && urlString.startsWith(pattern)
+    )
+    if (matchedEmptyImagePrefix) {
         // Extract the actual URL after the prefix
-        const actualUrl = urlString.substring(EMPTY_IMAGE_URL_PATTERNS[0].length)
+        const actualUrl = urlString.substring(matchedEmptyImagePrefix.length)
         if (actualUrl && actualUrl.length > 0) {
             try {
                 url = new URL(actualUrl)
@@ -210,7 +215,7 @@ export async function proxyHandler(ctx: KoaContext) {
     let origKey: string
     let contentType: string
     ctx.originalUrl = urlString
-    const origIsUpload = SERVICE_URL.origin === url.origin && url.pathname[1] === 'D'
+    const origIsUpload = isInternalUploadUrl(url)
     ctx.tag({is_upload: origIsUpload})
     if (origIsUpload) {
         // if we are proxying our or own image, use the uploadStore directly
