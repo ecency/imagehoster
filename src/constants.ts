@@ -4,15 +4,21 @@ import config from 'config'
 
 /** Service base URL from configuration */
 export const SERVICE_BASE_URL = config.get('service_url') as string
+export const LEGACY_SERVICE_BASE_URL = 'https://images.ecency.com'
+export const INTERNAL_SERVICE_BASE_URLS = Array.from(new Set([
+    SERVICE_BASE_URL.replace(/\/+$/, ''),
+    LEGACY_SERVICE_BASE_URL,
+]))
+export const INTERNAL_SERVICE_ORIGINS = INTERNAL_SERVICE_BASE_URLS.map((url) => new URL(url).origin)
 
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'
 
 /** Full URL patterns for the special empty image */
-export const EMPTY_IMAGE_URL_PATTERNS = [
-    `${SERVICE_BASE_URL}/0x0/`,
-    `${SERVICE_BASE_URL}/0x0`
-]
+export const EMPTY_IMAGE_URL_PATTERNS = INTERNAL_SERVICE_BASE_URLS.flatMap((url) => [
+    `${url}/0x0/`,
+    `${url}/0x0`,
+])
 
 /** Default 1x1 transparent pixel fallback image */
 export const DEFAULT_FALLBACK_IMAGE_URL = `${SERVICE_BASE_URL}/DQmY4YngD8ByBgpFtcTRR6wvqYfM1owqtjS6NXyYhKtxv4u/1x1_000000.png`
@@ -47,14 +53,14 @@ export const PATH_REPLACEMENTS: Array<[string, string, string]> = [
  * Check if URL is the special empty image indicator
  */
 export function isEmptyImageUrl(url: string): boolean {
-    return url === EMPTY_IMAGE_URL_PATTERNS[0] || url === EMPTY_IMAGE_URL_PATTERNS[1]
+    return EMPTY_IMAGE_URL_PATTERNS.includes(url)
 }
 
 /**
  * Check if URL starts with the empty image prefix (e.g., for proxied 0x0 URLs)
  */
 export function startsWithEmptyImagePrefix(url: string): boolean {
-    return url.startsWith(EMPTY_IMAGE_URL_PATTERNS[0])
+    return EMPTY_IMAGE_URL_PATTERNS.some((pattern) => pattern.endsWith('/') && url.startsWith(pattern))
 }
 
 /**

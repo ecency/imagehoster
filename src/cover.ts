@@ -12,6 +12,7 @@ import {resizeImageWithOptions} from './image-resizer'
 import {
   getDefaultUrlAndParams,
   getImageKey,
+  isInternalUploadUrl,
   getUrlHashKey,
   mimeMagic,
   OutputFormat,
@@ -86,7 +87,7 @@ async function handleCover(ctx: KoaContext) {
 
   const { url, urlParams } = getDefaultUrlAndParams(coverUrl)
   const urlString = url.toString()
-  const origIsUpload = new URL(config.get('service_url')).origin === url.origin && url.pathname[1] === 'D'
+  const origIsUpload = isInternalUploadUrl(url)
   ctx.tag({ is_upload: origIsUpload })
 
   const origStore: AbstractBlobStore = origIsUpload ? uploadStore : proxyStore
