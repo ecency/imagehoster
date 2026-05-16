@@ -13,7 +13,7 @@ import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { imageBlacklist } from './blacklist'
-import { DEFAULT_FALLBACK_IMAGE_URL, isEmptyImageUrl } from './constants'
+import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
@@ -254,6 +254,18 @@ export function getDefaultUrlAndParams(customUrl?: string): { url: URL, urlParam
     const url = new URL(urlStr)
     const urlParams = base58Enc(url.toString())
     return { url, urlParams }
+}
+
+export function isInternalServiceUrl(url: URL): boolean {
+    return INTERNAL_SERVICE_ORIGINS.includes(url.origin)
+}
+
+export function isInternalUploadUrl(url: URL): boolean {
+    return isInternalServiceUrl(url) && url.pathname[1] === 'D'
+}
+
+export function isInternalProxyUrl(url: URL): boolean {
+    return isInternalServiceUrl(url) && url.pathname.slice(0, 2) === '/p'
 }
 
 export function getProxyImageLimits() {

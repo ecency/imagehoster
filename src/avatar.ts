@@ -12,6 +12,7 @@ import { APIError } from './error'
 import {
   getDefaultUrlAndParams,
   getImageKey,
+  isInternalUploadUrl,
   getUrlHashKey,
   mimeMagic,
   OutputFormat,
@@ -87,7 +88,7 @@ async function handleAvatar(ctx: KoaContext) {
   const size = safeParseInt(ctx.params['size']) || AVATAR_SIZE
   const { url, urlParams } = getDefaultUrlAndParams(avatarUrl)
   const urlString = url.toString()
-  const origIsUpload = new URL(config.get('service_url')).origin === url.origin && url.pathname[1] === 'D'
+  const origIsUpload = isInternalUploadUrl(url)
   ctx.tag({ is_upload: origIsUpload })
 
   const origStore: AbstractBlobStore = origIsUpload ? uploadStore : proxyStore

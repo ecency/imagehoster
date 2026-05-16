@@ -29,12 +29,12 @@ S3_ENDPOINT = 's3.us-west-000.backblazeb2.com'
 S3_REGION = 'us-west-000'
 
 # url where service is running
-service_url = 'https://images.ecency.com'
+service_url = 'https://i.ecency.com'
 
 # default user avatar, should be a png minimum 512x512
-#default_avatar = 'https://images.ecency.com/DQmUVRvAmChYcJqBifekwpR9UTsxSbbbnEi9kJXRWEGzX47/ecency_default_avatar.png'
-default_avatar = 'https://images.ecency.com/DQmSaeyWEevGPZR3gJ13z9fR9psqkrHmHrsfp4oD7qAPKih/hive_default_avatar.png'
-default_cover = 'https://images.ecency.com/DQmdA9wjRyGmDwrTza59yLSjCWMEc9sFD5sC4ZU5kL9UMqo/cover_fallback_day.png'
+#default_avatar = 'https://i.ecency.com/DQmUVRvAmChYcJqBifekwpR9UTsxSbbbnEi9kJXRWEGzX47/ecency_default_avatar.png'
+default_avatar = 'https://i.ecency.com/DQmSaeyWEevGPZR3gJ13z9fR9psqkrHmHrsfp4oD7qAPKih/hive_default_avatar.png'
+default_cover = 'https://i.ecency.com/DQmdA9wjRyGmDwrTza59yLSjCWMEc9sFD5sC4ZU5kL9UMqo/cover_fallback_day.png'
 
 # log level to output at
 #log_level = 'debug'
