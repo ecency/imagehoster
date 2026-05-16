@@ -154,11 +154,6 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
             await redisSet(cacheKey, null, 30)
         }
     } catch (e: any) {
-        // "account does not exist" errors should propagate so callers can return 404
-        const errStr = (e && (e.message || '')) + ' ' + (e && e.data ? JSON.stringify(e.data) : '')
-        if (errStr.includes('does not exist')) {
-          throw e
-        }
         logger.error({ err: e, user }, 'Unable to load account profile from hived')
         // Cache the failure for 30s to prevent thundering herd on RPC outages
         await redisSet(cacheKey, null, 30)

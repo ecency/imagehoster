@@ -2,20 +2,29 @@
 #
 # Migrate proxy store files into 6-character sharded subdirectories.
 #
-# Step 1: ./scripts/migrate-to-shards.sh /path --from-old-shards  (4-char → 6-char)
-# Step 2: ./scripts/migrate-to-shards.sh /path                     (flat → 6-char)
+# Modes:
+#   --from-old-shards   Migrate from old 4-char shards to 6-char shards
+#   (default)           Migrate flat files from root directory (slow on large dirs)
+#   --build-list        Run find once, save to /tmp/migrate-flat-files.txt
+#   --from-list         Process files from saved list (skips slow find scan)
+#
+# Examples:
+#   nice -n 19 ionice -c 3 ./scripts/migrate-to-shards.sh /path --build-list
+#   nice -n 19 ionice -c 3 ./scripts/migrate-to-shards.sh /path --from-list --batch=500000
 #
 # Uses hard link + unlink: no data copying, safe for concurrent readers.
-#
-# Run with ionice/nice to avoid impacting production:
-#   nice -n 19 ionice -c 3 ./scripts/migrate-to-shards.sh /path [options]
 
 set -euo pipefail
 
 SHARD_LEN=6
-ROOT="${1:?Usage: $0 /path/to/proxy-store [--dry-run] [--batch=N] [--from-old-shards]}"
+LIST_FILE="/tmp/migrate-flat-files.txt"
+LIST_POS_FILE="/tmp/migrate-flat-files.pos"
+
+ROOT="${1:?Usage: $0 /path/to/proxy-store [--dry-run] [--batch=N] [--from-old-shards] [--build-list] [--from-list]}"
 DRY_RUN=false
 FROM_OLD_SHARDS=false
+BUILD_LIST=false
+FROM_LIST=false
 BATCH=0
 MIGRATED=0
 SKIPPED=0
@@ -26,6 +35,8 @@ for arg in "${@:2}"; do
         --dry-run) DRY_RUN=true ;;
         --batch=*) BATCH="${arg#--batch=}" ;;
         --from-old-shards) FROM_OLD_SHARDS=true ;;
+        --build-list) BUILD_LIST=true ;;
+        --from-list) FROM_LIST=true ;;
     esac
 done
 
@@ -35,6 +46,9 @@ migrate_file() {
     local filepath="$1"
     local filename
     filename=$(basename "$filepath")
+
+    # File might already be migrated/deleted by now — skip silently
+    [ -e "$filepath" ] || { SKIPPED=$((SKIPPED + 1)); return; }
 
     if [ ${#filename} -ge $SHARD_LEN ]; then
         shard="${filename:0:$SHARD_LEN}"
@@ -77,15 +91,57 @@ migrate_file() {
 
 echo "Proxy store: $ROOT"
 echo "Shard length: $SHARD_LEN"
-echo "Mode: $($FROM_OLD_SHARDS && echo '4-char → 6-char shards' || echo 'flat → 6-char shards')"
+if $BUILD_LIST; then
+    echo "Mode: build file list"
+elif $FROM_LIST; then
+    echo "Mode: migrate from saved list"
+elif $FROM_OLD_SHARDS; then
+    echo "Mode: 4-char → 6-char shards"
+else
+    echo "Mode: flat → 6-char shards (slow find scan)"
+fi
 echo "Dry run: $DRY_RUN"
 [ "$BATCH" -gt 0 ] 2>/dev/null && echo "Batch limit: $BATCH"
 echo "---"
 
-if $FROM_OLD_SHARDS; then
+if $BUILD_LIST; then
+    # One-time scan of flat directory, save filenames to list file.
+    # Subsequent runs use --from-list to skip the slow find scan.
+    echo "Scanning $ROOT for flat files (this may take a long time)..."
+    echo "Output: $LIST_FILE"
+    find "$ROOT" -maxdepth 1 -type f > "$LIST_FILE.tmp"
+    mv "$LIST_FILE.tmp" "$LIST_FILE"
+    echo 0 > "$LIST_POS_FILE"
+    count=$(wc -l < "$LIST_FILE")
+    echo "Done: $count flat files found, saved to $LIST_FILE"
+elif $FROM_LIST; then
+    # Process files from the pre-built list, resuming from saved position
+    [ -f "$LIST_FILE" ] || { echo "Error: $LIST_FILE not found. Run --build-list first."; exit 1; }
+    START_POS=$(cat "$LIST_POS_FILE" 2>/dev/null || echo 0)
+    TOTAL_LINES=$(wc -l < "$LIST_FILE")
+    echo "Resuming from line $START_POS of $TOTAL_LINES"
+
+    line_num=0
+    POS=$START_POS
+    while IFS= read -r filepath; do
+        line_num=$((line_num + 1))
+        # Skip lines before resume position
+        [ $line_num -le $START_POS ] && continue
+        migrate_file "$filepath"
+        POS=$line_num
+        # Save position every 10000 entries
+        if [ $((line_num % 10000)) -eq 0 ]; then
+            echo "$POS" > "$LIST_POS_FILE"
+        fi
+        if [ "$BATCH" -gt 0 ] && [ "$MIGRATED" -ge "$BATCH" ]; then
+            echo "Batch limit reached ($BATCH)"
+            break
+        fi
+    done < "$LIST_FILE"
+    echo "$POS" > "$LIST_POS_FILE"
+    echo "Position saved: $POS / $TOTAL_LINES"
+elif $FROM_OLD_SHARDS; then
     # Migrate from old 4-char shard directories to 6-char shards.
-    # Probe possible 4-char dir names via stat (instant) instead of
-    # listing the root directory (millions of flat files = very slow).
     BASE58="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
     DONE=false
     echo "Probing for 4-char shard directories..."
@@ -93,7 +149,6 @@ if $FROM_OLD_SHARDS; then
         $DONE && break
         for ((d=0; d<${#BASE58}; d++)); do
             $DONE && break
-            # All proxy keys start with U5d (multihash sha1 prefix)
             dirname="U5${BASE58:$c:1}${BASE58:$d:1}"
             old_shard_dir="$ROOT/$dirname"
             [ -d "$old_shard_dir" ] || continue
@@ -114,7 +169,7 @@ if $FROM_OLD_SHARDS; then
         done
     done
 else
-    # Migrate flat files from root directory
+    # Migrate flat files from root directory (slow live find scan)
     while IFS= read -r -d '' filepath; do
         migrate_file "$filepath"
         if [ "$BATCH" -gt 0 ] && [ "$MIGRATED" -ge "$BATCH" ]; then
