@@ -44,12 +44,13 @@ export interface HiveAccount {
 /** hived RPC config — @ecency/sdk uses module-level config, not a client instance. */
 hiveTxConfig.nodes = [
     config.get('rpc_node') as string,
-    'https://hapi.ecency.com',
     'https://api.deathwing.me',
-    'https://rpc.mahdiyari.info',
     'https://api.openhive.network',
-    'https://techcoderx.com',
+    'https://rpc.mahdiyari.info',
     'https://api.syncad.com',
+    'https://techcoderx.com',
+    'https://hiveapi.actifit.io',
+    'https://api.c0ff33a.uk',
 ]
 // Per-request timeout. dhive's effective first-try timeout was ~500ms (hardcoded
 // in client.js fetchTimeout), which caused frequent spurious failovers on slow
