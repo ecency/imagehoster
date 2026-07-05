@@ -705,10 +705,10 @@
   dependencies:
     "@jridgewell/trace-mapping" "0.3.9"
 
-"@ecency/sdk@^2.2.3":
-  version "2.2.3"
-  resolved "https://registry.yarnpkg.com/@ecency/sdk/-/sdk-2.2.3.tgz#4f908b0bdf01d33f0b134db7dfec9f1bf38eb066"
-  integrity sha512-waybgump9KoI1NiGH0u340KY1S8AbPhqz+anVxtYHbJ2xwFYR0hGDDtHlx7JCi5G1/Ewt10sRnW8FsA8rBHxWA==
+"@ecency/sdk@^2.3.34":
+  version "2.3.34"
+  resolved "https://registry.yarnpkg.com/@ecency/sdk/-/sdk-2.3.34.tgz#4bc1a80e7fcaa56d7eda5eb1fea7e586758dcee4"
+  integrity sha512-ofy4AWIm0BpI6OUhGEsirHME9gwiszZquX/puuX2KSH7Sb8avUPofvKd4UrISDpdhdqO6HynHnbpD4zKP3g5Ow==
   dependencies:
     "@noble/ciphers" "^2.1.1"
     "@noble/curves" "^2.0.1"
