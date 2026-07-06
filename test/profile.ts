@@ -2,22 +2,6 @@ import 'mocha'
 import assert from 'assert'
 
 import {getProfile, rpc} from './../src/common'
-import {mockProfiles} from './index'
-
-// bridge returns a valid profile object but with an empty avatar; the account is not
-// in mockAccounts, so condenser_api.get_accounts resolves to [undefined] — simulating a
-// transient get_accounts failure during the fallback.
-mockProfiles.ghostbridge = {
-    name: 'ghostbridge',
-    active: '2024-01-01T00:00:00',
-    created: '2016-01-01T00:00:00',
-    id: 9,
-    post_count: 1,
-    reputation: 25,
-    blacklists: [],
-    stats: { followers: 0, following: 0, rank: 0 },
-    metadata: { profile: { name: '', profile_image: '', cover_image: '' } }
-}
 
 /** Run `fn` while counting the RPC methods invoked, then restore the mock. */
 async function countingRpc<T>(fn: () => Promise<T>): Promise<{ result: T, methods: string[] }> {

@@ -135,7 +135,9 @@ export interface HiveProfile {
 }
 
 const isHttpUrl = (v: unknown): v is string =>
-    typeof v === 'string' && (v.startsWith('http://') || v.startsWith('https://'))
+    typeof v === 'string' &&
+    (v.startsWith('http://') || v.startsWith('https://')) &&
+    v.includes('.') // require a host (domain/IP) — rejects pathological 'https://'
 
 /** Parse a `*_json_metadata` string and return its `.profile` object, or undefined. */
 function parseProfile(raw: unknown): Record<string, any> | undefined {
