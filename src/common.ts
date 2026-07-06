@@ -134,6 +134,42 @@ export interface HiveProfile {
     }}
 }
 
+const isHttpUrl = (v: unknown): v is string =>
+    typeof v === 'string' && (v.startsWith('http://') || v.startsWith('https://'))
+
+/** Parse a `*_json_metadata` string and return its `.profile` object, or undefined. */
+function parseProfile(raw: unknown): Record<string, any> | undefined {
+    if (typeof raw !== 'string' || raw.length === 0) return undefined
+    try {
+        const obj = JSON.parse(raw)
+        const prof = obj && obj.profile
+        return prof && typeof prof === 'object' ? prof : undefined
+    } catch { return undefined }
+}
+
+/**
+ * Field-level legacy image lookup: posting_json_metadata.profile.<field> dominates,
+ * else fall back to json_metadata.profile.<field>. Returns the value only when it is
+ * an http(s) URL.
+ *
+ * Needed because `bridge.get_profile` (PostgREST hivemind) reads ONLY
+ * posting_json_metadata and no longer falls back to the legacy json_metadata when
+ * posting_json_metadata is a non-empty object without a usable `profile` image
+ * (older hivemind's get_db_profile did). Avatars/covers stored only in json_metadata
+ * therefore come back empty from bridge; we recover them from the raw account here.
+ */
+function legacyProfileImage(
+    account: HiveAccount | undefined,
+    field: 'profile_image' | 'cover_image',
+): string | undefined {
+    if (!account) return undefined
+    const posting = parseProfile(account.posting_json_metadata)
+    if (posting && isHttpUrl(posting[field])) return posting[field]
+    const legacy = parseProfile(account.json_metadata)
+    if (legacy && isHttpUrl(legacy[field])) return legacy[field]
+    return undefined
+}
+
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
 export const getProfile = async (user: string, isCached= true): Promise<HiveProfile | undefined> => {
     const cacheKey = `profile:hive:${user}`
@@ -149,7 +185,33 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
     try {
         profile = await rpc.call<HiveProfile>('bridge.get_profile', {account: user})
         if (profile) {
-            await redisSet(cacheKey, profile, 300)
+            let ttl = 300
+            const p = profile.metadata && profile.metadata.profile
+            // Legacy fallback: when bridge returns no avatar, the image may live only in the
+            // account's legacy json_metadata (which the PostgREST hivemind ignores). Do ONE
+            // extra (cached) account lookup to recover it. We gate strictly on a MISSING
+            // AVATAR — deliberately NOT on a missing cover: most accounts have an avatar but
+            // no cover, so triggering on cover would fire this second RPC on the hot avatar
+            // path for nearly everyone. The cover is still recovered opportunistically from
+            // the same lookup, so the common broken case (posting profile-less, both images
+            // only in json_metadata) is fully healed; the rare "working posting avatar +
+            // legacy-only cover" case intentionally keeps the default cover.
+            if (p && !isHttpUrl(p.profile_image)) {
+                const account = (await getAccount(user, isCached))[0]
+                if (account) {
+                    const avatar = legacyProfileImage(account, 'profile_image')
+                    if (avatar) p.profile_image = avatar
+                    if (!isHttpUrl(p.cover_image)) {
+                        const cover = legacyProfileImage(account, 'cover_image')
+                        if (cover) p.cover_image = cover
+                    }
+                } else {
+                    // bridge said the account exists, so an empty getAccount result means a
+                    // transient get_accounts failure — cache briefly so we retry the merge soon.
+                    ttl = 30
+                }
+            }
+            await redisSet(cacheKey, profile, ttl)
         } else {
             // Null/undefined result — negative cache with short TTL
             await redisSet(cacheKey, null, 30)

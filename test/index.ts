@@ -37,6 +37,30 @@ export const mockAccounts: any = {
             account_auths: [],
             key_auths: [[testKeys.foo.createPublic().toString(), 1]]
         }
+    },
+    // Avatar only in legacy json_metadata; posting_json_metadata is a non-`profile`
+    // object (so bridge.get_profile returns an empty avatar). Recoverable via fallback.
+    legacyonly: {
+        name: 'legacyonly',
+        active: '2024-01-01T00:00:00',
+        posting_json_metadata: '{"combflow":{"voteFloor":50}}',
+        json_metadata: '{"profile":{"profile_image":"https://cdn.steemitimages.com/legacy/Kozmos.jpg","cover_image":"https://cdn.steemitimages.com/legacy/cover.jpg","location":"Tirana"}}',
+    },
+    // posting_json_metadata.profile exists with a cover but NO avatar; avatar lives in
+    // json_metadata. Field-level fallback must keep the posting cover and recover the
+    // json_metadata avatar.
+    splitprofile: {
+        name: 'splitprofile',
+        active: '2024-01-01T00:00:00',
+        posting_json_metadata: '{"profile":{"cover_image":"https://files.peakd.com/posting/cover.jpg","version":2}}',
+        json_metadata: '{"profile":{"profile_image":"https://files.steempeak.com/legacy/avatar.jpg"}}',
+    },
+    // Avatar wiped from BOTH fields (pin-clobber). Nothing to recover.
+    noavatar: {
+        name: 'noavatar',
+        active: '2024-01-01T00:00:00',
+        posting_json_metadata: '{"profile":{"pinned":"some-permlink","version":2}}',
+        json_metadata: '',
     }
 }
 
@@ -74,6 +98,42 @@ export const mockProfiles: any = {
                 profile_image: 'https://example.com/bar-avatar.jpg',
             }
         }
+    },
+    // bridge returns an empty avatar/cover — these live only in legacy json_metadata.
+    legacyonly: {
+        name: 'legacyonly',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 3,
+        post_count: 10,
+        reputation: 40,
+        blacklists: [],
+        stats: { followers: 5, following: 5, rank: 0 },
+        metadata: { profile: { name: '', profile_image: '', cover_image: '' } }
+    },
+    // bridge surfaces the posting cover but no avatar.
+    splitprofile: {
+        name: 'splitprofile',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 4,
+        post_count: 10,
+        reputation: 40,
+        blacklists: [],
+        stats: { followers: 5, following: 5, rank: 0 },
+        metadata: { profile: { name: 'Split', profile_image: '', cover_image: 'https://files.peakd.com/posting/cover.jpg' } }
+    },
+    // bridge empty and nothing recoverable on chain.
+    noavatar: {
+        name: 'noavatar',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 5,
+        post_count: 10,
+        reputation: 40,
+        blacklists: [],
+        stats: { followers: 5, following: 5, rank: 0 },
+        metadata: { profile: { name: '', profile_image: '', cover_image: '' } }
     }
 }
 
@@ -84,11 +144,15 @@ before(() => {
             case 'condenser_api.get_accounts': {
                 const names = (params as string[][])[0]
                 assert.equal(names.length, 1, 'can only mock single account lookups')
-                return [mockAccounts[names[0]]]
+                const account = mockAccounts[names[0]]
+                // Return a fresh copy each call, like a real RPC response.
+                return [account ? structuredClone(account) : account]
             }
             case 'bridge.get_profile': {
                 const username = (params as any).account || (params as any[])[0]
-                return mockProfiles[username] || null
+                const profile = mockProfiles[username]
+                // Fresh copy so consumers that mutate the profile don't corrupt the fixture.
+                return profile ? structuredClone(profile) : null
             }
             default:
                 throw new Error(`No mock data for: ${ method }`)
