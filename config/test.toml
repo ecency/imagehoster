@@ -6,6 +6,9 @@ service_url = 'http://localhost:63205'
 # Disable Redis for tests (avoids connection timeout crash)
 redis_url = ''
 
+# Allow exercising the invalidate path in tests
+invalidate_token = 'test-invalidate-token'
+
 # Use memory stores for tests so caching actually works
 # (default.toml uses filesystem at /mnt/eproxy-bucket which doesn't exist locally)
 [upload_store]

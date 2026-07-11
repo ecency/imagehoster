@@ -53,6 +53,10 @@ if (!Number.isFinite(MAX_IMAGE_SIZE)) {
 }
 const SERVICE_URL = new URL(config.get('service_url'))
 
+// Public proxy hosts that old post bodies wrapped around img.esteem.ws URLs
+// (e.g. https://steemitimages.com/500x0/https://img.esteem.ws/abc.jpg)
+const ESTEEM_WRAP_PREFIX = /^https?:\/\/(?:steemitimages\.com|images\.hive\.blog)\/\d+x\d+\//
+
 function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): ProxyOptions {
     const width = Number.parseInt(query['width']) || undefined
     const height = Number.parseInt(query['height']) || undefined
@@ -202,8 +206,16 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     urlString = applyUrlReplacements(urlString)
     url = new URL(urlString)
-    // Ecency team does not own esteem.ws domain anymore, assume steemit has images from those old domain
-    if (urlString.includes('https://img.esteem.ws/')) {
+    // img.esteem.ws is gone and its mirrors no longer have these images; surviving
+    // originals were preserved in the upload store, keyed by the historically
+    // rewritten URL (steemitimages.com/0x0/<url>). Unwrap public-proxy prefixes
+    // first so every request form of an esteem image resolves to that same key.
+    while (ESTEEM_WRAP_PREFIX.test(urlString) && urlString.includes('://img.esteem.ws/')) {
+        urlString = urlString.replace(ESTEEM_WRAP_PREFIX, '')
+        url = new URL(urlString)
+    }
+    const isEsteemLegacy = urlString.includes('://img.esteem.ws/')
+    if (isEsteemLegacy) {
         urlString = `https://steemitimages.com/0x0/${urlString}`
     }
     if (process.env.NODE_ENV !== 'test') {
@@ -216,7 +228,11 @@ export async function proxyHandler(ctx: KoaContext) {
     let contentType: string
     ctx.originalUrl = urlString
     const origIsUpload = isInternalUploadUrl(url)
+    // esteem-legacy originals live in the upload store; treat that store as
+    // read-only here (never overwritten by fetches, never removed by invalidate)
+    const usesUploadStore = origIsUpload || isEsteemLegacy
     ctx.tag({is_upload: origIsUpload})
+    if (isEsteemLegacy) { ctx.tag({esteem_legacy: true}) }
     if (origIsUpload) {
         // if we are proxying our or own image, use the uploadStore directly
         // to avoid storing two copies of the same data
@@ -226,7 +242,7 @@ export async function proxyHandler(ctx: KoaContext) {
         const urlHash = createHash('sha1')
             .update(urlString)
             .digest()
-        origStore = proxyStore
+        origStore = isEsteemLegacy ? uploadStore : proxyStore
         origKey = 'U' + multihash.toB58String(
             multihash.encode(urlHash, 'sha1')
         )
@@ -243,7 +259,7 @@ export async function proxyHandler(ctx: KoaContext) {
             await storeRemove(proxyStore, imageKey)
             ctx.log.debug({ imageKey }, 'removed resized imageKey due to invalidate')
         } catch (_e) { /* may not exist */ }
-        if (!origIsUpload) {
+        if (!usesUploadStore) {
             try {
                 await storeRemove(origStore, origKey)
                 ctx.log.debug({ image: origKey }, 'removed original due to invalidate')
@@ -284,7 +300,10 @@ export async function proxyHandler(ctx: KoaContext) {
     // check if we have the original
     let origData: Buffer
     let origFromCache = false
-    if (await storeExists(origStore, origKey) && !options.ignorecache && !options.invalidate) {
+    // esteem-legacy originals are authoritative and unrefetchable: ignorecache/
+    // invalidate still re-derives variants but never bypasses the stored original
+    const bypassStoredOriginal = (options.ignorecache || options.invalidate) && !isEsteemLegacy
+    if (await storeExists(origStore, origKey) && !bypassStoredOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
@@ -312,7 +331,7 @@ export async function proxyHandler(ctx: KoaContext) {
             if (result.isFallback) { isDefaultImage = true }
             origData = res.body
             // Don't write fallback data to uploadStore — could corrupt original hash
-            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
+            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
                     await storeWrite(origStore, origKey, origData)
@@ -321,7 +340,7 @@ export async function proxyHandler(ctx: KoaContext) {
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
+                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
             }
             contentType = await mimeMagic(origData)
         }
@@ -374,7 +393,7 @@ export async function proxyHandler(ctx: KoaContext) {
         APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
 
         // Don't write fallback data to uploadStore — could corrupt original hash
-        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
+        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
             ctx.log.debug('storing original image %s', origKey)
             try {
                 await storeWrite(origStore, origKey, origData)
@@ -383,7 +402,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
+            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
         }
     }
 

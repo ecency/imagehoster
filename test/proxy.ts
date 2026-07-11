@@ -1,5 +1,6 @@
 import 'mocha'
 import assert from 'assert'
+import {createHash} from 'crypto'
 import * as http from 'http'
 import needle from 'needle'
 import * as multihash from 'multihashes'
@@ -9,7 +10,7 @@ import sharp from 'sharp'
 
 import {app} from './../src/app'
 import {proxyStore, uploadStore} from './../src/common'
-import {storeExists, base58Enc} from './../src/utils'
+import {storeExists, storeWrite, base58Enc} from './../src/utils'
 
 import {uploadImage} from './upload'
 
@@ -121,6 +122,49 @@ describe('proxy', function() {
         assert.equal(meta.width, 200)
         // this would be 200 if the first url wasn't stripped
         assert.equal(meta.height, 133)
+    })
+
+    describe('esteem legacy', function() {
+        const esteemUrl = 'https://img.esteem.ws/rescuetest1.jpg'
+        // originals are stored under the historically rewritten URL's key
+        const esteemKey = 'U' + multihash.toB58String(multihash.encode(
+            createHash('sha1').update(`https://steemitimages.com/0x0/${ esteemUrl }`).digest(), 'sha1'
+        ))
+
+        before(async () => {
+            await storeWrite(uploadStore, esteemKey, fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+        })
+
+        it('should serve esteem-legacy images from the upload store', async function() {
+            this.slow(1000)
+            serveImage = false
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit`)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 100)
+            assert.equal(meta.format, 'jpeg')
+            // original must not be duplicated into the proxy store
+            assert((await storeExists(proxyStore, esteemKey)) === false, 'proxy store has esteem original')
+        })
+
+        it('should resolve wrapped esteem URLs to the same rescued original', async function() {
+            this.slow(1000)
+            serveImage = false
+            const wrapped = `https://steemitimages.com/500x0/${ esteemUrl }`
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(wrapped) }?width=120&mode=fit`)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 120)
+            assert.equal(meta.format, 'jpeg')
+        })
+
+        it('should not remove esteem-legacy originals on invalidate', async function() {
+            this.slow(1000)
+            serveImage = false
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit&invalidate=1`,
+                null, { headers: { 'x-invalidate-key': 'test-invalidate-token' } })
+            assert.equal(res.statusCode, 200)
+            assert((await storeExists(uploadStore, esteemKey)) === true, 'esteem original was removed from upload store')
+        })
     })
 
 })
