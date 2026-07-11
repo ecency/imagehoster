@@ -210,10 +210,15 @@ export async function proxyHandler(ctx: KoaContext) {
     // originals were preserved in the upload store, keyed by the historically
     // rewritten URL (steemitimages.com/0x0/<url>). Unwrap public-proxy prefixes
     // first so every request form of an esteem image resolves to that same key.
-    while (ESTEEM_WRAP_PREFIX.test(urlString) && urlString.includes('://img.esteem.ws/')) {
+    const isEsteemHost = (s: string) =>
+        s.includes('://img.esteem.ws/') || s.includes('://img.esteem.app/')
+    while (ESTEEM_WRAP_PREFIX.test(urlString) && isEsteemHost(urlString)) {
         urlString = urlString.replace(ESTEEM_WRAP_PREFIX, '')
         url = new URL(urlString)
     }
+    // only esteem.ws was historically rewritten before hashing — keep that
+    // rewrite so its keys stay stable; esteem.app keys are the raw URL hash
+    // (rescued .app originals are served via the upload-store archive lookup)
     const isEsteemLegacy = urlString.includes('://img.esteem.ws/')
     if (isEsteemLegacy) {
         urlString = `https://steemitimages.com/0x0/${urlString}`

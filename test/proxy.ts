@@ -189,6 +189,20 @@ describe('proxy', function() {
             assert((await storeExists(proxyStore, deadKey)) === false, 'archive original copied into proxy store')
         })
 
+        it('should unwrap wrapped esteem.app URLs to their raw-key archived original', async function() {
+            this.slow(1000)
+            const appUrl = 'https://img.esteem.app/apptest1.jpg'
+            const appKey = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(appUrl).digest(), 'sha1'
+            ))
+            await storeWrite(uploadStore, appKey, fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+            const wrapped = `https://images.hive.blog/640x0/${ appUrl }`
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(wrapped) }?width=110&mode=fit`)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 110)
+            assert.equal(meta.format, 'jpeg')
+        })
+
         it('should never delete invalid archive objects from the upload store', async function() {
             // corrupt archive object: request falls through to fetch/fallbacks
             // (may take a while), but the archived object must survive
