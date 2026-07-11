@@ -303,18 +303,33 @@ export async function proxyHandler(ctx: KoaContext) {
     // esteem-legacy originals are authoritative and unrefetchable: ignorecache/
     // invalidate still re-derives variants but never bypasses the stored original
     const bypassStoredOriginal = (options.ignorecache || options.invalidate) && !isEsteemLegacy
-    if (await storeExists(origStore, origKey) && !bypassStoredOriginal) {
+    // Rescued dead-origin originals are archived in the upload store under the
+    // same derived key: if the proxy store lacks the original, consult that
+    // read-only archive before reaching for the network.
+    let servingStore = origStore
+    let haveOriginal = await storeExists(origStore, origKey)
+    if (!haveOriginal && !usesUploadStore && !bypassStoredOriginal
+        && await storeExists(uploadStore, origKey)) {
+        servingStore = uploadStore
+        haveOriginal = true
+        ctx.tag({rescued_original: true})
+    }
+    if (haveOriginal && !bypassStoredOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
         try {
-            origData = await readStream(origStore.createReadStream(origKey))
+            origData = await readStream(servingStore.createReadStream(origKey))
             contentType = await mimeMagic(origData)
             // Validate stored data is actually an image — stale error pages or
             // truncated responses may have been cached by a previous request
             if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
-                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type, purging and re-fetching'})
-                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type'})
+                // the upload store holds user uploads and rescued (unrefetchable)
+                // originals — never delete from it here
+                if (servingStore !== uploadStore) {
+                    try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
+                }
                 throw new Error('Invalid stored content type: ' + contentType)
             }
         } catch (err) {

@@ -167,4 +167,41 @@ describe('proxy', function() {
         })
     })
 
+    describe('rescued originals archive', function() {
+        // a source whose origin no longer exists; its original was rescued into
+        // the upload store under the proxy-derived key
+        const deadUrl = `http://localhost:${ port+2 }/gone.jpg`
+        const deadKey = 'U' + multihash.toB58String(multihash.encode(
+            createHash('sha1').update(deadUrl).digest(), 'sha1'
+        ))
+
+        before(async () => {
+            await storeWrite(uploadStore, deadKey, fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+        })
+
+        it('should serve rescued dead-origin originals from the upload store', async function() {
+            this.slow(1000)
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(deadUrl) }?width=100&mode=fit`)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 100)
+            assert.equal(meta.format, 'jpeg')
+            // archive reads are read-only: original must not be copied into the proxy store
+            assert((await storeExists(proxyStore, deadKey)) === false, 'archive original copied into proxy store')
+        })
+
+        it('should never delete invalid archive objects from the upload store', async function() {
+            // corrupt archive object: request falls through to fetch/fallbacks
+            // (may take a while), but the archived object must survive
+            this.timeout(30000)
+            this.slow(20000)
+            const corruptUrl = `http://localhost:${ port+2 }/corrupt.jpg`
+            const corruptKey = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(corruptUrl).digest(), 'sha1'
+            ))
+            await storeWrite(uploadStore, corruptKey, Buffer.from('definitely not an image'))
+            await needle('get', `http://localhost:${ port }/p/${ base58Enc(corruptUrl) }?width=100&mode=fit`)
+            assert((await storeExists(uploadStore, corruptKey)) === true, 'invalid archive object was deleted from upload store')
+        })
+    })
+
 })
