@@ -53,6 +53,10 @@ if (!Number.isFinite(MAX_IMAGE_SIZE)) {
 }
 const SERVICE_URL = new URL(config.get('service_url'))
 
+// Public proxy hosts that old post bodies wrapped around img.esteem.ws URLs
+// (e.g. https://steemitimages.com/500x0/https://img.esteem.ws/abc.jpg)
+const ESTEEM_WRAP_PREFIX = /^https?:\/\/(?:steemitimages\.com|images\.hive\.blog)\/\d+x\d+\//
+
 function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): ProxyOptions {
     const width = Number.parseInt(query['width']) || undefined
     const height = Number.parseInt(query['height']) || undefined
@@ -202,8 +206,21 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     urlString = applyUrlReplacements(urlString)
     url = new URL(urlString)
-    // Ecency team does not own esteem.ws domain anymore, assume steemit has images from those old domain
-    if (urlString.includes('https://img.esteem.ws/')) {
+    // img.esteem.ws is gone and its mirrors no longer have these images; surviving
+    // originals were preserved in the upload store, keyed by the historically
+    // rewritten URL (steemitimages.com/0x0/<url>). Unwrap public-proxy prefixes
+    // first so every request form of an esteem image resolves to that same key.
+    const isEsteemHost = (s: string) =>
+        s.includes('://img.esteem.ws/') || s.includes('://img.esteem.app/')
+    while (ESTEEM_WRAP_PREFIX.test(urlString) && isEsteemHost(urlString)) {
+        urlString = urlString.replace(ESTEEM_WRAP_PREFIX, '')
+        url = new URL(urlString)
+    }
+    // only esteem.ws was historically rewritten before hashing — keep that
+    // rewrite so its keys stay stable; esteem.app keys are the raw URL hash
+    // (rescued .app originals are served via the upload-store archive lookup)
+    const isEsteemLegacy = urlString.includes('://img.esteem.ws/')
+    if (isEsteemLegacy) {
         urlString = `https://steemitimages.com/0x0/${urlString}`
     }
     if (process.env.NODE_ENV !== 'test') {
@@ -216,7 +233,11 @@ export async function proxyHandler(ctx: KoaContext) {
     let contentType: string
     ctx.originalUrl = urlString
     const origIsUpload = isInternalUploadUrl(url)
+    // esteem-legacy originals live in the upload store; treat that store as
+    // read-only here (never overwritten by fetches, never removed by invalidate)
+    const usesUploadStore = origIsUpload || isEsteemLegacy
     ctx.tag({is_upload: origIsUpload})
+    if (isEsteemLegacy) { ctx.tag({esteem_legacy: true}) }
     if (origIsUpload) {
         // if we are proxying our or own image, use the uploadStore directly
         // to avoid storing two copies of the same data
@@ -226,7 +247,7 @@ export async function proxyHandler(ctx: KoaContext) {
         const urlHash = createHash('sha1')
             .update(urlString)
             .digest()
-        origStore = proxyStore
+        origStore = isEsteemLegacy ? uploadStore : proxyStore
         origKey = 'U' + multihash.toB58String(
             multihash.encode(urlHash, 'sha1')
         )
@@ -243,7 +264,7 @@ export async function proxyHandler(ctx: KoaContext) {
             await storeRemove(proxyStore, imageKey)
             ctx.log.debug({ imageKey }, 'removed resized imageKey due to invalidate')
         } catch (_e) { /* may not exist */ }
-        if (!origIsUpload) {
+        if (!usesUploadStore) {
             try {
                 await storeRemove(origStore, origKey)
                 ctx.log.debug({ image: origKey }, 'removed original due to invalidate')
@@ -284,18 +305,36 @@ export async function proxyHandler(ctx: KoaContext) {
     // check if we have the original
     let origData: Buffer
     let origFromCache = false
-    if (await storeExists(origStore, origKey) && !options.ignorecache && !options.invalidate) {
+    // esteem-legacy originals are authoritative and unrefetchable: ignorecache/
+    // invalidate still re-derives variants but never bypasses the stored original
+    const bypassStoredOriginal = (options.ignorecache || options.invalidate) && !isEsteemLegacy
+    // Rescued dead-origin originals are archived in the upload store under the
+    // same derived key. The archive is an origin, not a cache: it is consulted
+    // whenever the proxy-store original is absent or bypassed, and cache-bypass
+    // flags never skip it (there is no live origin to refetch from).
+    let servingStore = origStore
+    let haveOriginal = await storeExists(origStore, origKey) && !bypassStoredOriginal
+    if (!haveOriginal && !usesUploadStore && await storeExists(uploadStore, origKey)) {
+        servingStore = uploadStore
+        haveOriginal = true
+        ctx.tag({rescued_original: true})
+    }
+    if (haveOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
         try {
-            origData = await readStream(origStore.createReadStream(origKey))
+            origData = await readStream(servingStore.createReadStream(origKey))
             contentType = await mimeMagic(origData)
             // Validate stored data is actually an image — stale error pages or
             // truncated responses may have been cached by a previous request
             if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
-                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type, purging and re-fetching'})
-                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type'})
+                // the upload store holds user uploads and rescued (unrefetchable)
+                // originals — never delete from it here
+                if (servingStore !== uploadStore) {
+                    try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
+                }
                 throw new Error('Invalid stored content type: ' + contentType)
             }
         } catch (err) {
@@ -312,7 +351,7 @@ export async function proxyHandler(ctx: KoaContext) {
             if (result.isFallback) { isDefaultImage = true }
             origData = res.body
             // Don't write fallback data to uploadStore — could corrupt original hash
-            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
+            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
                     await storeWrite(origStore, origKey, origData)
@@ -321,7 +360,7 @@ export async function proxyHandler(ctx: KoaContext) {
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
+                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
             }
             contentType = await mimeMagic(origData)
         }
@@ -374,7 +413,7 @@ export async function proxyHandler(ctx: KoaContext) {
         APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
 
         // Don't write fallback data to uploadStore — could corrupt original hash
-        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !origIsUpload && !isLegacy) {
+        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
             ctx.log.debug('storing original image %s', origKey)
             try {
                 await storeWrite(origStore, origKey, origData)
@@ -383,7 +422,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, origIsUpload, isDefaultImage, isLegacy)
+            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
         }
     }
 
@@ -421,8 +460,12 @@ export async function proxyHandler(ctx: KoaContext) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
             if (origFromCache) {
-                ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
-                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                // the upload store holds user uploads and rescued (unrefetchable)
+                // originals — never delete from it here either
+                if (servingStore !== uploadStore) {
+                    ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
+                    try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
+                }
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
                     parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
                 })
