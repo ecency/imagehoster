@@ -203,6 +203,37 @@ describe('proxy', function() {
             assert.equal(meta.format, 'jpeg')
         })
 
+        it('should serve rescued originals even with ignorecache (archive is origin, not cache)', async function() {
+            this.slow(1000)
+            const u = `http://localhost:${ port+2 }/ignorecache-test.jpg`
+            const k = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(u).digest(), 'sha1'
+            ))
+            await storeWrite(uploadStore, k, fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(u) }?width=90&mode=fit&ignorecache=1`)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 90)
+            assert((await storeExists(uploadStore, k)) === true, 'archive object must survive ignorecache')
+        })
+
+        it('should keep archive objects that fail sharp metadata extraction', async function() {
+            // valid JPEG magic so mimeMagic passes, but Sharp cannot parse it:
+            // exercises the metadata-failure purge path — must not delete from upload store
+            this.timeout(30000)
+            this.slow(20000)
+            const u = `http://localhost:${ port+2 }/corrupt-meta.jpg`
+            const k = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(u).digest(), 'sha1'
+            ))
+            const fakeJpeg = Buffer.concat([
+                Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]),
+                Buffer.alloc(128, 0x41),
+            ])
+            await storeWrite(uploadStore, k, fakeJpeg)
+            await needle('get', `http://localhost:${ port }/p/${ base58Enc(u) }?width=100&mode=fit`)
+            assert((await storeExists(uploadStore, k)) === true, 'corrupt-metadata archive object was deleted')
+        })
+
         it('should never delete invalid archive objects from the upload store', async function() {
             // corrupt archive object: request falls through to fetch/fallbacks
             // (may take a while), but the archived object must survive

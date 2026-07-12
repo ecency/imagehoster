@@ -309,17 +309,17 @@ export async function proxyHandler(ctx: KoaContext) {
     // invalidate still re-derives variants but never bypasses the stored original
     const bypassStoredOriginal = (options.ignorecache || options.invalidate) && !isEsteemLegacy
     // Rescued dead-origin originals are archived in the upload store under the
-    // same derived key: if the proxy store lacks the original, consult that
-    // read-only archive before reaching for the network.
+    // same derived key. The archive is an origin, not a cache: it is consulted
+    // whenever the proxy-store original is absent or bypassed, and cache-bypass
+    // flags never skip it (there is no live origin to refetch from).
     let servingStore = origStore
-    let haveOriginal = await storeExists(origStore, origKey)
-    if (!haveOriginal && !usesUploadStore && !bypassStoredOriginal
-        && await storeExists(uploadStore, origKey)) {
+    let haveOriginal = await storeExists(origStore, origKey) && !bypassStoredOriginal
+    if (!haveOriginal && !usesUploadStore && await storeExists(uploadStore, origKey)) {
         servingStore = uploadStore
         haveOriginal = true
         ctx.tag({rescued_original: true})
     }
-    if (haveOriginal && !bypassStoredOriginal) {
+    if (haveOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
@@ -460,8 +460,12 @@ export async function proxyHandler(ctx: KoaContext) {
             ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
             if (origFromCache) {
-                ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
-                try { await storeRemove(origStore, origKey) } catch (_e) { /* best effort */ }
+                // the upload store holds user uploads and rescued (unrefetchable)
+                // originals — never delete from it here either
+                if (servingStore !== uploadStore) {
+                    ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
+                    try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
+                }
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
                     parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
                 })
