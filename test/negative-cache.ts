@@ -14,10 +14,12 @@ describe('negative fetch cache', function() {
 
     let port: number
     let originHits = 0
+    let flakyAlive = false
     // /default* serves a real image (stands in for the configured default);
-    // every other path counts the hit and fails, standing in for a dead origin
+    // /flaky* serves one only while flakyAlive is set; every other path counts
+    // the hit and fails, standing in for a dead origin
     const server = http.createServer((req, res) => {
-        if (req.url && req.url.startsWith('/default')) {
+        if (req.url && (req.url.startsWith('/default') || (req.url.startsWith('/flaky') && flakyAlive))) {
             fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
         } else {
             originHits++
@@ -84,6 +86,19 @@ describe('negative fetch cache', function() {
         const result = await fetchDead(liveUrl)
         assert.equal(result.isFallback, false, 'should serve the fetched image')
         assert.equal(await isKnownDeadUrl(liveUrl), false, 'should not be negatively cached')
+    })
+
+    it('clears the negative entry when a bypassed re-fetch succeeds', async function() {
+        const flakyUrl = `http://localhost:${ port }/flaky-1.jpg`
+        flakyAlive = false
+        await fetchDead(flakyUrl)
+        assert.equal(await isKnownDeadUrl(flakyUrl), true, 'should be negatively cached while dead')
+        flakyAlive = true
+        const revived = await fetchDead(flakyUrl, {skipNegativeCache: true})
+        assert.equal(revived.isFallback, false, 'bypassed re-fetch should serve the real image')
+        assert.equal(await isKnownDeadUrl(flakyUrl), false, 'successful fetch should clear the entry')
+        const followUp = await fetchDead(flakyUrl)
+        assert.equal(followUp.isFallback, false, 'normal requests should fetch the revived URL again')
     })
 
     it('expires local entries after their TTL', async function() {

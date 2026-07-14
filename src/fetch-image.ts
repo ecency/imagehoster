@@ -1,5 +1,5 @@
 import { URL } from 'url'
-import { redisGet, redisSet } from './common'
+import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
 import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
 
@@ -68,6 +68,11 @@ export async function markDeadUrl(urlString: string, ttlSeconds: number = NEGATI
     await redisSet(negativeCacheKey(urlString), 1, Math.max(1, Math.round(ttlSeconds)))
 }
 
+export async function clearDeadUrl(urlString: string): Promise<void> {
+    localNegativeCache.delete(urlString)
+    await redisDel(negativeCacheKey(urlString))
+}
+
 export function clearNegativeFetchCache(): void {
     localNegativeCache.clear()
 }
@@ -117,6 +122,9 @@ export async function fetchImageWithFallbacks(
                     Buffer.isBuffer(res.body)
                 ) {
                     ctxLog.info({ candidate }, 'Fetch succeeded')
+                    // A bypassed re-fetch (e.g. invalidate) may have proven a
+                    // negatively cached URL alive again — drop the stale entry
+                    await clearDeadUrl(urlString)
                     return { res, isFallback: false }
                 }
 

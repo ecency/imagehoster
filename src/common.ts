@@ -94,6 +94,16 @@ export async function redisSet(key: string, value: any, ttl: number): Promise<vo
     } catch { /* best effort */ }
 }
 
+/** Delete a value from Redis shared cache. */
+export async function redisDel(key: string): Promise<void> {
+    if (!redisClient) return
+    if (redisReady) await redisReady
+    if (!redisClient.isReady) return
+    try {
+        await redisClient.del(key)
+    } catch { /* best effort */ }
+}
+
 /** Get account with full authority data (for signature verification) */
 export const getAccount = async (user: string, isCached= true): Promise<HiveAccount[]> => {
     const cacheKey = `profile:account:${user}`
