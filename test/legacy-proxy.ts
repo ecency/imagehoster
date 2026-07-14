@@ -35,6 +35,7 @@ describe('legacy-proxy', function() {
             `http://localhost:${port}/500x300/http://localhost:${imagePort}/test.jpg`,
             { follow_max: 0 })
         assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['cache-control'], 'public,max-age=86400', 'redirect should be cacheable')
         const location = res.headers['location']
         assert(location.startsWith('/p/'), 'should redirect to /p/ endpoint')
         assert(location.includes('width=500'), 'should include width')
@@ -89,6 +90,7 @@ describe('legacy-proxy', function() {
             `http://localhost:${port}/webp/100x100/http://localhost:${imagePort}/test.jpg`,
             { follow_max: 0 })
         assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['cache-control'], 'public,max-age=86400', 'redirect should be cacheable')
         const location = res.headers['location']
         // Should redirect to non-webp legacy URL
         assert(location.includes('/100x100/'), 'should redirect to legacy URL')
