@@ -152,7 +152,7 @@ async function handleCover(ctx: KoaContext) {
   } else {
     ctx.tag({ store: 'fetch' })
     try {
-      const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultCover, ctx.log)
+      const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultCover, ctx.log, { skipNegativeCache: !!invalidate })
       const res = result.res
       isFetchFallback = result.isFallback
       origData = res.body

@@ -68,6 +68,9 @@ export async function legacyProxyHandler(ctx: KoaContext) {
     const qs = querystring.stringify(options)
     const b58url = base58Enc(url.toString())
 
+    // The redirect mapping is deterministic, so let CDNs cache it instead of
+    // re-fetching it from the origin for every viewer
+    ctx.set('Cache-Control', 'public,max-age=86400')
     ctx.status = 301
     ctx.redirect(`/p/${ b58url }?${ qs }`)
 }
@@ -100,6 +103,7 @@ export async function legacyWProxyHandler(ctx: KoaContext) {
 
     // Redirect to non-webp legacy endpoint, let Accept header determine format
     const redirectPath = `/${width}x${height}/${uu}`
+    ctx.set('Cache-Control', 'public,max-age=86400')
     ctx.status = 301
     ctx.redirect(redirectPath)
 }

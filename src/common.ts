@@ -74,7 +74,7 @@ export const rpc = {
 }
 
 /** Try to get a value from Redis shared cache. */
-async function redisGet(key: string): Promise<any | undefined> {
+export async function redisGet(key: string): Promise<any | undefined> {
     if (!redisClient) return undefined
     if (redisReady) await redisReady
     if (!redisClient.isReady) return undefined
@@ -85,12 +85,22 @@ async function redisGet(key: string): Promise<any | undefined> {
 }
 
 /** Set a value in Redis shared cache with TTL in seconds. */
-async function redisSet(key: string, value: any, ttl: number): Promise<void> {
+export async function redisSet(key: string, value: any, ttl: number): Promise<void> {
     if (!redisClient) return
     if (redisReady) await redisReady
     if (!redisClient.isReady) return
     try {
         await redisClient.setEx(key, ttl, JSON.stringify(value))
+    } catch { /* best effort */ }
+}
+
+/** Delete a value from Redis shared cache. */
+export async function redisDel(key: string): Promise<void> {
+    if (!redisClient) return
+    if (redisReady) await redisReady
+    if (!redisClient.isReady) return
+    try {
+        await redisClient.del(key)
     } catch { /* best effort */ }
 }
 
