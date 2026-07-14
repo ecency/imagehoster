@@ -1,6 +1,7 @@
 import { URL } from 'url'
-import { assertPublicUrl, fetchUrl, NeedleResponse } from './utils'
+import { redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
+import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -37,13 +38,47 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     return urls
 }
 
+// Negative cache for exhausted fetches. Walking the whole mirror chain costs
+// up to ~8 outbound requests with multi-second timeouts each, and the caller
+// holds its upstream connection open for the duration — so dead URLs are
+// remembered briefly and skipped straight to the default image. The local map
+// bounds the blast radius when Redis is unavailable; Redis shares entries
+// across cluster workers and survives worker restarts.
+const NEGATIVE_TTL_SECONDS = 600
+const NEGATIVE_LOCAL_MAX = 10000
+const localNegativeCache = new Map<string, number>() // urlString -> expiry epoch ms
+
+const negativeCacheKey = (urlString: string) => 'negfetch:' + getUrlHashKey(urlString)
+
+export async function isKnownDeadUrl(urlString: string): Promise<boolean> {
+    const expiry = localNegativeCache.get(urlString)
+    if (expiry !== undefined) {
+        if (expiry > Date.now()) { return true }
+        localNegativeCache.delete(urlString)
+    }
+    return await redisGet(negativeCacheKey(urlString)) !== undefined
+}
+
+export async function markDeadUrl(urlString: string, ttlSeconds: number = NEGATIVE_TTL_SECONDS): Promise<void> {
+    // Map iterates in insertion order, so evicting the first key drops the oldest entry
+    while (localNegativeCache.size >= NEGATIVE_LOCAL_MAX) {
+        localNegativeCache.delete(localNegativeCache.keys().next().value as string)
+    }
+    localNegativeCache.set(urlString, Date.now() + ttlSeconds * 1000)
+    await redisSet(negativeCacheKey(urlString), 1, Math.max(1, Math.round(ttlSeconds)))
+}
+
+export function clearNegativeFetchCache(): void {
+    localNegativeCache.clear()
+}
+
 export async function fetchImageWithFallbacks(
     urlString: string,
     urlParams: string,
     userAgent: string,
     defaultUrl: string,
     ctxLog: any,
-    options: { timeout?: number; skipUrls?: string[] } = {}
+    options: { timeout?: number; skipUrls?: string[]; skipNegativeCache?: boolean } = {}
 ): Promise<{ res: NeedleResponse; isFallback: boolean }> {
     const timeout = options.timeout !== undefined && options.timeout !== null ? options.timeout : 10000
     const skipUrls = (options.skipUrls !== undefined && options.skipUrls !== null) ? options.skipUrls : []
@@ -52,40 +87,45 @@ export async function fetchImageWithFallbacks(
         return !skipUrls.includes(url.trim())
     })
 
-    for (const candidate of urls) {
-        if (process.env.NODE_ENV !== 'test') {
+    if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
+        ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
+    } else {
+        for (const candidate of urls) {
+            if (process.env.NODE_ENV !== 'test') {
+                try {
+                    assertPublicUrl(new URL(candidate))
+                } catch (e) {
+                    ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
+                    continue
+                }
+            }
             try {
-                assertPublicUrl(new URL(candidate))
+                ctxLog.info({ candidate }, 'Trying fallback fetch')
+                const res = await fetchUrl(candidate, {
+                    parse_response: false,
+                    follow_max: 5,
+                    open_timeout: timeout,
+                    response_timeout: timeout,
+                    read_timeout: timeout,
+                    user_agent: userAgent,
+                } as any)
+
+                if (
+                    res &&
+                    res.statusCode &&
+                    Math.floor(res.statusCode / 100) === 2 &&
+                    Buffer.isBuffer(res.body)
+                ) {
+                    ctxLog.info({ candidate }, 'Fetch succeeded')
+                    return { res, isFallback: false }
+                }
+
+                ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
-                ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
-                continue
+                ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        try {
-            ctxLog.info({ candidate }, 'Trying fallback fetch')
-            const res = await fetchUrl(candidate, {
-                parse_response: false,
-                follow_max: 5,
-                open_timeout: timeout,
-                response_timeout: timeout,
-                read_timeout: timeout,
-                user_agent: userAgent,
-            } as any)
-
-            if (
-                res &&
-                res.statusCode &&
-                Math.floor(res.statusCode / 100) === 2 &&
-                Buffer.isBuffer(res.body)
-            ) {
-                ctxLog.info({ candidate }, 'Fetch succeeded')
-                return { res, isFallback: false }
-            }
-
-            ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
-        } catch (e) {
-            ctxLog.error(e, `Fetch error at ${candidate}`)
-        }
+        await markDeadUrl(urlString)
     }
 
     // Final fallback: default image (avatar or cover)

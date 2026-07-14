@@ -345,7 +345,8 @@ export async function proxyHandler(ctx: KoaContext) {
                 urlParams,
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
                 DefaultAvatar,
-                ctx.log
+                ctx.log,
+                { skipNegativeCache: !!options.invalidate }
             )
             res = result.res
             if (result.isFallback) { isDefaultImage = true }
@@ -374,7 +375,8 @@ export async function proxyHandler(ctx: KoaContext) {
                 urlParams,
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
                 DefaultAvatar,
-                ctx.log
+                ctx.log,
+                { skipNegativeCache: !!options.invalidate }
             )
             res = result.res
             isDefaultImage = result.isFallback
