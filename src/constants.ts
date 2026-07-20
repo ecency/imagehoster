@@ -11,6 +11,24 @@ export const INTERNAL_SERVICE_BASE_URLS = Array.from(new Set([
 ]))
 export const INTERNAL_SERVICE_ORIGINS = INTERNAL_SERVICE_BASE_URLS.map((url) => new URL(url).origin)
 
+/**
+ * libaom search effort for AVIF encodes.
+ *
+ * Measured on five real proxy images (same source, quality held at 50, resized
+ * to fit 1280): effort 2 encodes 1.6-2.3x faster than effort 3 and comes out the
+ * same size or smaller (92-100% of effort 3's bytes), so lowering it costs no
+ * bandwidth. Visual comparison at 200% showed no meaningful difference.
+ *
+ * Do not lower it further: effort 1 is not reliably faster than 2 (it was slower
+ * on one image), and effort 0 produces ~8% LARGER files. Effort 4 is ~6x slower
+ * than 3 for under 1% size reduction.
+ *
+ * Encode cost is why this matters: a full 1280 AVIF encode is ~578ms at effort 3
+ * versus ~13ms for a 64px avatar, and encodes are bounded by a per-worker
+ * semaphore (see encode-limit.ts), so cheaper encodes drain that queue faster.
+ */
+export const AVIF_EFFORT = 2
+
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'
 
