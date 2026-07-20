@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as path from 'path'
 
-import {clearNegativeFetchCache, fetchImageWithFallbacks, isKnownDeadUrl, markDeadUrl} from './../src/fetch-image'
+import {clearNegativeFetchCache, fetchImageWithFallbacks, isKnownDeadUrl, markDeadUrl, peekDeadUrlTtl} from './../src/fetch-image'
 import {base58Enc} from './../src/utils'
 
 describe('negative fetch cache', function() {
@@ -16,11 +16,16 @@ describe('negative fetch cache', function() {
     let originHits = 0
     let flakyAlive = false
     // /default* serves a real image (stands in for the configured default);
-    // /flaky* serves one only while flakyAlive is set; every other path counts
-    // the hit and fails, standing in for a dead origin
+    // /flaky* serves one only while flakyAlive is set; /gone* answers 404, a
+    // terminal "not here"; every other path counts the hit and fails with a 500,
+    // standing in for an origin that is merely having a bad moment
     const server = http.createServer((req, res) => {
         if (req.url && (req.url.startsWith('/default') || (req.url.startsWith('/flaky') && flakyAlive))) {
             fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
+        } else if (req.url && req.url.startsWith('/gone')) {
+            originHits++
+            res.writeHead(404)
+            res.end()
         } else {
             originHits++
             res.writeHead(500)
@@ -99,6 +104,37 @@ describe('negative fetch cache', function() {
         assert.equal(await isKnownDeadUrl(flakyUrl), false, 'successful fetch should clear the entry')
         const followUp = await fetchDead(flakyUrl)
         assert.equal(followUp.isFallback, false, 'normal requests should fetch the revived URL again')
+    })
+
+    it('remembers a terminally-dead URL for the full TTL', async function() {
+        // Every hop answers 404, so the origin has definitively said "not here"
+        const goneUrl = `http://localhost:${ port }/gone-1.jpg`
+        await fetchDead(goneUrl)
+        assert.equal(await isKnownDeadUrl(goneUrl), true, 'should be negatively cached')
+        const ttl = peekDeadUrlTtl(goneUrl) as number
+        assert(ttl > 60 * 1000, `terminal failure should use the full TTL, got ${ ttl }ms`)
+    })
+
+    it('only briefly remembers a URL whose chain failed transiently', async function() {
+        // The default path 500s, which says nothing about whether the image exists
+        const flakyUrl = `http://localhost:${ port }/transient-1.jpg`
+        await fetchDead(flakyUrl)
+        assert.equal(await isKnownDeadUrl(flakyUrl), true, 'should still be cached to stop a stampede')
+        const ttl = peekDeadUrlTtl(flakyUrl) as number
+        assert(ttl <= 60 * 1000, `transient failure should use the short TTL, got ${ ttl }ms`)
+    })
+
+    it('treats a chain that timed out as transient, not dead', async function() {
+        // Unroutable address: connect never completes, so this surfaces as a
+        // timeout rather than any HTTP answer
+        const timeoutUrl = 'http://192.0.2.1/never-answers.jpg'
+        const urlParams = base58Enc(timeoutUrl)
+        await fetchImageWithFallbacks(timeoutUrl, urlParams, 'test-agent', `http://localhost:${ port }/default.jpg`, log, {
+            timeout: 300,
+            skipUrls: externalMirrors(timeoutUrl, urlParams),
+        })
+        const ttl = peekDeadUrlTtl(timeoutUrl) as number
+        assert(ttl !== undefined && ttl <= 60 * 1000, `timeout should use the short TTL, got ${ ttl }ms`)
     })
 
     it('expires local entries after their TTL', async function() {
