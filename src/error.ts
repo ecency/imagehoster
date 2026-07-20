@@ -1,6 +1,7 @@
 /** API Errors. */
 
 import {KoaContext} from './common'
+import {isEncodeAborted} from './encode-limit'
 import {camelToSnake} from './utils'
 
 enum ErrorCode {
@@ -111,6 +112,18 @@ export async function errorMiddleware(ctx: KoaContext, next: () => Promise<any>)
     try {
         await next()
     } catch (err) {
+        if (isEncodeAborted(err)) {
+            // The client, or the cache in front of us, gave up before we could
+            // build a response. Nothing failed and there is no open socket left
+            // to write to, so treat this as a cancellation rather than a server
+            // error. Wrapping it as an APIError would default to InternalError,
+            // returning 500 and logging 'unexpected API error' — turning routine
+            // upstream timeouts into false server failures in logs and metrics.
+            ctx.status = 499 // nginx's "client closed request"
+            ctx.body = null
+            if (ctx.log) { ctx.log.debug({url: ctx.url}, 'request cancelled while queued for an encode') }
+            return
+        }
         const error = err instanceof APIError ? err : new APIError({cause: err})
         ctx.status = error.statusCode
         ctx.set('Cache-Control', 'no-cache')

@@ -2,6 +2,7 @@ import 'mocha'
 import assert from 'assert'
 
 import {clientGoneSignal, encodeLimitStats, isEncodeAborted, withEncodeSlot} from './../src/encode-limit'
+import {errorMiddleware} from './../src/error'
 
 describe('encode concurrency limit', function() {
 
@@ -112,6 +113,41 @@ describe('encode concurrency limit', function() {
 
         handlers.close()
         assert.equal(signal.aborted, true, 'closing before the body is written means the client left')
+    })
+
+    it('is treated as a cancellation by the error middleware, not a server error', async function() {
+        // An abort escaping any encode path reaches the shared error middleware.
+        // Wrapped as an APIError it would default to InternalError: a 500 plus an
+        // 'unexpected API error' log. Since upstream abandons slow requests
+        // routinely, that would manufacture false server failures.
+        const makeCtx = () => {
+            const emitted: any[][] = []
+            return {
+                app: {emit: (...args: any[]) => { emitted.push(args) }},
+                body: undefined as any,
+                emitted,
+                log: {debug: () => undefined},
+                set: () => undefined,
+                status: 0,
+                url: '/p/test',
+            }
+        }
+
+        const controller = new AbortController()
+        controller.abort()
+        const abortErr = await withEncodeSlot(async () => undefined, controller.signal).catch((e) => e)
+        assert(isEncodeAborted(abortErr), 'precondition: got a tagged abort error')
+
+        const ctx = makeCtx()
+        await errorMiddleware(ctx as any, async () => { throw abortErr })
+        assert.equal(ctx.status, 499, 'client-gone should not surface as 5xx')
+        assert.equal(ctx.emitted.length, 0, 'must not raise an app error event')
+
+        // Control: a genuine failure must still take the normal error path.
+        const failCtx = makeCtx()
+        await errorMiddleware(failCtx as any, async () => { throw new Error('real failure') })
+        assert.equal(failCtx.status, 500, 'genuine errors still report 500')
+        assert.equal(failCtx.emitted.length, 1, 'genuine errors still emit')
     })
 
     it('holds the ceiling when a caller arrives mid hand-off', async function() {
