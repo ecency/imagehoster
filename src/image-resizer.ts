@@ -1,5 +1,6 @@
 // utils/image-resizer.ts
 import Sharp from 'sharp'
+import { withEncodeSlot } from './encode-limit'
 import { APIError } from './error'
 import {
     buildSharpPipeline, getProxyImageLimits, mimeMagic,
@@ -106,6 +107,6 @@ export async function resizeImageWithOptions(
             break
     }
 
-    const buffer = await image.toBuffer()
+    const buffer = await withEncodeSlot(() => image.toBuffer())
     return { buffer, contentType, isFallback }
 }
