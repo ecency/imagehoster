@@ -1,7 +1,9 @@
 import 'mocha'
 import assert from 'assert'
 
-import {clientGoneSignal, encodeLimitStats, isEncodeAborted, withEncodeSlot} from './../src/encode-limit'
+import {
+    clientGoneSignal, encodeLimitStats, encodeNeedsSlot, isEncodeAborted, runEncode, withEncodeSlot,
+} from './../src/encode-limit'
 import {errorMiddleware} from './../src/error'
 
 describe('encode concurrency limit', function() {
@@ -148,6 +150,62 @@ describe('encode concurrency limit', function() {
         await errorMiddleware(failCtx as any, async () => { throw new Error('real failure') })
         assert.equal(failCtx.status, 500, 'genuine errors still report 500')
         assert.equal(failCtx.emitted.length, 1, 'genuine errors still emit')
+    })
+
+    describe('cheap-encode bypass', function() {
+        it('gates expensive targets and lets cheap ones through', function() {
+            // Measured encode cost at effort 3: 64px ~13ms, 128px ~19ms,
+            // 512px ~170ms, 1280px ~578ms.
+            assert.equal(encodeNeedsSlot({width: 64, height: 64}), false, '64px avatar is cheap')
+            assert.equal(encodeNeedsSlot({width: 128, height: 128}), false, '128px avatar is cheap')
+            assert.equal(encodeNeedsSlot({width: 512, height: 512}), true, '512px is worth gating')
+            assert.equal(encodeNeedsSlot({width: 1280, height: 1280}), true, 'full size is worth gating')
+        })
+
+        it('gates an unspecified target, which may be the full original', function() {
+            assert.equal(encodeNeedsSlot({}), true)
+            assert.equal(encodeNeedsSlot({width: 1280}), true, 'half-specified is still unknown area')
+        })
+
+        it('never gates a blur placeholder regardless of requested size', function() {
+            assert.equal(encodeNeedsSlot({width: 1280, height: 1280, blur: true}), false)
+        })
+
+        it('runs a cheap encode without taking a slot, even when all slots are busy', async function() {
+            const holders = Array.from({length: limit}, deferred)
+            const held = holders.map((g) => withEncodeSlot(async () => { await g.promise }))
+            await new Promise((resolve) => setImmediate(resolve))
+            assert.equal(encodeLimitStats().active, limit, 'all slots taken')
+
+            // This is the regression: before the bypass, a 13ms avatar encode
+            // queued here behind multi-second full-size work.
+            let ran = false
+            const rv = await runEncode(async () => { ran = true; return 'avatar' }, {width: 64, height: 64}, undefined)
+            assert.equal(rv, 'avatar')
+            assert.equal(ran, true, 'cheap encode must not wait for a slot')
+            assert.equal(encodeLimitStats().queued, 0, 'and must not enter the queue')
+
+            holders.forEach((g) => g.release())
+            await Promise.all(held)
+            assert.equal(encodeLimitStats().active, 0)
+        })
+
+        it('still queues an expensive encode when slots are busy', async function() {
+            const holders = Array.from({length: limit}, deferred)
+            const held = holders.map((g) => withEncodeSlot(async () => { await g.promise }))
+            await new Promise((resolve) => setImmediate(resolve))
+
+            let ran = false
+            const pending = runEncode(async () => { ran = true }, {width: 1280, height: 1280}, undefined)
+            await new Promise((resolve) => setImmediate(resolve))
+            assert.equal(ran, false, 'expensive encode must wait its turn')
+            assert.equal(encodeLimitStats().queued, 1)
+
+            holders.forEach((g) => g.release())
+            await Promise.all([...held, pending])
+            assert.equal(ran, true)
+            assert.equal(encodeLimitStats().active, 0)
+        })
     })
 
     it('holds the ceiling when a caller arrives mid hand-off', async function() {

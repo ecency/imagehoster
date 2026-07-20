@@ -123,6 +123,46 @@ export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSign
 }
 
 /**
+ * Output area below which an encode runs ungated.
+ *
+ * Encode cost scales steeply with output size. Measured at effort 3: a 64px
+ * avatar is ~13ms and a 128px ~19ms, against ~578ms for a full 1280 proxy image
+ * — roughly 30-45x cheaper. Sending that 13ms of work through a one-slot queue
+ * made it wait behind multi-second full-size encodes, so cold avatars went from
+ * milliseconds to seconds while cached ones stayed fast. The queue exists to
+ * stop expensive encodes starving cheap disk reads; it should not make cheap
+ * encodes starve behind expensive ones instead.
+ *
+ * 256x256 sits between the measured-cheap sizes (64/128, <=20ms) and the ones
+ * worth gating (512 at ~170ms, 1280 at ~578ms).
+ */
+export const ENCODE_GATE_MIN_PIXELS = 256 * 256
+
+/** Whether an encode for this output target is expensive enough to queue. */
+export function encodeNeedsSlot(target: {width?: number, height?: number, blur?: boolean}): boolean {
+    // Blur placeholders are ~20px LQIP thumbnails regardless of the requested size.
+    if (target.blur) { return false }
+    const {width, height} = target
+    // An unspecified target means "no resize" — it could be the full original, so gate it.
+    if (!width || !height) { return true }
+    return width * height >= ENCODE_GATE_MIN_PIXELS
+}
+
+/**
+ * Runs an encode, queueing it only when it is expensive enough to be worth
+ * gating. Prefer this over calling withEncodeSlot directly at request paths so
+ * the cheap/expensive decision stays in one place.
+ */
+export async function runEncode<T>(
+    fn: () => Promise<T>,
+    target: {width?: number, height?: number, blur?: boolean},
+    signal: AbortSignal | undefined,
+): Promise<T> {
+    if (!encodeNeedsSlot(target)) { return fn() }
+    return withEncodeSlot(fn, signal)
+}
+
+/**
  * AbortSignal that fires if the connection closes before the response was fully
  * written — i.e. the client, or the cache in front of us, gave up waiting.
  */
