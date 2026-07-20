@@ -158,6 +158,11 @@ export async function runEncode<T>(
     target: {width?: number, height?: number, blur?: boolean},
     signal: AbortSignal | undefined,
 ): Promise<T> {
+    // Check for a client that already left before either path. withEncodeSlot
+    // does this when it queues, but the bypass calls fn() directly — without this
+    // a cheap encode for a disconnected client would still run Sharp and cache a
+    // result nobody will read, which the gated path already avoids.
+    if (signal && signal.aborted) { throw abortedError() }
     if (!encodeNeedsSlot(target)) { return fn() }
     return withEncodeSlot(fn, signal)
 }

@@ -190,6 +190,21 @@ describe('encode concurrency limit', function() {
             assert.equal(encodeLimitStats().active, 0)
         })
 
+        it('rejects a cheap encode when the client already left, without running Sharp', async function() {
+            // The bypass path skips the queue, so it must do the abort check the
+            // queued path does — otherwise a disconnected client's cheap encode
+            // still runs and caches a result nobody reads.
+            const controller = new AbortController()
+            controller.abort()
+            let ran = false
+            await assert.rejects(
+                runEncode(async () => { ran = true }, {width: 64, height: 64}, controller.signal),
+                (err) => isEncodeAborted(err),
+            )
+            assert.equal(ran, false, 'cheap encode must not run for a gone client')
+            assert.equal(encodeLimitStats().active, 0)
+        })
+
         it('still queues an expensive encode when slots are busy', async function() {
             const holders = Array.from({length: limit}, deferred)
             const held = holders.map((g) => withEncodeSlot(async () => { await g.promise }))
