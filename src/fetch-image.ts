@@ -44,9 +44,36 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
 // remembered briefly and skipped straight to the default image. The local map
 // bounds the blast radius when Redis is unavailable; Redis shares entries
 // across cluster workers and survives worker restarts.
+//
+// Not every failure means the same thing. A 404/410 (or a host that does not
+// resolve) is the origin definitively saying "this is not here" — worth
+// remembering for the full TTL. A timeout, connection reset or 5xx usually means
+// the origin, the network, or this service was momentarily busy: the image is
+// very likely still alive. Remembering those for the full TTL replaces a live
+// image with the default placeholder for ten minutes off a single blip, and
+// under load that turns a transient slowdown into a self-sustaining one. Keep a
+// short entry for them so the mirror chain is still not walked by every
+// concurrent request, then let the URL recover on its own.
 const NEGATIVE_TTL_SECONDS = 600
+const NEGATIVE_TTL_TRANSIENT_SECONDS = 60
 const NEGATIVE_LOCAL_MAX = 10000
 const localNegativeCache = new Map<string, number>() // urlString -> expiry epoch ms
+
+// Origin answered, and the answer was "this does not exist / you may not have it"
+const TERMINAL_STATUS_CODES = new Set([400, 401, 403, 404, 405, 410, 414, 451])
+// DNS could not resolve the host at all
+const TERMINAL_ERROR_CODES = new Set(['ENOTFOUND', 'EAI_NONAME'])
+
+function isTerminalStatus(statusCode?: number): boolean {
+    return typeof statusCode === 'number' && TERMINAL_STATUS_CODES.has(statusCode)
+}
+
+function isTerminalError(e: any): boolean {
+    const code = e && (e.code || e.errno)
+    // Anything we cannot positively identify is treated as transient: a short
+    // entry that expires is cheap, a wrong ten-minute one is user-visible.
+    return typeof code === 'string' && TERMINAL_ERROR_CODES.has(code)
+}
 
 const negativeCacheKey = (urlString: string) => 'negfetch:' + getUrlHashKey(urlString)
 
@@ -77,6 +104,13 @@ export function clearNegativeFetchCache(): void {
     localNegativeCache.clear()
 }
 
+// Remaining local-cache lifetime in ms, or undefined when not cached. Lets tests
+// tell a terminal entry from a transient one without waiting out the TTL.
+export function peekDeadUrlTtl(urlString: string): number | undefined {
+    const expiry = localNegativeCache.get(urlString)
+    return expiry === undefined ? undefined : expiry - Date.now()
+}
+
 export async function fetchImageWithFallbacks(
     urlString: string,
     urlParams: string,
@@ -95,6 +129,14 @@ export async function fetchImageWithFallbacks(
     if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
         ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
     } else {
+        let sawTransientFailure = false
+        // The HTTPS upgrade is an opportunistic probe: an origin that serves
+        // plain HTTP will refuse it, and that tells us nothing about whether the
+        // image exists. Only real answers count toward the terminal/transient
+        // verdict, or every http:// URL would look transient.
+        const speculativeHttpsUrl = urlString.startsWith('http://')
+            ? urlString.replace('http://', 'https://')
+            : null
         for (const candidate of urls) {
             if (process.env.NODE_ENV !== 'test') {
                 try {
@@ -128,12 +170,22 @@ export async function fetchImageWithFallbacks(
                     return { res, isFallback: false }
                 }
 
+                if (candidate !== speculativeHttpsUrl && !isTerminalStatus(res && res.statusCode)) {
+                    sawTransientFailure = true
+                }
                 ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
+                if (candidate !== speculativeHttpsUrl && !isTerminalError(e)) {
+                    sawTransientFailure = true
+                }
                 ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        await markDeadUrl(urlString)
+        // Only a chain that failed terminally at every hop is remembered for the
+        // full TTL; if any hop merely timed out or errored, keep it brief.
+        const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
+        ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
+        await markDeadUrl(urlString, ttl)
     }
 
     // Final fallback: default image (avatar or cover)
