@@ -16,7 +16,11 @@ export async function resizeImageWithOptions(
     userAgent: string,
     fallbackUrl: string,
     logger: any,
-    signal?: AbortSignal
+    // Required, not optional: a request-backed resize must say whether its client
+    // is still there. Leaving it optional let a caller silently omit it and
+    // reintroduce unremovable queue waiters. Pass `undefined` deliberately for
+    // non-request callers.
+    signal: AbortSignal | undefined
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
