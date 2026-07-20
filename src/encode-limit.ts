@@ -39,43 +39,101 @@ function resolveLimit(): number {
 
 const LIMIT = resolveLimit()
 
+export const ENCODE_ABORTED = 'EncodeAborted'
+
+/** True when an encode was dropped because its client went away, not because Sharp failed. */
+export function isEncodeAborted(err: any): boolean {
+    return !!err && err.name === ENCODE_ABORTED
+}
+
+function abortedError(): Error {
+    const err = new Error('encode abandoned: client disconnected while queued')
+    err.name = ENCODE_ABORTED
+    return err
+}
+
+interface Waiter {
+    settled: boolean
+    grant: () => void
+}
+
 let active = 0
-const waiting: Array<() => void> = []
+const waiting: Waiter[] = []
+
+function acquire(signal?: AbortSignal): Promise<void> {
+    if (signal && signal.aborted) { return Promise.reject(abortedError()) }
+    if (active < LIMIT) {
+        active++
+        return Promise.resolve()
+    }
+    return new Promise<void>((resolve, reject) => {
+        const waiter: Waiter = {settled: false, grant: () => undefined}
+        const onAbort = () => {
+            if (waiter.settled) { return }
+            waiter.settled = true
+            const idx = waiting.indexOf(waiter)
+            if (idx >= 0) { waiting.splice(idx, 1) }
+            reject(abortedError())
+        }
+        waiter.grant = () => {
+            if (waiter.settled) { return }
+            waiter.settled = true
+            if (signal) { signal.removeEventListener('abort', onAbort) }
+            resolve()
+        }
+        waiting.push(waiter)
+        if (signal) { signal.addEventListener('abort', onAbort, {once: true}) }
+    })
+}
+
+function release(): void {
+    // Hand the slot straight to a waiter without dropping `active`. If we
+    // decremented and let the waiter re-increment, a caller arriving in the gap
+    // (the waiter resumes on a microtask) would see a free slot and take it too,
+    // putting us over the limit. Skip waiters that already aborted.
+    while (waiting.length > 0) {
+        const next = waiting.shift() as Waiter
+        if (!next.settled) {
+            next.grant()
+            return
+        }
+    }
+    active--
+}
 
 /**
  * Runs `fn` once a slot is free. Keep the wrapped region as small as possible —
  * ideally the single encode call — so a slot is never held across other awaits,
  * and so a gated call can never nest inside another (which would deadlock at
  * low limits).
+ *
+ * Pass `signal` so a request whose client has already gone away drops out of the
+ * queue instead of claiming a slot to build a response nobody will read. That
+ * matters under load: the cache in front of us gives up long before a deep queue
+ * drains, so without it the queue fills with work for dead sockets while live
+ * requests wait behind it.
  */
-function acquire(): Promise<void> {
-    if (active < LIMIT) {
-        active++
-        return Promise.resolve()
-    }
-    return new Promise<void>((resolve) => { waiting.push(resolve) })
-}
-
-function release(): void {
-    const next = waiting.shift()
-    if (next) {
-        // Hand the slot straight to the waiter without dropping `active`. If we
-        // decremented and let the waiter re-increment, a caller arriving in the
-        // gap (the waiter resumes on a microtask) would see a free slot and take
-        // it too, putting us over the limit.
-        next()
-    } else {
-        active--
-    }
-}
-
-export async function withEncodeSlot<T>(fn: () => Promise<T>): Promise<T> {
-    await acquire()
+export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    await acquire(signal)
     try {
         return await fn()
     } finally {
         release()
     }
+}
+
+/**
+ * AbortSignal that fires if the connection closes before the response was fully
+ * written — i.e. the client, or the cache in front of us, gave up waiting.
+ */
+export function clientGoneSignal(ctx: any): AbortSignal | undefined {
+    const res = ctx && ctx.res
+    if (!res || typeof res.once !== 'function') { return undefined }
+    const controller = new AbortController()
+    res.once('close', () => {
+        if (!res.writableEnded) { controller.abort() }
+    })
+    return controller.signal
 }
 
 /** Exposed for tests and diagnostics. */

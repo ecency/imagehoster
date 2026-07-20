@@ -1,7 +1,7 @@
 import 'mocha'
 import assert from 'assert'
 
-import {encodeLimitStats, withEncodeSlot} from './../src/encode-limit'
+import {clientGoneSignal, encodeLimitStats, isEncodeAborted, withEncodeSlot} from './../src/encode-limit'
 
 describe('encode concurrency limit', function() {
 
@@ -51,6 +51,67 @@ describe('encode concurrency limit', function() {
         const rv = await withEncodeSlot(async () => 'ok')
         assert.equal(rv, 'ok')
         assert.equal(encodeLimitStats().active, 0)
+    })
+
+    it('drops a queued waiter whose client went away, without spending a slot', async function() {
+        // Fill every slot, then queue two: one whose client disconnects, one that
+        // stays. The abandoned one must never run, and the live one must still
+        // get the slot when it frees.
+        const holders = Array.from({length: limit}, deferred)
+        const held = holders.map((g) => withEncodeSlot(async () => { await g.promise }))
+        await new Promise((resolve) => setImmediate(resolve))
+
+        const controller = new AbortController()
+        let abandonedRan = false
+        const abandoned = withEncodeSlot(async () => { abandonedRan = true }, controller.signal)
+
+        let liveRan = false
+        const live = withEncodeSlot(async () => { liveRan = true })
+        assert.equal(encodeLimitStats().queued, 2, 'both should be queued')
+
+        controller.abort()
+        await assert.rejects(abandoned, (err: any) => isEncodeAborted(err))
+        assert.equal(abandonedRan, false, 'abandoned work must never execute')
+        assert.equal(encodeLimitStats().queued, 1, 'aborted waiter should leave the queue')
+
+        holders.forEach((g) => g.release())
+        await Promise.all([...held, live])
+        assert.equal(liveRan, true, 'the live waiter should still get a slot')
+        assert.equal(encodeLimitStats().active, 0)
+        assert.equal(encodeLimitStats().queued, 0)
+    })
+
+    it('rejects immediately when the signal is already aborted', async function() {
+        const controller = new AbortController()
+        controller.abort()
+        let ran = false
+        await assert.rejects(
+            withEncodeSlot(async () => { ran = true }, controller.signal),
+            (err: any) => isEncodeAborted(err),
+        )
+        assert.equal(ran, false, 'must not run for an already-gone client')
+        assert.equal(encodeLimitStats().active, 0, 'must not consume a slot')
+    })
+
+    it('does not abort when the response completed normally', function() {
+        // 'close' fires on every response, including successful ones — only a
+        // close before the body was written means the client actually left.
+        const handlers: {[k: string]: () => void} = {}
+        const ctx: any = {res: {writableEnded: false, once: (ev: string, cb: () => void) => { handlers[ev] = cb }}}
+        const signal = clientGoneSignal(ctx) as AbortSignal
+
+        ctx.res.writableEnded = true
+        handlers.close()
+        assert.equal(signal.aborted, false, 'a completed response must not look like a disconnect')
+    })
+
+    it('aborts when the connection closes mid-response', function() {
+        const handlers: {[k: string]: () => void} = {}
+        const ctx: any = {res: {writableEnded: false, once: (ev: string, cb: () => void) => { handlers[ev] = cb }}}
+        const signal = clientGoneSignal(ctx) as AbortSignal
+
+        handlers.close()
+        assert.equal(signal.aborted, true, 'closing before the body is written means the client left')
     })
 
     it('holds the ceiling when a caller arrives mid hand-off', async function() {

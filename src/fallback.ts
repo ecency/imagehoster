@@ -1,7 +1,7 @@
 import etag from 'etag'
 import Sharp from 'sharp'
 import {KoaContext} from './common'
-import {withEncodeSlot} from './encode-limit'
+import {clientGoneSignal, withEncodeSlot} from './encode-limit'
 import {getImageKey, OutputFormat, ProxyOptions, ScalingMode} from './utils'
 
 export async function serveOrBuildFallbackImage(
@@ -58,7 +58,7 @@ export async function serveOrBuildFallbackImage(
             contentType = 'image/jpeg'
     }
 
-    const rv = await withEncodeSlot(() => image.toBuffer())
+    const rv = await withEncodeSlot(() => image.toBuffer(), clientGoneSignal(ctx))
 
     ctx.set('Content-Type', contentType)
     ctx.set('Vary', 'Accept')
