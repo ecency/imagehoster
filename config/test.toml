@@ -1,3 +1,6 @@
+# Fixed encode-concurrency limit so tests exercise a real ceiling (>1)
+max_concurrent_encodes = 3
+
 log_level = 'fatal'
 
 # Match the test server URL so double-proxy detection works

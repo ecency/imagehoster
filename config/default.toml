@@ -12,6 +12,11 @@ name = 'imagehoster'
 # number of worker processes to spawn, 0 = autodetect
 num_workers = 0
 
+# Max Sharp encodes running at once PER WORKER (service-wide = this x num_workers).
+# Sharp shares the libuv threadpool with fs reads, so unbounded encodes starve
+# cached-variant reads and oversubscribe the CPU. 0/unset = auto (cpus/workers).
+max_concurrent_encodes = 0
+
 # url to hive node used for verifying signatures
 rpc_node = 'https://api.hive.blog'
 

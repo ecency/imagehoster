@@ -8,6 +8,7 @@ import {URL} from 'url'
 import { getProfile, KoaContext, proxyStore, uploadStore } from './common'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
+import {clientGoneSignal} from './encode-limit'
 import {resizeImageWithOptions} from './image-resizer'
 import {
   getDefaultUrlAndParams,
@@ -186,7 +187,8 @@ async function handleCover(ctx: KoaContext) {
       urlParams,
       ctx.get('user-agent') || '',
       DefaultCover,
-      ctx.log
+      ctx.log,
+      clientGoneSignal(ctx)
   )
   contentType = finalType
   isResizeFallback = isFallback

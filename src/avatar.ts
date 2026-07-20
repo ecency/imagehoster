@@ -5,6 +5,7 @@ import config from 'config'
 import etag from 'etag'
 import {URL} from 'url'
 import {fetchImageWithFallbacks} from './fetch-image'
+import {clientGoneSignal} from './encode-limit'
 import {resizeImageWithOptions} from './image-resizer'
 
 import { getProfile, KoaContext, proxyStore, uploadStore } from './common'
@@ -193,7 +194,8 @@ async function handleAvatar(ctx: KoaContext) {
       urlParams,
       ctx.get('user-agent') || '',
       DefaultAvatar,
-      ctx.log
+      ctx.log,
+      clientGoneSignal(ctx)
   )
   contentType = finalType
   isResizeFallback = isFallback

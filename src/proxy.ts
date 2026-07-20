@@ -13,6 +13,7 @@ import {KoaContext, proxyStore, uploadStore} from './common'
 import {applyUrlReplacements, isEmptyImageUrl, EMPTY_IMAGE_URL_PATTERNS} from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
+import {clientGoneSignal, isEncodeAborted, withEncodeSlot} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
 import {
@@ -569,8 +570,15 @@ export async function proxyHandler(ctx: KoaContext) {
         }
 
         try {
-            rv = await image.toBuffer()
+            rv = await withEncodeSlot(() => image.toBuffer(), clientGoneSignal(ctx))
         } catch (err) {
+            if (isEncodeAborted(err)) {
+                // The client gave up while we were queued. Nothing failed, and
+                // there is no socket left to serve the fallback bytes to, so do
+                // not walk the recovery path or report it as a Sharp failure.
+                ctx.log.debug({ urlString, imageKey, msg: 'encode abandoned, client gone' })
+                throw err
+            }
             ctx.log.error({ err, urlString, imageKey, msg: 'sharp.toBuffer() failed' })
             captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
             if (origIsUpload) {

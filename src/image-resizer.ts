@@ -1,5 +1,6 @@
 // utils/image-resizer.ts
 import Sharp from 'sharp'
+import { withEncodeSlot } from './encode-limit'
 import { APIError } from './error'
 import {
     buildSharpPipeline, getProxyImageLimits, mimeMagic,
@@ -14,7 +15,12 @@ export async function resizeImageWithOptions(
     urlParams: string,
     userAgent: string,
     fallbackUrl: string,
-    logger: any
+    logger: any,
+    // Required, not optional: a request-backed resize must say whether its client
+    // is still there. Leaving it optional let a caller silently omit it and
+    // reintroduce unremovable queue waiters. Pass `undefined` deliberately for
+    // non-request callers.
+    signal: AbortSignal | undefined
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
@@ -106,6 +112,6 @@ export async function resizeImageWithOptions(
             break
     }
 
-    const buffer = await image.toBuffer()
+    const buffer = await withEncodeSlot(() => image.toBuffer(), signal)
     return { buffer, contentType, isFallback }
 }
