@@ -10,7 +10,7 @@ import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
 import {KoaContext, proxyStore, uploadStore} from './common'
-import {applyUrlReplacements, isEmptyImageUrl, EMPTY_IMAGE_URL_PATTERNS} from './constants'
+import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, withEncodeSlot} from './encode-limit'
@@ -557,7 +557,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 break
             case OutputFormat.AVIF:
                 contentType = 'image/avif'
-                image.avif({quality: 50, effort: 3, force: true})
+                image.avif({quality: 50, effort: AVIF_EFFORT, force: true})
                 break
             default:
                 break

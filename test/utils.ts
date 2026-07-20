@@ -29,18 +29,7 @@ import {
     storeWrite,
 } from './../src/utils'
 
-import {
-    isEmptyImageUrl,
-    startsWithEmptyImagePrefix,
-    applyUrlReplacements,
-    SERVICE_BASE_URL,
-    SPECIAL_EMPTY_IMAGE_PATH,
-    DEFAULT_FALLBACK_IMAGE_URL,
-    DEFAULT_AVATAR_HASH,
-    EMPTY_IMAGE_URL_PATTERNS,
-    INTERNAL_SERVICE_ORIGINS,
-    LEGACY_SERVICE_BASE_URL,
-} from './../src/constants'
+import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EMPTY_IMAGE_URL_PATTERNS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -484,6 +473,15 @@ describe('constants', function() {
 
         it('should have correct SPECIAL_EMPTY_IMAGE_PATH', function() {
             assert.equal(SPECIAL_EMPTY_IMAGE_PATH, '0x0')
+        })
+
+        it('should keep AVIF_EFFORT in the measured-safe range', function() {
+            // 2 is the measured sweet spot: 1.6-2.3x faster than 3 at the same
+            // size or smaller. Guard the range rather than the exact value so
+            // retuning stays possible, but a drift to 0 (~8% larger files) or
+            // back to 4 (~6x slower for <1% gain) fails here.
+            assert.equal(typeof AVIF_EFFORT, 'number')
+            assert(AVIF_EFFORT >= 1 && AVIF_EFFORT <= 3, `AVIF_EFFORT ${ AVIF_EFFORT } outside measured-safe 1-3`)
         })
 
         it('should have valid DEFAULT_FALLBACK_IMAGE_URL', function() {

@@ -2,6 +2,7 @@ import etag from 'etag'
 import Sharp from 'sharp'
 import {KoaContext} from './common'
 import {clientGoneSignal, withEncodeSlot} from './encode-limit'
+import { AVIF_EFFORT } from './constants'
 import {getImageKey, OutputFormat, ProxyOptions, ScalingMode} from './utils'
 
 export async function serveOrBuildFallbackImage(
@@ -49,7 +50,7 @@ export async function serveOrBuildFallbackImage(
             contentType = 'image/webp'
             break
         case OutputFormat.AVIF:
-            image.avif({ force: true, quality: 50, effort: 3 })
+            image.avif({ force: true, quality: 50, effort: AVIF_EFFORT })
             contentType = 'image/avif'
             break
         case OutputFormat.Match:

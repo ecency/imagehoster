@@ -1,6 +1,7 @@
 // utils/image-resizer.ts
 import Sharp from 'sharp'
 import { withEncodeSlot } from './encode-limit'
+import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
     buildSharpPipeline, getProxyImageLimits, mimeMagic,
@@ -108,7 +109,7 @@ export async function resizeImageWithOptions(
             break
         case OutputFormat.AVIF:
             contentType = 'image/avif'
-            image.avif({ quality: 50, effort: 3, force: true })
+            image.avif({ quality: 50, effort: AVIF_EFFORT, force: true })
             break
     }
 

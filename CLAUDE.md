@@ -61,7 +61,7 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - Scaling modes: `cover` (center-crop) and `fit` (aspect-preserve)
 - Output formats: `match`, `jpeg`, `png`, `webp`, `avif`
 - Format auto-negotiation: prefers AVIF > WebP > match based on Accept header
-- AVIF encoding: quality 50, effort 3 (balances CPU vs compression — effort 4 is 6x slower for <1% size reduction)
+- AVIF encoding: quality 50, effort 2 (`AVIF_EFFORT` in constants.ts). Measured on five real proxy images: effort 2 is 1.6-2.3x faster than effort 3 at the same size or smaller (92-100% of its bytes). Do not lower further — effort 1 is not reliably faster and effort 0 is ~8% larger; effort 4 is ~6x slower than 3 for <1% size reduction
 - Max dimensions enforced: standard (1280x1280) and custom (2000x2000)
 - Fallback system: attempts multiple mirror URLs if primary source fails
 - Animated GIF/APNG: bypasses Sharp pipeline entirely to preserve animation (Sharp strips frames)
