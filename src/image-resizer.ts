@@ -1,6 +1,6 @@
 // utils/image-resizer.ts
 import Sharp from 'sharp'
-import { withEncodeSlot } from './encode-limit'
+import { runEncode } from './encode-limit'
 import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
@@ -113,6 +113,6 @@ export async function resizeImageWithOptions(
             break
     }
 
-    const buffer = await withEncodeSlot(() => image.toBuffer(), signal)
+    const buffer = await runEncode(() => image.toBuffer(), options, signal)
     return { buffer, contentType, isFallback }
 }

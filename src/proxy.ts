@@ -13,7 +13,7 @@ import {KoaContext, proxyStore, uploadStore} from './common'
 import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
-import {clientGoneSignal, isEncodeAborted, withEncodeSlot} from './encode-limit'
+import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
 import {
@@ -570,7 +570,7 @@ export async function proxyHandler(ctx: KoaContext) {
         }
 
         try {
-            rv = await withEncodeSlot(() => image.toBuffer(), clientGoneSignal(ctx))
+            rv = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
         } catch (err) {
             if (isEncodeAborted(err)) {
                 // The client gave up while we were queued. Nothing failed, and
