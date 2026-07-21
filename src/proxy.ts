@@ -18,6 +18,7 @@ import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
 import {
     AcceptedContentTypes,
+    applyMatchFallbackFormat,
     assertPublicUrl,
     buildSharpPipeline,
     fetchUrl,
@@ -26,6 +27,7 @@ import {
     getProxyImageLimits,
     getSharpMetadataWithRetry,
     mimeMagic,
+    needsMatchFallback,
     NeedleResponse,
     OutputFormat,
     isInternalProxyUrl,
@@ -296,11 +298,22 @@ export async function proxyHandler(ctx: KoaContext) {
         })
         const {head, stream} = await streamHead(file, {bytes: 16384})
         const mimeType = await mimeMagic(head)
-        ctx.set('Content-Type', mimeType)
-        ctx.set('Vary', 'Accept')
-        ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
-        ctx.body = stream
-        return
+        // Match variants are one bucket for every client that negotiated neither
+        // AVIF nor WebP, so a stored AVIF/HEIF passthrough can be undecodable for
+        // the client asking now. Re-derive from the original instead of streaming
+        // it; the converted variant then replaces this one for everybody.
+        if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
+            ctx.tag({match_fallback: true})
+            ctx.log.debug({imageKey, mimeType, msg: 'cached match variant undecodable for client, re-deriving'})
+            ;(stream as any).destroy?.()
+            file.destroy()
+        } else {
+            ctx.set('Content-Type', mimeType)
+            ctx.set('Vary', 'Accept')
+            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.body = stream
+            return
+        }
     }
 
     // check if we have the original
@@ -537,11 +550,9 @@ export async function proxyHandler(ctx: KoaContext) {
 
         switch (options.format) {
             case OutputFormat.Match:
-                // HEIC/HEIF is not renderable by most browsers — convert to JPEG
-                if (contentType === 'image/heic' || contentType === 'image/heif') {
-                    image.jpeg({quality: 80, force: true})
-                    contentType = 'image/jpeg'
-                }
+                // Match hands back the original bytes, which only works if the
+                // client can decode the source format — see applyMatchFallbackFormat
+                contentType = applyMatchFallbackFormat(image, contentType, acceptHeader, metadata.hasAlpha)
                 break
             case OutputFormat.JPEG:
                 image.jpeg({force: true})

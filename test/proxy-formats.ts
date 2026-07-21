@@ -40,6 +40,26 @@ describe('proxy formats', function() {
     after((done) => { server.close(done) })
     after((done) => { imageServer.close(done) })
 
+    // AVIF sources, generated so no binary fixture has to be committed
+    const avifFile = 'generated-test.avif'
+    const avifAlphaFile = 'generated-alpha.avif'
+    before(async function() {
+        this.timeout(30000)
+        await sharp(path.resolve(__dirname, 'test.jpg'))
+            .resize(120)
+            .avif({quality: 50, effort: 0})
+            .toFile(path.resolve(__dirname, avifFile))
+        await sharp({create: {
+            width: 60, height: 60, channels: 4,
+            background: {r: 0, g: 128, b: 255, alpha: 0.5},
+        }}).avif({quality: 50, effort: 0}).toFile(path.resolve(__dirname, avifAlphaFile))
+    })
+    after(() => {
+        for (const file of [avifFile, avifAlphaFile]) {
+            try { fs.unlinkSync(path.resolve(__dirname, file)) } catch (_e) { /* best effort */ }
+        }
+    })
+
     beforeEach(() => { serveFile = 'test.jpg' })
 
     it('should output WebP when requested', async function() {
@@ -88,6 +108,81 @@ describe('proxy formats', function() {
         assert.equal(res.statusCode, 200)
         const meta = await sharp(res.body).metadata()
         assert.equal(meta.format, 'jpeg')
+    })
+
+    it('should convert an AVIF source for a client that did not accept AVIF', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-no-support.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: 'image/webp,image/apng,image/svg+xml,*/*;q=0.8'}})
+        assert.equal(res.statusCode, 200)
+        // WebP is advertised, so negotiation lands on WebP before Match is reached
+        const meta = await sharp(res.body).metadata()
+        assert.equal(meta.format, 'webp')
+    })
+
+    it('should convert an AVIF source to JPEG for a client accepting neither AVIF nor WebP', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-old-browser.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: 'image/png,image/jpeg,image/svg+xml,*/*;q=0.8'}})
+        assert.equal(res.statusCode, 200)
+        assert.equal(res.headers['content-type'], 'image/jpeg')
+        const meta = await sharp(res.body).metadata()
+        assert.equal(meta.format, 'jpeg')
+    })
+
+    it('should keep transparency by falling back to PNG', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifAlphaFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-alpha.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=30`,
+            {headers: {accept: 'image/png,image/jpeg,*/*;q=0.8'}})
+        assert.equal(res.statusCode, 200)
+        const meta = await sharp(res.body).metadata()
+        assert.equal(meta.format, 'png')
+        assert.equal(meta.hasAlpha, true)
+    })
+
+    it('should pass an AVIF source through to a client that enumerated no image types', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-bot.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: '*/*'}})
+        assert.equal(res.statusCode, 200)
+        const meta = await sharp(res.body).metadata()
+        assert.equal(meta.format, 'heif')
+    })
+
+    it('should not serve a cached AVIF match variant to a client that cannot decode it', async function() {
+        this.slow(4000)
+        this.timeout(20000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-cached-match.avif`)
+        // First request stores the passthrough AVIF under the Match variant key
+        const first = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: '*/*'}})
+        assert.equal(first.statusCode, 200)
+        assert.equal((await sharp(first.body).metadata()).format, 'heif')
+
+        // Same key, but this client says it cannot read AVIF
+        const second = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: 'image/png,image/jpeg,*/*;q=0.8'}})
+        assert.equal(second.statusCode, 200)
+        assert.equal((await sharp(second.body).metadata()).format, 'jpeg')
     })
 
     it('should handle cover scaling mode', async function() {

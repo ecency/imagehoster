@@ -324,6 +324,65 @@ export function supportsAvif(acceptHeader: string): boolean {
     return acceptHeader.toLowerCase().includes('image/avif')
 }
 
+/**
+ * Whether the client left the door open for any image type.
+ *
+ * A client that enumerates image types (`image/webp,image/apng,*\/*;q=0.8` —
+ * every browser image request looks like this) has told us what it decodes, so
+ * a type missing from that list is a type it cannot read. A client that names
+ * no image type at all (empty Accept, `*\/*` from curl and most bots, or an
+ * explicit `image/*`) told us nothing, so assume it copes rather than burning
+ * CPU transcoding for it.
+ */
+export function acceptsAnyImageType(acceptHeader: string): boolean {
+    const value = acceptHeader.toLowerCase()
+    if (value.includes('image/*')) {
+        return true
+    }
+    return !value.includes('image/')
+}
+
+/**
+ * Whether a `OutputFormat.Match` response of this type would be undecodable.
+ *
+ * Match passes the original bytes through, which breaks for sources the
+ * requesting client has no decoder for: HEIC/HEIF is renderable in almost no
+ * browser, and an AVIF original reaching Match means negotiation already
+ * established that this client did not advertise AVIF.
+ */
+export function needsMatchFallback(contentType: string, acceptHeader: string): boolean {
+    const type = contentType.toLowerCase()
+    if (type === 'image/heic' || type === 'image/heif') {
+        return true
+    }
+    // AVIF is only undecodable for a client that enumerated its formats without it
+    return type === 'image/avif' && !acceptsAnyImageType(acceptHeader)
+}
+
+/**
+ * Pick an output format for a source the client cannot render. Returns the
+ * content type to serve, and stages the conversion on the pipeline when one is
+ * needed. PNG keeps transparency, JPEG is smaller for everything else.
+ */
+export function applyMatchFallbackFormat(
+    image: Sharp.Sharp,
+    contentType: string,
+    acceptHeader: string,
+    hasAlpha?: boolean
+): string {
+    if (!needsMatchFallback(contentType, acceptHeader)) {
+        return contentType
+    }
+
+    if (hasAlpha) {
+        image.png({force: true, compressionLevel: 9})
+        return 'image/png'
+    }
+
+    image.jpeg({quality: 80, force: true})
+    return 'image/jpeg'
+}
+
 export function sanitizeIgnoreInvalidateParams(url: URL): URL {
     return new URL(
         url.toString()
