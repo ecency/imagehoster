@@ -113,6 +113,38 @@ function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): P
     return {width, height, mode, format, ignorecache, invalidate, blur}
 }
 
+/**
+ * Transcode an already-sized cached Match variant for a client that cannot
+ * decode its format. Animated sources and encode failures fall back to the
+ * cached bytes: an image that one client cannot render beats a failed request.
+ */
+async function convertCachedMatchVariant(
+    ctx: KoaContext,
+    cached: Buffer,
+    mimeType: string,
+    acceptHeader: string,
+    options: ProxyOptions
+): Promise<{buffer: Buffer, contentType: string}> {
+    try {
+        const metadata = await Sharp(cached).metadata()
+        if (metadata.pages != null && metadata.pages > 1) {
+            // Transcoding an animated source here would drop its frames
+            return {buffer: cached, contentType: mimeType}
+        }
+        const image = buildSharpPipeline(cached, false)
+        const contentType = applyMatchFallbackFormat(image, mimeType, acceptHeader, metadata.hasAlpha)
+        const buffer = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
+        ctx.log.debug({mimeType, contentType, msg: 'converted cached match variant for client'})
+        return {buffer, contentType}
+    } catch (err) {
+        if (isEncodeAborted(err)) {
+            throw err
+        }
+        ctx.log.error({err, mimeType, msg: 'failed to convert cached match variant'})
+        return {buffer: cached, contentType: mimeType}
+    }
+}
+
 export async function proxyHandler(ctx: KoaContext) {
     ctx.tag({handler: 'proxy'})
 
@@ -300,13 +332,18 @@ export async function proxyHandler(ctx: KoaContext) {
         const mimeType = await mimeMagic(head)
         // Match variants are one bucket for every client that negotiated neither
         // AVIF nor WebP, so a stored AVIF/HEIF passthrough can be undecodable for
-        // the client asking now. Re-derive from the original instead of streaming
-        // it; the converted variant then replaces this one for everybody.
+        // the client asking now. Convert the cached bytes rather than falling
+        // through to the origin: the variant is already sized, and the original
+        // may have been pruned or its remote host may be down.
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
-            ctx.log.debug({imageKey, mimeType, msg: 'cached match variant undecodable for client, re-deriving'})
-            ;(stream as any).destroy?.()
-            file.destroy()
+            const cached = await readStream(stream)
+            const served = await convertCachedMatchVariant(ctx, cached, mimeType, acceptHeader, options)
+            ctx.set('Content-Type', served.contentType)
+            ctx.set('Vary', 'Accept')
+            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.body = served.buffer
+            return
         } else {
             ctx.set('Content-Type', mimeType)
             ctx.set('Vary', 'Accept')

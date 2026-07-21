@@ -177,12 +177,41 @@ describe('proxy formats', function() {
         assert.equal(first.statusCode, 200)
         assert.equal((await sharp(first.body).metadata()).format, 'heif')
 
-        // Same key, but this client says it cannot read AVIF
+        // The cached variant is converted in place, so the origin is not needed
+        serveFile = 'this-file-does-not-exist.avif'
         const second = await needle('get',
             `http://localhost:${port}/p/${imageUrl}?width=100`,
             {headers: {accept: 'image/png,image/jpeg,*/*;q=0.8'}})
         assert.equal(second.statusCode, 200)
-        assert.equal((await sharp(second.body).metadata()).format, 'jpeg')
+        const meta = await sharp(second.body).metadata()
+        assert.equal(meta.format, 'jpeg')
+        assert.equal(meta.width, 100)
+    })
+
+    it('should treat a named image type as enumeration even next to a wildcard', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-disabled-wildcard.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=100`,
+            {headers: {accept: 'image/jpeg,image/*;q=0'}})
+        assert.equal(res.statusCode, 200)
+        assert.equal((await sharp(res.body).metadata()).format, 'jpeg')
+    })
+
+    it('should flatten alpha when the client will not take PNG', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifAlphaFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-alpha-jpeg-only.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=30`,
+            {headers: {accept: 'image/jpeg'}})
+        assert.equal(res.statusCode, 200)
+        const meta = await sharp(res.body).metadata()
+        assert.equal(meta.format, 'jpeg')
+        assert.equal(meta.hasAlpha, false)
     })
 
     it('should handle cover scaling mode', async function() {

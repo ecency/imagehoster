@@ -324,6 +324,9 @@ export function supportsAvif(acceptHeader: string): boolean {
     return acceptHeader.toLowerCase().includes('image/avif')
 }
 
+/** `image/<subtype>`, excluding the `image/*` wildcard */
+const NAMED_IMAGE_TYPE = /image\/[a-z0-9][a-z0-9.+-]*/
+
 /**
  * Whether the client left the door open for any image type.
  *
@@ -335,11 +338,14 @@ export function supportsAvif(acceptHeader: string): boolean {
  * CPU transcoding for it.
  */
 export function acceptsAnyImageType(acceptHeader: string): boolean {
-    const value = acceptHeader.toLowerCase()
-    if (value.includes('image/*')) {
-        return true
-    }
-    return !value.includes('image/')
+    // A named subtype wins over a wildcard: `image/jpeg,image/*;q=0` enumerates,
+    // it does not leave the door open
+    return !NAMED_IMAGE_TYPE.test(acceptHeader.toLowerCase())
+}
+
+/** Whether the client named this exact image type */
+export function acceptsImageType(acceptHeader: string, type: string): boolean {
+    return acceptHeader.toLowerCase().includes(type.toLowerCase())
 }
 
 /**
@@ -362,7 +368,11 @@ export function needsMatchFallback(contentType: string, acceptHeader: string): b
 /**
  * Pick an output format for a source the client cannot render. Returns the
  * content type to serve, and stages the conversion on the pipeline when one is
- * needed. PNG keeps transparency, JPEG is smaller for everything else.
+ * needed.
+ *
+ * PNG keeps transparency, but only for a client that will take PNG — replacing
+ * one undecodable type with another would defeat the point. When alpha has to
+ * go it is flattened onto white, since JPEG would otherwise composite it black.
  */
 export function applyMatchFallbackFormat(
     image: Sharp.Sharp,
@@ -374,11 +384,18 @@ export function applyMatchFallbackFormat(
         return contentType
     }
 
-    if (hasAlpha) {
+    // `*/*` counts: browsers that name a few image types still trail a catch-all
+    const canTakePng = acceptsAnyImageType(acceptHeader) ||
+        acceptsImageType(acceptHeader, 'image/png') ||
+        acceptsImageType(acceptHeader, '*/*')
+    if (hasAlpha && canTakePng) {
         image.png({force: true, compressionLevel: 9})
         return 'image/png'
     }
 
+    if (hasAlpha) {
+        image.flatten({background: '#ffffff'})
+    }
     image.jpeg({quality: 80, force: true})
     return 'image/jpeg'
 }
