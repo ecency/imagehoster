@@ -765,6 +765,20 @@ describe('accept header negotiation', function() {
         })
     })
 
+    describe('supportsAvif / supportsWebP', function() {
+        it('requires the type to be named, not implied by a wildcard', function() {
+            assert.equal(supportsAvif('image/avif,image/webp,*/*;q=0.8'), true)
+            assert.equal(supportsAvif('image/webp,*/*;q=0.8'), false)
+            assert.equal(supportsWebP('image/webp,*/*;q=0.8'), true)
+            assert.equal(supportsWebP('*/*'), false)
+        })
+
+        it('honours a rejected type so negotiation cannot pick it', function() {
+            assert.equal(supportsAvif('image/avif;q=0,image/webp,*/*;q=0.8'), false)
+            assert.equal(supportsWebP('image/webp;q=0,*/*;q=0.8'), false)
+        })
+    })
+
     describe('needsMatchFallback', function() {
         it('always converts HEIC/HEIF', function() {
             assert.equal(needsMatchFallback('image/heic', '*/*'), true)

@@ -314,14 +314,14 @@ export function stripWebpOrPng(value: string): string {
  * Detect WebP support from Accept header for content negotiation
  */
 export function supportsWebP(acceptHeader: string): boolean {
-    return acceptHeader.toLowerCase().includes('image/webp')
+    return namesImageType(acceptHeader, 'image/webp')
 }
 
 /**
  * Detect AVIF support from Accept header for content negotiation
  */
 export function supportsAvif(acceptHeader: string): boolean {
-    return acceptHeader.toLowerCase().includes('image/avif')
+    return namesImageType(acceptHeader, 'image/avif')
 }
 
 /**
@@ -342,6 +342,18 @@ function parseAccept(acceptHeader: string): Array<{type: string, q: number}> {
             return {type, q: Number.isFinite(q) ? q : 1}
         })
         .filter((entry) => entry.type.length > 0)
+}
+
+/**
+ * Whether the client named this exact type and did not reject it.
+ *
+ * Format negotiation asks this rather than `acceptsImageType`: a trailing
+ * `*\/*;q=0.8` must not be read as AVIF or WebP support, or every browser would
+ * be handed a format it never advertised.
+ */
+export function namesImageType(acceptHeader: string, type: string): boolean {
+    const wanted = type.toLowerCase()
+    return parseAccept(acceptHeader).some((entry) => entry.type === wanted && entry.q > 0)
 }
 
 /**
