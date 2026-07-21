@@ -314,14 +314,134 @@ export function stripWebpOrPng(value: string): string {
  * Detect WebP support from Accept header for content negotiation
  */
 export function supportsWebP(acceptHeader: string): boolean {
-    return acceptHeader.toLowerCase().includes('image/webp')
+    return namesImageType(acceptHeader, 'image/webp')
 }
 
 /**
  * Detect AVIF support from Accept header for content negotiation
  */
 export function supportsAvif(acceptHeader: string): boolean {
-    return acceptHeader.toLowerCase().includes('image/avif')
+    return namesImageType(acceptHeader, 'image/avif')
+}
+
+/**
+ * Accept entries with their q-values, most specific match first.
+ *
+ * Substring matching is not enough here: `image/png;q=0` contains `image/png`
+ * while meaning the exact opposite, and `image/jpeg,image/*;q=0` contains a
+ * wildcard while still enumerating.
+ */
+function parseAccept(acceptHeader: string): Array<{type: string, q: number}> {
+    return acceptHeader
+        .toLowerCase()
+        .split(',')
+        .map((part) => {
+            const [type, ...params] = part.split(';').map((piece) => piece.trim())
+            const qParam = params.find((param) => param.startsWith('q='))
+            const q = qParam ? Number.parseFloat(qParam.slice(2)) : 1
+            return {type, q: Number.isFinite(q) ? q : 1}
+        })
+        .filter((entry) => entry.type.length > 0)
+}
+
+/**
+ * Whether the client named this exact type and did not reject it.
+ *
+ * Format negotiation asks this rather than `acceptsImageType`: a trailing
+ * `*\/*;q=0.8` must not be read as AVIF or WebP support, or every browser would
+ * be handed a format it never advertised.
+ */
+export function namesImageType(acceptHeader: string, type: string): boolean {
+    const wanted = type.toLowerCase()
+    return parseAccept(acceptHeader).some((entry) => entry.type === wanted && entry.q > 0)
+}
+
+/**
+ * Whether the client left the door open for any image type.
+ *
+ * A client that enumerates image types (`image/webp,image/apng,*\/*;q=0.8` —
+ * every browser image request looks like this) has told us what it decodes, so
+ * a type missing from that list is a type it cannot read. A client that names
+ * no image type at all (empty Accept, `*\/*` from curl and most bots, or an
+ * `image/*` wildcard) told us nothing, so assume it copes rather than burning
+ * CPU transcoding for it.
+ */
+export function acceptsAnyImageType(acceptHeader: string): boolean {
+    // A named subtype enumerates even beside a wildcard, and a q=0 entry names
+    // nothing — it rejects
+    return !parseAccept(acceptHeader).some(
+        (entry) => entry.q > 0 && entry.type.startsWith('image/') && entry.type !== 'image/*'
+    )
+}
+
+/**
+ * Whether the client will take this type, by the usual most-specific-match
+ * rule: an exact entry decides on its own (including `;q=0`), otherwise the
+ * type wildcard decides, otherwise `*\/*`. An empty Accept accepts anything.
+ */
+export function acceptsImageType(acceptHeader: string, type: string): boolean {
+    const entries = parseAccept(acceptHeader)
+    if (entries.length === 0) {
+        return true
+    }
+
+    const wanted = type.toLowerCase()
+    const wildcard = `${wanted.split('/')[0]}/*`
+    const match = entries.find((entry) => entry.type === wanted) ||
+        entries.find((entry) => entry.type === wildcard) ||
+        entries.find((entry) => entry.type === '*/*')
+
+    return match !== undefined && match.q > 0
+}
+
+/**
+ * Whether a `OutputFormat.Match` response of this type would be undecodable.
+ *
+ * Match passes the original bytes through, which breaks for sources the
+ * requesting client has no decoder for: HEIC/HEIF is renderable in almost no
+ * browser, and an AVIF original reaching Match means negotiation already
+ * established that this client did not advertise AVIF.
+ */
+export function needsMatchFallback(contentType: string, acceptHeader: string): boolean {
+    const type = contentType.toLowerCase()
+    if (type === 'image/heic' || type === 'image/heif') {
+        return true
+    }
+    // AVIF is only undecodable for a client that enumerated its formats without it
+    return type === 'image/avif' && !acceptsAnyImageType(acceptHeader)
+}
+
+/**
+ * Pick an output format for a source the client cannot render. Returns the
+ * content type to serve, and stages the conversion on the pipeline when one is
+ * needed.
+ *
+ * PNG keeps transparency, but only for a client that will take PNG — replacing
+ * one undecodable type with another would defeat the point. When alpha has to
+ * go it is flattened onto white, since JPEG would otherwise composite it black.
+ */
+export function applyMatchFallbackFormat(
+    image: Sharp.Sharp,
+    contentType: string,
+    acceptHeader: string,
+    hasAlpha?: boolean
+): string {
+    if (!needsMatchFallback(contentType, acceptHeader)) {
+        return contentType
+    }
+
+    // A trailing `*/*;q=0.8` counts, which is how browsers that name only a few
+    // image types still leave PNG on the table
+    if (hasAlpha && acceptsImageType(acceptHeader, 'image/png')) {
+        image.png({force: true, compressionLevel: 9})
+        return 'image/png'
+    }
+
+    if (hasAlpha) {
+        image.flatten({background: '#ffffff'})
+    }
+    image.jpeg({quality: 80, force: true})
+    return 'image/jpeg'
 }
 
 export function sanitizeIgnoreInvalidateParams(url: URL): URL {
