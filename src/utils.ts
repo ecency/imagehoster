@@ -324,8 +324,25 @@ export function supportsAvif(acceptHeader: string): boolean {
     return acceptHeader.toLowerCase().includes('image/avif')
 }
 
-/** `image/<subtype>`, excluding the `image/*` wildcard */
-const NAMED_IMAGE_TYPE = /image\/[a-z0-9][a-z0-9.+-]*/
+/**
+ * Accept entries with their q-values, most specific match first.
+ *
+ * Substring matching is not enough here: `image/png;q=0` contains `image/png`
+ * while meaning the exact opposite, and `image/jpeg,image/*;q=0` contains a
+ * wildcard while still enumerating.
+ */
+function parseAccept(acceptHeader: string): Array<{type: string, q: number}> {
+    return acceptHeader
+        .toLowerCase()
+        .split(',')
+        .map((part) => {
+            const [type, ...params] = part.split(';').map((piece) => piece.trim())
+            const qParam = params.find((param) => param.startsWith('q='))
+            const q = qParam ? Number.parseFloat(qParam.slice(2)) : 1
+            return {type, q: Number.isFinite(q) ? q : 1}
+        })
+        .filter((entry) => entry.type.length > 0)
+}
 
 /**
  * Whether the client left the door open for any image type.
@@ -334,18 +351,35 @@ const NAMED_IMAGE_TYPE = /image\/[a-z0-9][a-z0-9.+-]*/
  * every browser image request looks like this) has told us what it decodes, so
  * a type missing from that list is a type it cannot read. A client that names
  * no image type at all (empty Accept, `*\/*` from curl and most bots, or an
- * explicit `image/*`) told us nothing, so assume it copes rather than burning
+ * `image/*` wildcard) told us nothing, so assume it copes rather than burning
  * CPU transcoding for it.
  */
 export function acceptsAnyImageType(acceptHeader: string): boolean {
-    // A named subtype wins over a wildcard: `image/jpeg,image/*;q=0` enumerates,
-    // it does not leave the door open
-    return !NAMED_IMAGE_TYPE.test(acceptHeader.toLowerCase())
+    // A named subtype enumerates even beside a wildcard, and a q=0 entry names
+    // nothing — it rejects
+    return !parseAccept(acceptHeader).some(
+        (entry) => entry.q > 0 && entry.type.startsWith('image/') && entry.type !== 'image/*'
+    )
 }
 
-/** Whether the client named this exact image type */
+/**
+ * Whether the client will take this type, by the usual most-specific-match
+ * rule: an exact entry decides on its own (including `;q=0`), otherwise the
+ * type wildcard decides, otherwise `*\/*`. An empty Accept accepts anything.
+ */
 export function acceptsImageType(acceptHeader: string, type: string): boolean {
-    return acceptHeader.toLowerCase().includes(type.toLowerCase())
+    const entries = parseAccept(acceptHeader)
+    if (entries.length === 0) {
+        return true
+    }
+
+    const wanted = type.toLowerCase()
+    const wildcard = `${wanted.split('/')[0]}/*`
+    const match = entries.find((entry) => entry.type === wanted) ||
+        entries.find((entry) => entry.type === wildcard) ||
+        entries.find((entry) => entry.type === '*/*')
+
+    return match !== undefined && match.q > 0
 }
 
 /**
@@ -384,11 +418,9 @@ export function applyMatchFallbackFormat(
         return contentType
     }
 
-    // `*/*` counts: browsers that name a few image types still trail a catch-all
-    const canTakePng = acceptsAnyImageType(acceptHeader) ||
-        acceptsImageType(acceptHeader, 'image/png') ||
-        acceptsImageType(acceptHeader, '*/*')
-    if (hasAlpha && canTakePng) {
+    // A trailing `*/*;q=0.8` counts, which is how browsers that name only a few
+    // image types still leave PNG on the table
+    if (hasAlpha && acceptsImageType(acceptHeader, 'image/png')) {
         image.png({force: true, compressionLevel: 9})
         return 'image/png'
     }

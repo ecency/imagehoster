@@ -12,6 +12,9 @@ import {
     safeParseInt,
     supportsWebP,
     supportsAvif,
+    acceptsAnyImageType,
+    acceptsImageType,
+    needsMatchFallback,
     stripWebpOrPng,
     getImageKey,
     getUrlHashKey,
@@ -721,6 +724,62 @@ describe('APIError', function() {
             }, (err: any) => {
                 return err instanceof APIError && err.code === APIError.Code.MissingParam
             })
+        })
+    })
+})
+
+describe('accept header negotiation', function() {
+    describe('acceptsAnyImageType', function() {
+        it('treats a named subtype as enumeration, even beside a wildcard', function() {
+            assert.equal(acceptsAnyImageType('image/webp,image/apng,*/*;q=0.8'), false)
+            assert.equal(acceptsAnyImageType('image/jpeg,image/*;q=0'), false)
+        })
+
+        it('treats a client that names no image type as unknown', function() {
+            assert.equal(acceptsAnyImageType('*/*'), true)
+            assert.equal(acceptsAnyImageType(''), true)
+            assert.equal(acceptsAnyImageType('image/*'), true)
+            assert.equal(acceptsAnyImageType('text/html,application/xhtml+xml'), true)
+        })
+
+        it('ignores types the client rejected outright', function() {
+            assert.equal(acceptsAnyImageType('image/avif;q=0'), true)
+        })
+    })
+
+    describe('acceptsImageType', function() {
+        it('honours an exact entry over any wildcard', function() {
+            assert.equal(acceptsImageType('image/jpeg,image/png;q=0', 'image/png'), false)
+            assert.equal(acceptsImageType('image/png;q=0,*/*;q=0.8', 'image/png'), false)
+            assert.equal(acceptsImageType('image/jpeg,image/png', 'image/png'), true)
+        })
+
+        it('falls back to the type wildcard, then to */*', function() {
+            assert.equal(acceptsImageType('image/*', 'image/png'), true)
+            assert.equal(acceptsImageType('image/webp,*/*;q=0.8', 'image/png'), true)
+            assert.equal(acceptsImageType('image/jpeg', 'image/png'), false)
+        })
+
+        it('accepts anything when the client sent no Accept', function() {
+            assert.equal(acceptsImageType('', 'image/avif'), true)
+        })
+    })
+
+    describe('needsMatchFallback', function() {
+        it('always converts HEIC/HEIF', function() {
+            assert.equal(needsMatchFallback('image/heic', '*/*'), true)
+            assert.equal(needsMatchFallback('image/heif', 'image/webp,*/*;q=0.8'), true)
+        })
+
+        it('converts AVIF only for a client that enumerated without it', function() {
+            assert.equal(needsMatchFallback('image/avif', 'image/png,image/jpeg,*/*;q=0.8'), true)
+            assert.equal(needsMatchFallback('image/avif', '*/*'), false)
+            assert.equal(needsMatchFallback('image/avif', ''), false)
+        })
+
+        it('leaves formats every client can read alone', function() {
+            assert.equal(needsMatchFallback('image/jpeg', 'image/png,*/*;q=0.8'), false)
+            assert.equal(needsMatchFallback('image/webp', 'image/png,*/*;q=0.8'), false)
         })
     })
 })

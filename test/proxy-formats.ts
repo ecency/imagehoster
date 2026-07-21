@@ -200,6 +200,20 @@ describe('proxy formats', function() {
         assert.equal((await sharp(res.body).metadata()).format, 'jpeg')
     })
 
+    it('should flatten alpha when the client rejected PNG', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifAlphaFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-alpha-png-rejected.avif`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=30`,
+            {headers: {accept: 'image/jpeg,image/png;q=0,*/*;q=0.8'}})
+        assert.equal(res.statusCode, 200)
+        const rejected = await sharp(res.body).metadata()
+        assert.equal(rejected.format, 'jpeg')
+        assert.equal(rejected.hasAlpha, false)
+    })
+
     it('should flatten alpha when the client will not take PNG', async function() {
         this.slow(2000)
         this.timeout(10000)
