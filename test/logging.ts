@@ -20,16 +20,26 @@ const LOG_CALL = /\.(?:error|warn|info|debug|fatal|trace)\(\s*\{/g
 function hasTopLevelMsgKey(source: string, start: number): boolean {
     let depth = 0
     let quote: string | null = null
+    let quoteStart = 0
 
     for (let i = start; i < source.length; i++) {
         const char = source[i]
 
         if (quote) {
-            if (char === '\\') { i++ } else if (char === quote) { quote = null }
+            if (char === '\\') {
+                i++
+            } else if (char === quote) {
+                // a quoted key counts as much as a bare one: { 'msg': 'x' }
+                if (depth === 1 && source.slice(quoteStart + 1, i) === 'msg' &&
+                    /^\s*:/.test(source.slice(i + 1))) {
+                    return true
+                }
+                quote = null
+            }
             continue
         }
 
-        if (char === '"' || char === "'" || char === '`') { quote = char; continue }
+        if (char === '"' || char === "'" || char === '`') { quote = char; quoteStart = i; continue }
         if (char === '/' && source[i + 1] === '/') { i = source.indexOf('\n', i); if (i === -1) { return false } ; continue }
         if (char === '/' && source[i + 1] === '*') { i = source.indexOf('*/', i); if (i === -1) { return false } ; i++; continue }
         if (char === '{' || char === '(' || char === '[') { depth++; continue }
