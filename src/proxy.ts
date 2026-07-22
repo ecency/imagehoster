@@ -134,13 +134,13 @@ async function convertCachedMatchVariant(
         const image = buildSharpPipeline(cached, false)
         const contentType = applyMatchFallbackFormat(image, mimeType, acceptHeader, metadata.hasAlpha)
         const buffer = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
-        ctx.log.debug({mimeType, contentType, msg: 'converted cached match variant for client'})
+        ctx.log.debug({ mimeType, contentType }, 'converted cached match variant for client')
         return {buffer, contentType}
     } catch (err) {
         if (isEncodeAborted(err)) {
             throw err
         }
-        ctx.log.error({err, mimeType, msg: 'failed to convert cached match variant'})
+        ctx.log.error({ err, mimeType }, 'failed to convert cached match variant')
         return {buffer: cached, contentType: mimeType}
     }
 }
@@ -218,7 +218,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (imageBlacklist.includes(urlString) || isEmptyImageUrl(urlString)) {
         ({ url, urlParams } = getDefaultUrlAndParams())
         isDefaultImage = true
-        ctx.log.error({ msg: 'Falling back to default image due to blacklist or 0x0 URL', urlString })
+        ctx.log.error({ urlString }, 'Falling back to default image due to blacklist or 0x0 URL')
     }
 
     // Handle URLs that start with 0x0/ but have additional content (like proxied URLs)
@@ -234,7 +234,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 urlString = url.toString()
                 ctx.log.debug({ originalUrl: urlString, extractedUrl: actualUrl }, 'Extracted URL from 0x0 prefix')
             } catch (err) {
-                ctx.log.error({ err, msg: 'Failed to parse URL after 0x0 prefix', originalUrl: urlString })
+                ctx.log.error({ err, originalUrl: urlString }, 'Failed to parse URL after 0x0 prefix')
             }
         }
     }
@@ -317,12 +317,12 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.log.debug('streaming %s from store', imageKey)
         const file = proxyStore.createReadStream(imageKey)
         file.on('error', async (err) => {
-            ctx.log.error({err, msg: 'unable to read', imageKey})
+            ctx.log.error({ err, imageKey }, 'unable to read')
             try {
                 await storeRemove(proxyStore, imageKey)
                 ctx.log.debug({ image: imageKey }, 'removed resized imageKey file')
             } catch (err) {
-                ctx.log.error({err, msg: 'unable to remove onerror', imageKey})
+                ctx.log.error({ err, imageKey }, 'unable to remove onerror')
             }
             file.destroy()
             ctx.res.writeHead(500, 'Internal Error')
@@ -380,7 +380,7 @@ export async function proxyHandler(ctx: KoaContext) {
             // Validate stored data is actually an image — stale error pages or
             // truncated responses may have been cached by a previous request
             if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
-                ctx.log.warn({contentType, origKey, urlString, msg: 'stored original has invalid content type'})
+                ctx.log.warn({ contentType, origKey, urlString }, 'stored original has invalid content type')
                 // the upload store holds user uploads and rescued (unrefetchable)
                 // originals — never delete from it here
                 if (servingStore !== uploadStore) {
@@ -390,7 +390,7 @@ export async function proxyHandler(ctx: KoaContext) {
             }
         } catch (err) {
             ctx.tag({url: urlString})
-            ctx.log.error({err, urlString, msg: 'storeExist read / mimeMagic failed'})
+            ctx.log.error({ err, urlString }, 'storeExist read / mimeMagic failed')
             const result = await fetchImageWithFallbacks(
                 urlString,
                 urlParams,
@@ -432,7 +432,7 @@ export async function proxyHandler(ctx: KoaContext) {
             res = result.res
             isDefaultImage = result.isFallback
         } catch (err) {
-            ctx.log.error({ err, urlString, msg: 'fetchImageWithFallbacks failed'})
+            ctx.log.error({ err, urlString }, 'fetchImageWithFallbacks failed')
             captureImageFailure('all_fallbacks_failed', ctx, { urlString, error: String(err) })
             throw new APIError({ code: APIError.Code.InvalidImage, info: { fallback: 'true' } })
         }
@@ -442,7 +442,7 @@ export async function proxyHandler(ctx: KoaContext) {
         contentType = contentType.toLowerCase()
 
         if (!AcceptedContentTypes.includes(contentType)) {
-            ctx.log.error({ url: urlString, type: contentType, msg: 'Unsupported content type, defaulted'})
+            ctx.log.error({ url: urlString, type: contentType }, 'Unsupported content type, defaulted')
             captureImageFailure('unsupported_content_type', ctx, { urlString, contentType })
             const fallbackRes = await fetchUrl(DefaultAvatar, {
                 parse_response: false,
@@ -510,13 +510,13 @@ export async function proxyHandler(ctx: KoaContext) {
                 isDefaultImage = true
             }
         } catch (err) {
-            ctx.log.error({ url: urlString, key: imageKey, msg: 'getSharpMetadataWithRetry failed'})
+            ctx.log.error({ url: urlString, key: imageKey }, 'getSharpMetadataWithRetry failed')
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
             if (origFromCache) {
                 // the upload store holds user uploads and rescued (unrefetchable)
                 // originals — never delete from it here either
                 if (servingStore !== uploadStore) {
-                    ctx.log.warn({origKey, msg: 'purging corrupt cached original after metadata failure'})
+                    ctx.log.warn({ origKey }, 'purging corrupt cached original after metadata failure')
                     try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
                 }
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
@@ -624,27 +624,27 @@ export async function proxyHandler(ctx: KoaContext) {
                 // The client gave up while we were queued. Nothing failed, and
                 // there is no socket left to serve the fallback bytes to, so do
                 // not walk the recovery path or report it as a Sharp failure.
-                ctx.log.debug({ urlString, imageKey, msg: 'encode abandoned, client gone' })
+                ctx.log.debug({ urlString, imageKey }, 'encode abandoned, client gone')
                 throw err
             }
-            ctx.log.error({ err, urlString, imageKey, msg: 'sharp.toBuffer() failed' })
+            ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
             captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
             if (origIsUpload) {
                 // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
                 // but browsers likely can — serve the original unresized bytes
-                ctx.log.warn({origKey, msg: 'serving original upload bytes after toBuffer failure'})
+                ctx.log.warn({ origKey }, 'serving original upload bytes after toBuffer failure')
                 rv = origData
                 contentType = await mimeMagic(origData)
             } else if (origFromCache) {
                 // Sharp can't process this image (e.g. truncated JPEG) but browsers
                 // are lenient and will render it fine — serve the original bytes
-                ctx.log.warn({origKey, msg: 'serving original bytes after toBuffer failure on cached image'})
+                ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on cached image')
                 try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
                 rv = origData
                 contentType = await mimeMagic(origData)
             } else {
                 // Sharp can't process but browsers are lenient — serve original bytes
-                ctx.log.warn({origKey, msg: 'serving original bytes after toBuffer failure on fetched image'})
+                ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on fetched image')
                 rv = origData
                 contentType = await mimeMagic(origData)
             }
@@ -667,7 +667,7 @@ export async function proxyHandler(ctx: KoaContext) {
     // Vary on Accept header for proper content negotiation caching
     ctx.set('Vary', 'Accept')
     if (isDefaultImage) {
-        ctx.log.error({ msg: 'Responding with default image', finalUrl: urlString })
+        ctx.log.error({ finalUrl: urlString }, 'Responding with default image')
         ctx.set('Cache-Control', 'public,max-age=600') // 10 minutes
     } else {
         ctx.set('Cache-Control', 'public,max-age=31536000,immutable') // 1 year
