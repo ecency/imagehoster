@@ -192,7 +192,7 @@ export async function getSharpMetadataWithRetry(
         const metadata = await image.metadata()
         return { buffer: origData, metadata, isFallback: false }
     } catch (err) {
-        logger.error({err, urlString, msg: 'Sharp metadata() failed, attempting fallback image fetch'})
+        logger.error({ err, urlString }, 'Sharp metadata() failed, attempting fallback image fetch')
 
         // Try alternate source once
         let fallback
@@ -203,10 +203,9 @@ export async function getSharpMetadataWithRetry(
         } catch (fetchErr) {
             logger.error({
                 err: fetchErr,
-                msg: 'metadata fallback fetch also failed',
                 urlString,
                 fallbackUrl
-            })
+            }, 'metadata fallback fetch also failed')
             throw err // rethrow original metadata error
         }
 
@@ -217,10 +216,9 @@ export async function getSharpMetadataWithRetry(
         } catch (err2) {
             logger.error({
                 err: err2,
-                msg: 'metadata() failed even after fallback fetch',
                 urlString,
                 fallbackUrl
-            })
+            }, 'metadata() failed even after fallback fetch')
             throw err2
         }
     }

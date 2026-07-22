@@ -19,7 +19,7 @@ export async function serveOrBuildFallbackImage(
     ctx.tag({handler: 'fallback'})
     const fallbackKey = getImageKey(keyPrefix, options as ProxyOptions)
     ctx.set('ETag', etag(fallbackKey))
-    ctx.log.error({ fallbackKey, msg: 'serveOrBuildFallbackImage, falling back to default'})
+    ctx.log.error({ fallbackKey }, 'serveOrBuildFallbackImage, falling back to default')
 
     const image = Sharp(fallbackBuffer)
 
