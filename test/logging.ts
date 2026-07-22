@@ -49,10 +49,17 @@ function hasTopLevelMsgKey(source: string, start: number): boolean {
             continue
         }
 
-        if (depth === 1 && /msg/.test(source.slice(i, i + 3)) && /^\s*:/.test(source.slice(i + 3))) {
-            // only a standalone key, not a suffix like `errMsg:`
+        if (depth === 1 && source.slice(i, i + 3) === 'msg') {
+            // only a standalone identifier, not a suffix like `errMsg`
             const before = source[i - 1] || ''
-            if (!/[A-Za-z0-9_$]/.test(before)) { return true }
+            const after = source.slice(i + 3)
+            // `msg: x` sets the key; so does the shorthand `{ err, msg }`, but
+            // only in key position — in `{ detail: msg }` it is just a value
+            const isKeyPosition = /[{,]\s*$/.test(source.slice(start, i))
+            if (!/[A-Za-z0-9_$]/.test(before) &&
+                (/^\s*:/.test(after) || (isKeyPosition && /^\s*[,}]/.test(after)))) {
+                return true
+            }
         }
     }
 
