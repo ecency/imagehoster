@@ -1,19 +1,7 @@
-import config from 'config'
 import { URL } from 'url'
 import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
 import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
-
-/**
- * Optional temporary bridge to another imagehoster origin that still holds
- * originals this instance has not received yet (e.g. mid-migration). Tried after
- * the source URL but before the public mirrors, so live origins are served
- * normally and only the dead-origin tail ever reaches the bridge. Unset this
- * config key once migration completes.
- */
-const BRIDGE_ORIGIN = (config.has('bridge_origin')
-    ? String(config.get('bridge_origin'))
-    : '').replace(/\/+$/, '')
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -23,11 +11,6 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const urls: string[] = [
         ...(httpsUrl ? [httpsUrl] : []),
         urlString, // original URL
-        // Bridge host, when configured. Only the /p/ form is used: it is
-        // base58 so it survives query params, and it is what /0x0/ redirects to
-        // anyway (301 -> /p/...?format=match&mode=fit), so going straight there
-        // saves a round trip and does not change the work the bridge performs.
-        ...(BRIDGE_ORIGIN ? [BRIDGE_ORIGIN + '/p/' + urlParams] : []),
         // /p/ routes use base58 encoding — safely preserves query params
         'https://images.hive.blog/p/' + urlParams,
         'https://steemitimages.com/p/' + urlParams,
