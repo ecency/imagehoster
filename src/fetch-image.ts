@@ -23,14 +23,11 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const urls: string[] = [
         ...(httpsUrl ? [httpsUrl] : []),
         urlString, // original URL
-        // Bridge host, when configured. 0x0 returns the stored original
-        // unresized so the bridge does no encode work; /p/ is the query-safe
-        // form and is the only usable one when the URL carries query params.
-        ...(BRIDGE_ORIGIN
-            ? (hasQuery
-                ? [BRIDGE_ORIGIN + '/p/' + urlParams]
-                : [BRIDGE_ORIGIN + '/0x0/' + urlString, BRIDGE_ORIGIN + '/p/' + urlParams])
-            : []),
+        // Bridge host, when configured. Only the /p/ form is used: it is
+        // base58 so it survives query params, and it is what /0x0/ redirects to
+        // anyway (301 -> /p/...?format=match&mode=fit), so going straight there
+        // saves a round trip and does not change the work the bridge performs.
+        ...(BRIDGE_ORIGIN ? [BRIDGE_ORIGIN + '/p/' + urlParams] : []),
         // /p/ routes use base58 encoding — safely preserves query params
         'https://images.hive.blog/p/' + urlParams,
         'https://steemitimages.com/p/' + urlParams,
