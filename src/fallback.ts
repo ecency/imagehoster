@@ -2,7 +2,7 @@ import etag from 'etag'
 import Sharp from 'sharp'
 import {KoaContext} from './common'
 import {clientGoneSignal, runEncode} from './encode-limit'
-import { AVIF_EFFORT } from './constants'
+import { AVIF_EFFORT, MAX_INPUT_PIXELS } from './constants'
 import {getImageKey, OutputFormat, ProxyOptions, ScalingMode} from './utils'
 
 export async function serveOrBuildFallbackImage(
@@ -21,7 +21,7 @@ export async function serveOrBuildFallbackImage(
     ctx.set('ETag', etag(fallbackKey))
     ctx.log.error({ fallbackKey }, 'serveOrBuildFallbackImage, falling back to default')
 
-    const image = Sharp(fallbackBuffer)
+    const image = Sharp(fallbackBuffer, { limitInputPixels: MAX_INPUT_PIXELS })
 
     switch (options.mode) {
         case ScalingMode.Cover:

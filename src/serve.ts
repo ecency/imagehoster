@@ -4,7 +4,7 @@ import {readStream} from './utils'
 import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
 import {imageBlacklist} from './blacklist'
-import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, SERVICE_BASE_URL} from './constants'
+import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, MAX_INPUT_PIXELS, SERVICE_BASE_URL} from './constants'
 import Sharp from 'sharp'
 
 function detectMimeType(metadata: Sharp.Metadata): string {
@@ -59,7 +59,7 @@ export async function serveHandler(ctx: KoaContext) {
 
     let mimeType = 'application/octet-stream'
     try {
-        const metadata = await Sharp(buffer).metadata()
+        const metadata = await Sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
         mimeType = detectMimeType(metadata)
     } catch (err) {
         ctx.log.warn(err, 'Sharp metadata detection failed')
