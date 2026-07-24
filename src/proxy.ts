@@ -9,7 +9,7 @@ import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
-import {KoaContext, proxyStore, uploadStore} from './common'
+import {KoaContext, proxyStore, retentionStore, uploadStore} from './common'
 import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
@@ -369,6 +369,13 @@ export async function proxyHandler(ctx: KoaContext) {
         servingStore = uploadStore
         haveOriginal = true
         ctx.tag({rescued_original: true})
+    }
+    // Retention archive: same contract as the upload store above — an origin,
+    // not a cache — for originals migrated off local disk.
+    if (!haveOriginal && retentionStore && await storeExists(retentionStore, origKey)) {
+        servingStore = retentionStore
+        haveOriginal = true
+        ctx.tag({retention_original: true})
     }
     if (haveOriginal) {
         origFromCache = true

@@ -1,7 +1,19 @@
+import config from 'config'
 import { URL } from 'url'
 import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
 import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
+
+/**
+ * Optional temporary bridge to another imagehoster origin that still holds
+ * originals this instance has not received yet (e.g. mid-migration). Tried after
+ * the source URL but before the public mirrors, so live origins are served
+ * normally and only the dead-origin tail ever reaches the bridge. Unset this
+ * config key once migration completes.
+ */
+const BRIDGE_ORIGIN = (config.has('bridge_origin')
+    ? String(config.get('bridge_origin'))
+    : '').replace(/\/+$/, '')
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -11,6 +23,14 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const urls: string[] = [
         ...(httpsUrl ? [httpsUrl] : []),
         urlString, // original URL
+        // Bridge host, when configured. 0x0 returns the stored original
+        // unresized so the bridge does no encode work; /p/ is the query-safe
+        // form and is the only usable one when the URL carries query params.
+        ...(BRIDGE_ORIGIN
+            ? (hasQuery
+                ? [BRIDGE_ORIGIN + '/p/' + urlParams]
+                : [BRIDGE_ORIGIN + '/0x0/' + urlString, BRIDGE_ORIGIN + '/p/' + urlParams])
+            : []),
         // /p/ routes use base58 encoding — safely preserves query params
         'https://images.hive.blog/p/' + urlParams,
         'https://steemitimages.com/p/' + urlParams,

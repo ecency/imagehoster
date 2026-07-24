@@ -8,7 +8,7 @@ import {fetchImageWithFallbacks} from './fetch-image'
 import {clientGoneSignal} from './encode-limit'
 import {resizeImageWithOptions} from './image-resizer'
 
-import { getProfile, KoaContext, proxyStore, uploadStore } from './common'
+import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
 import { APIError } from './error'
 import {
   getDefaultUrlAndParams,
@@ -153,6 +153,12 @@ async function handleAvatar(ctx: KoaContext) {
   if (await storeExists(origStore, origKey) && !shouldBypassCache) {
     ctx.tag({ store: 'original' })
     origData = await readStream(origStore.createReadStream(origKey))
+    contentType = await mimeMagic(origData)
+  } else if (retentionStore && await storeExists(retentionStore, origKey)) {
+    // Archive of originals whose upstream is gone. An origin, not a cache, so
+    // cache-bypass flags deliberately do not skip it.
+    ctx.tag({ store: 'retention' })
+    origData = await readStream(retentionStore.createReadStream(origKey))
     contentType = await mimeMagic(origData)
   } else {
     ctx.tag({ store: 'fetch' })

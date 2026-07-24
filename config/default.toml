@@ -58,6 +58,12 @@ max_image_size = 20000000 # 20mb
 # bitmap and exhaust worker memory (a 16000x16000 image is ~1GB decoded).
 max_input_pixels = 100000000
 
+# Optional temporary bridge to another imagehoster origin that still holds
+# originals this instance has not received yet (e.g. mid-migration). Tried after
+# the source URL but before the public mirrors, so live origins are unaffected
+# and only the dead-origin tail reaches it. Unset once migration completes.
+# bridge_origin = 'http://198.51.100.10'
+
 # redis db used for ratelimiting uploads
 # redis_url = 'redis://localhost'
 redis_url = 'redis://myredis'
@@ -109,3 +115,11 @@ max_image_width = 1280
 max_image_height = 1280
 max_custom_image_width = 2000
 max_custom_image_height = 2000
+
+# Optional durable archive of originals whose upstream no longer exists.
+# Consulted on a local proxy-store miss, BEFORE any network fetch. Like the
+# upload store it is an origin and not a cache, so cache-bypass flags never skip
+# it. Same store types as upload_store/proxy_store. Leave unset to disable.
+# [retention_store]
+# type = 's3'
+# s3_bucket = 'eretention'
