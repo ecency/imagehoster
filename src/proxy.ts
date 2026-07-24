@@ -9,7 +9,7 @@ import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
-import {KoaContext, proxyStore, uploadStore} from './common'
+import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
 import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
@@ -370,6 +370,20 @@ export async function proxyHandler(ctx: KoaContext) {
         haveOriginal = true
         ctx.tag({rescued_original: true})
     }
+    // Retention archive: same contract as the upload store above — an origin,
+    // not a cache — for originals migrated off local disk. A backend outage here
+    // must not fail the request: fall through to the normal fetch path.
+    if (!haveOriginal && retentionStore) {
+        try {
+            if (await storeExists(retentionStore, origKey)) {
+                servingStore = retentionStore
+                haveOriginal = true
+                ctx.tag({retention_original: true})
+            }
+        } catch (err) {
+            ctx.log.warn({ err, origKey }, 'retention store lookup failed, falling through')
+        }
+    }
     if (haveOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
@@ -381,9 +395,9 @@ export async function proxyHandler(ctx: KoaContext) {
             // truncated responses may have been cached by a previous request
             if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
                 ctx.log.warn({ contentType, origKey, urlString }, 'stored original has invalid content type')
-                // the upload store holds user uploads and rescued (unrefetchable)
-                // originals — never delete from it here
-                if (servingStore !== uploadStore) {
+                // Archive stores (uploads, retention) hold irreplaceable originals —
+                // never delete from them here
+                if (!isArchiveStore(servingStore)) {
                     try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
                 }
                 throw new Error('Invalid stored content type: ' + contentType)
@@ -480,6 +494,9 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     let rv: Buffer
+    // Set when Sharp failed and we fall back to serving the original bytes; those
+    // are not a rendered variant and must not be cached as one.
+    let encodeFallback = false
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
         rv = origData
@@ -513,9 +530,9 @@ export async function proxyHandler(ctx: KoaContext) {
             ctx.log.error({ url: urlString, key: imageKey }, 'getSharpMetadataWithRetry failed')
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
             if (origFromCache) {
-                // the upload store holds user uploads and rescued (unrefetchable)
-                // originals — never delete from it here either
-                if (servingStore !== uploadStore) {
+                // Archive stores (uploads, retention) hold irreplaceable originals —
+                // never delete from them here either
+                if (!isArchiveStore(servingStore)) {
                     ctx.log.warn({ origKey }, 'purging corrupt cached original after metadata failure')
                     try { await storeRemove(servingStore, origKey) } catch (_e) { /* best effort */ }
                 }
@@ -629,6 +646,11 @@ export async function proxyHandler(ctx: KoaContext) {
             }
             ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
             captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
+            // Every branch below serves the unprocessed original instead of a
+            // rendered variant. Storing those bytes under imageKey would make
+            // later requests skip resizing and format negotiation entirely, so
+            // the variant write is suppressed.
+            encodeFallback = true
             if (origIsUpload) {
                 // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
                 // but browsers likely can — serve the original unresized bytes
@@ -651,7 +673,7 @@ export async function proxyHandler(ctx: KoaContext) {
         }
         } // end non-animated Sharp pipeline
 
-        if (!isDefaultImage && !isLegacy) {
+        if (!isDefaultImage && !isLegacy && !encodeFallback) {
             ctx.log.debug('storing converted %s', imageKey)
             try {
                 await storeWrite(proxyStore, imageKey, rv)

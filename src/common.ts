@@ -348,3 +348,26 @@ function loadStore(key: string): AbstractBlobStore {
 // Primary process only manages workers — no stores needed
 export const uploadStore: AbstractBlobStore = isPrimaryOnly ? undefined! : loadStore('upload_store')
 export const proxyStore: AbstractBlobStore = isPrimaryOnly ? undefined! : loadStore('proxy_store')
+
+/**
+ * Optional durable archive of originals whose upstream no longer exists.
+ *
+ * Like the upload store, this is an ORIGIN and not a cache: it is consulted
+ * whenever the local original is absent, and cache-bypass flags never skip it,
+ * because there is no live origin left to refetch from. Undefined when
+ * `retention_store` is not configured, so every read site must null-check.
+ */
+export const retentionStore: AbstractBlobStore | undefined =
+    (isPrimaryOnly || !config.has('retention_store')) ? undefined : loadStore('retention_store')
+
+/**
+ * Stores holding irreplaceable originals, which must NEVER be auto-deleted from.
+ *
+ * The corrupt-content and metadata-failure recovery paths purge the serving
+ * store so a bad entry can be refetched. That is safe for a cache, but for these
+ * archives a transient or unsupported-format failure would destroy the only
+ * surviving copy — there is no upstream left to refetch from.
+ */
+export function isArchiveStore(store: AbstractBlobStore): boolean {
+    return store === uploadStore || (retentionStore !== undefined && store === retentionStore)
+}
