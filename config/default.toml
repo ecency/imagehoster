@@ -62,6 +62,10 @@ max_input_pixels = 100000000
 # originals this instance has not received yet (e.g. mid-migration). Tried after
 # the source URL but before the public mirrors, so live origins are unaffected
 # and only the dead-origin tail reaches it. Unset once migration completes.
+#
+# MUST be publicly routable: every candidate is checked by assertPublicUrl, so a
+# private/loopback address (10.x, 172.16-31.x, 192.168.x, 127.x) is skipped with
+# a warning and the bridge silently does nothing.
 # bridge_origin = 'http://198.51.100.10'
 
 # redis db used for ratelimiting uploads

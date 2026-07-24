@@ -359,3 +359,15 @@ export const proxyStore: AbstractBlobStore = isPrimaryOnly ? undefined! : loadSt
  */
 export const retentionStore: AbstractBlobStore | undefined =
     (isPrimaryOnly || !config.has('retention_store')) ? undefined : loadStore('retention_store')
+
+/**
+ * Stores holding irreplaceable originals, which must NEVER be auto-deleted from.
+ *
+ * The corrupt-content and metadata-failure recovery paths purge the serving
+ * store so a bad entry can be refetched. That is safe for a cache, but for these
+ * archives a transient or unsupported-format failure would destroy the only
+ * surviving copy — there is no upstream left to refetch from.
+ */
+export function isArchiveStore(store: AbstractBlobStore): boolean {
+    return store === uploadStore || (retentionStore !== undefined && store === retentionStore)
+}

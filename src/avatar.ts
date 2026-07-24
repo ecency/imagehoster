@@ -150,15 +150,28 @@ async function handleAvatar(ctx: KoaContext) {
   let isFetchFallback = false
   let isResizeFallback = false
 
-  if (await storeExists(origStore, origKey) && !shouldBypassCache) {
+  const haveLocalOriginal = await storeExists(origStore, origKey) && !shouldBypassCache
+  // Archive of originals whose upstream is gone. An origin, not a cache, so
+  // cache-bypass flags deliberately do not skip it. An object-store outage must
+  // not fail the request, so any error falls through to the normal fetch path.
+  let retentionData: Buffer | undefined
+  if (!haveLocalOriginal && retentionStore) {
+    try {
+      if (await storeExists(retentionStore, origKey)) {
+        retentionData = await readStream(retentionStore.createReadStream(origKey))
+      }
+    } catch (err) {
+      ctx.log.warn({ err, origKey }, 'retention store lookup failed, falling through to fetch')
+    }
+  }
+
+  if (haveLocalOriginal) {
     ctx.tag({ store: 'original' })
     origData = await readStream(origStore.createReadStream(origKey))
     contentType = await mimeMagic(origData)
-  } else if (retentionStore && await storeExists(retentionStore, origKey)) {
-    // Archive of originals whose upstream is gone. An origin, not a cache, so
-    // cache-bypass flags deliberately do not skip it.
+  } else if (retentionData) {
     ctx.tag({ store: 'retention' })
-    origData = await readStream(retentionStore.createReadStream(origKey))
+    origData = retentionData
     contentType = await mimeMagic(origData)
   } else {
     ctx.tag({ store: 'fetch' })
