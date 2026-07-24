@@ -29,6 +29,20 @@ export const INTERNAL_SERVICE_ORIGINS = INTERNAL_SERVICE_BASE_URLS.map((url) => 
  */
 export const AVIF_EFFORT = 2
 
+/**
+ * Maximum input pixels (width * height) Sharp will decode before throwing.
+ * Guards worker memory against decompression bombs and huge-dimension images: a
+ * 16000x16000 image decodes to ~1GB of raw RGBA, and a handful in flight will
+ * push workers into swap. Configurable via `max_input_pixels`; defaults to
+ * 100 MP, which admits all real-world photos while rejecting the pathological.
+ */
+export const MAX_INPUT_PIXELS = (() => {
+    if (!config.has('max_input_pixels')) { return 100_000_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('max_input_pixels'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 100_000_000
+})()
+
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'
 

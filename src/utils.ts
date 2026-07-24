@@ -13,7 +13,7 @@ import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { imageBlacklist } from './blacklist'
-import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl } from './constants'
+import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
@@ -186,7 +186,7 @@ export async function getSharpMetadataWithRetry(
     fallbackUrl: string,
     logger: any
 ): Promise<{ buffer: Buffer; metadata: Sharp.Metadata; isFallback: boolean }> {
-    const image = Sharp(origData, { failOnError: false })
+    const image = Sharp(origData, { failOnError: false, limitInputPixels: MAX_INPUT_PIXELS })
 
     try {
         const metadata = await image.metadata()
@@ -209,7 +209,7 @@ export async function getSharpMetadataWithRetry(
             throw err // rethrow original metadata error
         }
 
-        const fallbackImage = Sharp(fallback.res.body, { failOnError: false })
+        const fallbackImage = Sharp(fallback.res.body, { failOnError: false, limitInputPixels: MAX_INPUT_PIXELS })
         try {
             const metadata = await fallbackImage.metadata()
             return { buffer: fallback.res.body, metadata, isFallback: fallback.isFallback }
@@ -464,7 +464,7 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
-    return Sharp(buffer, { failOnError: false, animated })
+    return Sharp(buffer, { failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS })
 }
 
 function isPrivateIPv4(host: string): boolean {

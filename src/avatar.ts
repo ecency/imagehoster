@@ -195,7 +195,8 @@ async function handleAvatar(ctx: KoaContext) {
       ctx.get('user-agent') || '',
       DefaultAvatar,
       ctx.log,
-      clientGoneSignal(ctx)
+      clientGoneSignal(ctx),
+      true // forceStill: avatars never need animation
   )
   contentType = finalType
   isResizeFallback = isFallback

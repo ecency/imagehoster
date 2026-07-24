@@ -50,7 +50,13 @@ log_level = 'error'
 log_output = 'stdout'
 
 # max image size to allow uploading and proxying, in bytes
-max_image_size = 30000000 # 25mb
+max_image_size = 20000000 # 20mb
+
+# Reject decompression bombs: maximum input pixels (width*height) Sharp will
+# decode. 100 MP (~10000x10000) admits all real-world photos and phone cameras
+# while blocking pathological inputs that would otherwise decode to ~1GB+ of raw
+# bitmap and exhaust worker memory (a 16000x16000 image is ~1GB decoded).
+max_input_pixels = 100000000
 
 # redis db used for ratelimiting uploads
 # redis_url = 'redis://localhost'

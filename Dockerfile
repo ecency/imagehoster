@@ -120,7 +120,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  wget \
+  wget tini \
   # Runtime shared library dependencies for libvips
   libglib2.0-0 libexpat1 \
   libjpeg62-turbo libpng16-16 libwebp7 libwebpdemux2 libwebpmux3 \
@@ -142,8 +142,16 @@ COPY --from=build /app/node_modules node_modules
 EXPOSE 8800
 ENV PORT=8800
 ENV NODE_ENV=production
+# Cap glibc per-thread malloc arenas: libvips spins up many native threads per
+# worker and the default arena-per-thread strategy fragments badly, ballooning
+# RSS until the box swaps. 2 arenas trades negligible alloc concurrency for far
+# lower, stable RSS.
+ENV MALLOC_ARENA_MAX=2
 
 HEALTHCHECK --interval=20s --timeout=10s --start-period=5s \
-  CMD /bin/sh -c 'wget -nv -t1 --spider "http://localhost:${PORT}/healthcheck" || exit 1'
+  CMD /bin/sh -c 'wget -nv -t1 -O /dev/null "http://localhost:${PORT}/healthcheck" || exit 1'
 
+# tini as PID 1 reaps zombies. Node as PID 1 does not reap the /bin/sh that the
+# HEALTHCHECK spawns every 20s, so those accumulate as <defunct> processes.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "lib/app.js"]

@@ -10,7 +10,7 @@ import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
 import {KoaContext, proxyStore, uploadStore} from './common'
-import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl } from './constants'
+import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
@@ -126,7 +126,7 @@ async function convertCachedMatchVariant(
     options: ProxyOptions
 ): Promise<{buffer: Buffer, contentType: string}> {
     try {
-        const metadata = await Sharp(cached).metadata()
+        const metadata = await Sharp(cached, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
         if (metadata.pages != null && metadata.pages > 1) {
             // Transcoding an animated source here would drop its frames
             return {buffer: cached, contentType: mimeType}

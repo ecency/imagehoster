@@ -188,7 +188,8 @@ async function handleCover(ctx: KoaContext) {
       ctx.get('user-agent') || '',
       DefaultCover,
       ctx.log,
-      clientGoneSignal(ctx)
+      clientGoneSignal(ctx),
+      true // forceStill: covers never need animation
   )
   contentType = finalType
   isResizeFallback = isFallback

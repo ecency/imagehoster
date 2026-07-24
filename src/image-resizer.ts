@@ -21,7 +21,12 @@ export async function resizeImageWithOptions(
     // is still there. Leaving it optional let a caller silently omit it and
     // reintroduce unremovable queue waiters. Pass `undefined` deliberately for
     // non-request callers.
-    signal: AbortSignal | undefined
+    signal: AbortSignal | undefined,
+    // Avatars and covers are fixed-size profile images that do not need animation.
+    // When true, an animated source is flattened to its first frame instead of
+    // passed through — far cheaper to decode/store and it keeps large animated
+    // GIFs out of worker memory.
+    forceStill: boolean = false,
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
@@ -49,13 +54,17 @@ export async function resizeImageWithOptions(
 
     APIError.assert(meta.width && meta.height, APIError.Code.InvalidImage)
 
-    // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
-    // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
-    if (isAnimated) {
+    // Animated images (GIF/APNG): preserve animation by passing the original
+    // through untouched — Sharp resize can strip frames even with animated:true.
+    // Callers that set forceStill (avatars/covers) opt out and fall through to
+    // render only the first frame below.
+    if (isAnimated && !forceStill) {
         return { buffer: origData, contentType, isFallback }
     }
 
-    const image = buildSharpPipeline(origData, isAnimated)
+    // First frame only. Reaching here with isAnimated true implies forceStill, so
+    // we never decode every frame — that is the memory-heavy path we are avoiding.
+    const image = buildSharpPipeline(origData, false)
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width = safeParseInt(options.width)
@@ -93,6 +102,13 @@ export async function resizeImageWithOptions(
             } else if (contentType === 'image/heic' || contentType === 'image/heif') {
                 contentType = 'image/jpeg'
                 image.jpeg({ quality: 80, force: true })
+            } else if (forceStill && isAnimated) {
+                // Client negotiated neither WebP nor AVIF: emit a still PNG so we
+                // never ship a (single-frame) GIF from a flattened animation.
+                // quality is a no-op for full-colour PNG (only palette mode), so
+                // only compressionLevel is set.
+                contentType = 'image/png'
+                image.png({ compressionLevel: 9, force: true })
             }
             break
         case OutputFormat.WEBP:
