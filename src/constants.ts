@@ -36,9 +36,12 @@ export const AVIF_EFFORT = 2
  * push workers into swap. Configurable via `max_input_pixels`; defaults to
  * 100 MP, which admits all real-world photos while rejecting the pathological.
  */
-export const MAX_INPUT_PIXELS = config.has('max_input_pixels')
-    ? (parseInt(config.get('max_input_pixels') as string, 10) || 100_000_000)
-    : 100_000_000
+export const MAX_INPUT_PIXELS = (() => {
+    if (!config.has('max_input_pixels')) { return 100_000_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('max_input_pixels'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 100_000_000
+})()
 
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'

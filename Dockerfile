@@ -149,7 +149,7 @@ ENV NODE_ENV=production
 ENV MALLOC_ARENA_MAX=2
 
 HEALTHCHECK --interval=20s --timeout=10s --start-period=5s \
-  CMD /bin/sh -c 'wget -nv -t1 --spider "http://localhost:${PORT}/healthcheck" || exit 1'
+  CMD /bin/sh -c 'wget -nv -t1 -O /dev/null "http://localhost:${PORT}/healthcheck" || exit 1'
 
 # tini as PID 1 reaps zombies. Node as PID 1 does not reap the /bin/sh that the
 # HEALTHCHECK spawns every 20s, so those accumulate as <defunct> processes.

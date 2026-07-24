@@ -105,8 +105,10 @@ export async function resizeImageWithOptions(
             } else if (forceStill && isAnimated) {
                 // Client negotiated neither WebP nor AVIF: emit a still PNG so we
                 // never ship a (single-frame) GIF from a flattened animation.
+                // quality is a no-op for full-colour PNG (only palette mode), so
+                // only compressionLevel is set.
                 contentType = 'image/png'
-                image.png({ quality: 80, compressionLevel: 9, force: true })
+                image.png({ compressionLevel: 9, force: true })
             }
             break
         case OutputFormat.WEBP:
