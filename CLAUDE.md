@@ -76,9 +76,11 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - Content hash stored as multihash identifier
 
 **Storage Abstraction** (src/common.ts, src/s3-store.ts)
-- Upload store: S3-compatible (B2/Backblaze by default)
-- Proxy store: Sharded filesystem (src/sharded-fs-store.ts) — distributes files into subdirectories by first 4 chars of key, backwards-compatible with flat layout via automatic migration
-- Configurable via `upload_store` and `proxy_store` in config
+- Upload store: S3-compatible (Hetzner/B2 object storage) — holds user uploads (irreplaceable originals)
+- Proxy store: Sharded filesystem (src/sharded-fs-store.ts) — distributes files into subdirectories by the first 6 chars of the key (`SHARD_LEN`), backwards-compatible with flat layout via automatic migration. This is the resize/proxy cache and is safe to LRU-prune
+- Retention store (optional): S3-compatible archive for originals whose upstream origin is dead, migrated off local disk so the proxy store can stay prunable. On a proxy-store miss the read handlers (`proxy.ts`, `cover.ts`, `avatar.ts`) consult upload store then retention store **before** the network fetch fallback; a retention hit is served by byte-sniffing (`mimeMagic`), not the stored S3 content-type. Configured via `retention_store`; absent → `retentionStore` is `undefined` and every read site null-checks
+- `isArchiveStore()` marks the upload and retention stores as **origins, not caches**: cache-bypass flags never skip them and the corrupt-content recovery path never deletes from them (they hold the only copy)
+- Configurable via `upload_store`, `proxy_store`, and `retention_store` in config
 - Custom S3 store implementation using @aws-sdk/client-s3 v3
 - Migration script: `scripts/migrate-to-shards.sh` for bulk migration of flat proxy store to sharded layout
 
