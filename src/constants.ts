@@ -43,6 +43,32 @@ export const MAX_INPUT_PIXELS = (() => {
     return Number.isSafeInteger(v) && v > 0 ? v : 100_000_000
 })()
 
+/**
+ * Largest original the proxy will keep a cached copy of, in bytes.
+ *
+ * On a proxy miss we store two things: the rendered variant we are about to
+ * serve, and the untouched original, so a later request for a different size or
+ * format can re-render locally instead of refetching upstream. The original is
+ * pure cache (uploads live in the upload store, dead-origin rescues in the
+ * retention store) and it is by far the more expensive of the two: measured over
+ * 49k live proxy-store files, the median is 69KB but the 10% of files above 1MB
+ * account for 67% of all bytes. Keeping that tail is what makes the store take
+ * in roughly its own capacity per day.
+ *
+ * Above this size we skip the original and cache only the variant. Repeat hits
+ * on the same variant are unaffected; only a *different* variant of a large
+ * source image pays an extra upstream fetch.
+ *
+ * Configurable via `max_cached_original_size`; 0 disables caching originals
+ * entirely. Defaults to 1MB, which keeps ~90% of originals by count.
+ */
+export const MAX_CACHED_ORIGINAL_SIZE = (() => {
+    if (!config.has('max_cached_original_size')) { return 1_000_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('max_cached_original_size'))
+    return Number.isSafeInteger(v) && v >= 0 ? v : 1_000_000
+})()
+
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'
 
