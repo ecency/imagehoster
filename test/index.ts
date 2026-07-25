@@ -65,13 +65,13 @@ export const mockAccounts: any = {
 }
 
 /**
- * Nothing listens here, so a fetch fails with ECONNREFUSED immediately and the
- * whole mirror chain ends in the default image. Used to exercise the fallback
- * path deterministically without depending on a remote host 404ing.
+ * `.invalid` is reserved by RFC 2606 and guaranteed never to resolve, so these
+ * fetches fail immediately and the whole mirror chain ends in the default image.
+ * Deterministic without depending on a remote host 404ing, and with no port to
+ * collide with a listener that happens to exist on the machine running the tests.
  */
-const BROKEN_IMAGE_PORT = 63219
-export const BROKEN_AVATAR_URL = `http://localhost:${ BROKEN_IMAGE_PORT }/missing-avatar.jpg`
-export const BROKEN_COVER_URL = `http://localhost:${ BROKEN_IMAGE_PORT }/missing-cover.jpg`
+export const BROKEN_AVATAR_URL = 'http://no-such-host.invalid/missing-avatar.jpg'
+export const BROKEN_COVER_URL = 'http://no-such-host.invalid/missing-cover.jpg'
 
 export const mockProfiles: any = {
     foo: {
