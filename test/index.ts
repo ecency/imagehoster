@@ -64,6 +64,15 @@ export const mockAccounts: any = {
     }
 }
 
+/**
+ * `.invalid` is reserved by RFC 2606 and guaranteed never to resolve, so these
+ * fetches fail immediately and the whole mirror chain ends in the default image.
+ * Deterministic without depending on a remote host 404ing, and with no port to
+ * collide with a listener that happens to exist on the machine running the tests.
+ */
+export const BROKEN_AVATAR_URL = 'http://no-such-host.invalid/missing-avatar.jpg'
+export const BROKEN_COVER_URL = 'http://no-such-host.invalid/missing-cover.jpg'
+
 export const mockProfiles: any = {
     foo: {
         name: 'foo',
@@ -134,6 +143,24 @@ export const mockProfiles: any = {
         blacklists: [],
         stats: { followers: 5, following: 5, rank: 0 },
         metadata: { profile: { name: '', profile_image: '', cover_image: '' } }
+    },
+    // Avatar and cover both point at an unreachable host, so every fetch ends in
+    // the default image. Used to prove fallback bytes are never persisted under
+    // the user's key.
+    brokenimages: {
+        name: 'brokenimages',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 10,
+        post_count: 1,
+        reputation: 25,
+        blacklists: [],
+        stats: { followers: 0, following: 0, rank: 0 },
+        metadata: { profile: {
+            name: 'Broken',
+            profile_image: BROKEN_AVATAR_URL,
+            cover_image: BROKEN_COVER_URL,
+        } }
     },
     // bridge returns an empty avatar; deliberately has NO mockAccounts entry so
     // condenser_api.get_accounts resolves to [undefined] — simulating a transient

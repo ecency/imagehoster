@@ -178,7 +178,10 @@ async function handleCover(ctx: KoaContext) {
       origData = res.body
       contentType = await mimeMagic(origData)
 
-      if (res.bytes <= Number.parseInt(config.get('max_image_size'))) {
+      // isFetchFallback means these are the default cover's bytes, not this
+      // user's image. Persisting them under the user's key would make every
+      // later request serve the default as if it were their real cover.
+      if (res.bytes <= Number.parseInt(config.get('max_image_size')) && !isFetchFallback) {
         ctx.log.debug('storing original %s', origKey)
         try {
           await storeWrite(origStore, origKey, origData)
@@ -190,7 +193,7 @@ async function handleCover(ctx: KoaContext) {
           // Continue serving - storage failure shouldn't block response
         }
       } else {
-        ctx.log.debug('not-storing PayloadTooLarge original %s', origKey)
+        ctx.log.debug('not-storing original %s (bytes=%d, fallback=%s)', origKey, res.bytes, isFetchFallback)
       }
     } catch (cause) {
       ctx.log.error(cause, 'Image fetch failed')
@@ -213,14 +216,27 @@ async function handleCover(ctx: KoaContext) {
   contentType = finalType
   isResizeFallback = isFallback
 
-  ctx.log.debug('storing converted %s', imageKey)
-  try {
-    await storeWrite(proxyStore, imageKey, rv)
-  } catch (err) {
-    ctx.log.error({ err, imageKey }, 'failed to store converted cover image')
-    // Continue serving - storage failure shouldn't block response
+  // Fallback bytes must never be persisted under the requested key. They are the
+  // default cover standing in for an image we could not fetch or render, and a
+  // stored copy is indistinguishable from a real one on later requests: it would
+  // be served at the normal one-hour freshness until evicted or invalidated.
+  // A profile-lookup fallback is deliberately excluded here — it derives both
+  // keys from the default cover's own URL, so it never occupies a user's key.
+  const isImageFallback = isFetchFallback || isResizeFallback
+  if (!isImageFallback) {
+    ctx.log.debug('storing converted %s', imageKey)
+    try {
+      await storeWrite(proxyStore, imageKey, rv)
+    } catch (err) {
+      ctx.log.error({ err, imageKey }, 'failed to store converted cover image')
+      // Continue serving - storage failure shouldn't block response
+    }
+  } else {
+    ctx.log.debug('not-storing fallback variant %s (fetch=%s, resize=%s)',
+        imageKey, isFetchFallback, isResizeFallback)
   }
-  const isFinalFallback = isFetchFallback || isResizeFallback || isProfileFallback
+
+  const isFinalFallback = isImageFallback || isProfileFallback
 
   ctx.set('Content-Type', contentType)
   // Vary on Accept header for proper content negotiation caching
