@@ -68,9 +68,13 @@ if (!Number.isFinite(MAX_IMAGE_SIZE)) {
 export function shouldCacheOriginal(
     bytes: number,
     opts: {isDefaultImage: boolean, usesUploadStore: boolean, isLegacy: boolean},
+    cap: number = MAX_CACHED_ORIGINAL_SIZE,
 ): boolean {
     if (opts.isDefaultImage || opts.usesUploadStore || opts.isLegacy) { return false }
-    return bytes <= MAX_IMAGE_SIZE && bytes <= MAX_CACHED_ORIGINAL_SIZE
+    // A cap of 0 means "never cache originals". Checked before the comparison
+    // because `0 <= 0` would otherwise let a zero-byte body through.
+    if (cap <= 0) { return false }
+    return bytes <= MAX_IMAGE_SIZE && bytes <= cap
 }
 const SERVICE_URL = new URL(config.get('service_url'))
 

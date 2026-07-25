@@ -14,10 +14,11 @@ invalidate_token = 'test-invalidate-token'
 
 # The shared fixture (test/test.jpg) is ~5MB and several tests re-render it into
 # a second variant with the source server switched off, which only works if the
-# original was cached. Keep the cap at the upload limit here so those tests keep
-# exercising the store path; the production 1MB default is covered by the
-# shouldCacheOriginal unit tests.
-max_cached_original_size = 20000000
+# original was cached, so the cap has to sit above 5MB. It must also stay
+# strictly below max_image_size (20MB), or a size over the cap would trip the
+# upload limit first and the cap tests would pass without exercising the cap at
+# all. test/proxy.ts asserts that ordering.
+max_cached_original_size = 10000000
 
 # Use memory stores for tests so caching actually works
 # (default.toml uses filesystem at /mnt/eproxy-bucket which doesn't exist locally)

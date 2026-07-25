@@ -1,5 +1,6 @@
 import 'mocha'
 import assert from 'assert'
+import config from 'config'
 import {createHash} from 'crypto'
 import * as http from 'http'
 import needle from 'needle'
@@ -253,14 +254,33 @@ describe('proxy', function() {
 
     describe('original caching cap', function() {
         const cacheable = {isDefaultImage: false, usesUploadStore: false, isLegacy: false}
+        const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
+
+        it('should keep the test cap below the upload limit', function() {
+            // Otherwise "over the cap" would also be over max_image_size and the
+            // cap tests below would still pass with the cap check deleted.
+            assert(MAX_CACHED_ORIGINAL_SIZE < MAX_IMAGE_SIZE,
+                `cap ${MAX_CACHED_ORIGINAL_SIZE} must be < max_image_size ${MAX_IMAGE_SIZE}`)
+        })
 
         it('should cache originals up to the cap', function() {
             assert.equal(shouldCacheOriginal(1, cacheable), true)
             assert.equal(shouldCacheOriginal(MAX_CACHED_ORIGINAL_SIZE, cacheable), true)
         })
 
-        it('should skip originals over the cap', function() {
-            assert.equal(shouldCacheOriginal(MAX_CACHED_ORIGINAL_SIZE + 1, cacheable), false)
+        it('should skip originals over the cap but within the upload limit', function() {
+            const overCap = MAX_CACHED_ORIGINAL_SIZE + 1
+            assert(overCap <= MAX_IMAGE_SIZE, 'size must still pass the upload limit')
+            assert.equal(shouldCacheOriginal(overCap, cacheable), false)
+        })
+
+        it('should still enforce the upload limit', function() {
+            assert.equal(shouldCacheOriginal(MAX_IMAGE_SIZE + 1, cacheable, MAX_IMAGE_SIZE * 2), false)
+        })
+
+        it('should treat a zero cap as "never cache originals"', function() {
+            assert.equal(shouldCacheOriginal(0, cacheable, 0), false)
+            assert.equal(shouldCacheOriginal(1, cacheable, 0), false)
         })
 
         it('should still skip fallback, upload-store and legacy originals', function() {
