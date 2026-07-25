@@ -5,6 +5,9 @@ import needle from 'needle'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
+import {proxyStore} from './../src/common'
+import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
+import {BROKEN_AVATAR_URL} from './index'
 
 describe('avatar', function() {
     let port: number
@@ -37,6 +40,25 @@ describe('avatar', function() {
         const meta = await sharp(res.body).metadata()
         assert.equal(meta.width, 64)
         assert.equal(meta.height, 64)
+    })
+
+    it('should not persist fallback bytes under the user key', async function() {
+        this.slow(5000)
+        this.timeout(30000)
+        const res = await needle('get', `http://localhost:${port}/u/brokenimages/avatar`)
+        assert.equal(res.statusCode, 200)
+        // 120s freshness is how Varnish and CF identify a fallback render; it must
+        // stay on the fallback response even though nothing is written to the store.
+        assert.equal(res.headers['cache-control'], 'public,max-age=120')
+
+        const origKey = getUrlHashKey(BROKEN_AVATAR_URL)
+        const imageKey = getImageKey(origKey, {
+            width: 256, height: 256, mode: ScalingMode.Cover, format: OutputFormat.Match,
+        } as any)
+        assert((await storeExists(proxyStore, origKey)) === false,
+            'default avatar bytes were stored as the user original')
+        assert((await storeExists(proxyStore, imageKey)) === false,
+            'default avatar bytes were stored as the user variant')
     })
 
     it('should reject short usernames', async function() {

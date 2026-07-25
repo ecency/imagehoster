@@ -5,6 +5,9 @@ import needle from 'needle'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
+import {proxyStore} from './../src/common'
+import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
+import {BROKEN_COVER_URL} from './index'
 
 describe('cover', function() {
     let port: number
@@ -27,6 +30,25 @@ describe('cover', function() {
         const meta = await sharp(res.body).metadata()
         // Cover uses fit mode at 1344x240, so width should be <= 1344
         assert(meta.width && meta.width <= 1344, 'cover width should be <= 1344')
+    })
+
+    it('should not persist fallback bytes under the user key', async function() {
+        this.slow(5000)
+        this.timeout(30000)
+        const res = await needle('get', `http://localhost:${port}/u/brokenimages/cover`)
+        assert.equal(res.statusCode, 200)
+        // 120s freshness is how Varnish and CF identify a fallback render; it must
+        // stay on the fallback response even though nothing is written to the store.
+        assert.equal(res.headers['cache-control'], 'public,max-age=120')
+
+        const origKey = getUrlHashKey(BROKEN_COVER_URL)
+        const imageKey = getImageKey(origKey, {
+            width: 1344, height: 240, mode: ScalingMode.Fit, format: OutputFormat.Match,
+        } as any)
+        assert((await storeExists(proxyStore, origKey)) === false,
+            'default cover bytes were stored as the user original')
+        assert((await storeExists(proxyStore, imageKey)) === false,
+            'default cover bytes were stored as the user variant')
     })
 
     it('should reject short usernames', async function() {
