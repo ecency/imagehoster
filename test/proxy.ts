@@ -10,6 +10,8 @@ import sharp from 'sharp'
 
 import {app} from './../src/app'
 import {proxyStore, uploadStore} from './../src/common'
+import {MAX_CACHED_ORIGINAL_SIZE} from './../src/constants'
+import {shouldCacheOriginal} from './../src/proxy'
 import {storeExists, storeWrite, base58Enc} from './../src/utils'
 
 import {uploadImage} from './upload'
@@ -246,6 +248,25 @@ describe('proxy', function() {
             await storeWrite(uploadStore, corruptKey, Buffer.from('definitely not an image'))
             await needle('get', `http://localhost:${ port }/p/${ base58Enc(corruptUrl) }?width=100&mode=fit`)
             assert((await storeExists(uploadStore, corruptKey)) === true, 'invalid archive object was deleted from upload store')
+        })
+    })
+
+    describe('original caching cap', function() {
+        const cacheable = {isDefaultImage: false, usesUploadStore: false, isLegacy: false}
+
+        it('should cache originals up to the cap', function() {
+            assert.equal(shouldCacheOriginal(1, cacheable), true)
+            assert.equal(shouldCacheOriginal(MAX_CACHED_ORIGINAL_SIZE, cacheable), true)
+        })
+
+        it('should skip originals over the cap', function() {
+            assert.equal(shouldCacheOriginal(MAX_CACHED_ORIGINAL_SIZE + 1, cacheable), false)
+        })
+
+        it('should still skip fallback, upload-store and legacy originals', function() {
+            assert.equal(shouldCacheOriginal(1, {...cacheable, isDefaultImage: true}), false)
+            assert.equal(shouldCacheOriginal(1, {...cacheable, usesUploadStore: true}), false)
+            assert.equal(shouldCacheOriginal(1, {...cacheable, isLegacy: true}), false)
         })
     })
 

@@ -58,6 +58,14 @@ max_image_size = 20000000 # 20mb
 # bitmap and exhaust worker memory (a 16000x16000 image is ~1GB decoded).
 max_input_pixels = 100000000
 
+# Largest original the proxy cache will keep a copy of, in bytes. On a miss the
+# proxy stores the rendered variant plus the untouched original; the original is
+# only there so a later request for a different size/format can skip the upstream
+# refetch. Measured over 49k live proxy-store files the median is 69KB, but the
+# 10% above 1MB hold 67% of all bytes, so the tail is what fills the disk. Above
+# this size only the variant is cached. 0 disables caching originals entirely.
+max_cached_original_size = 1000000 # 1mb
+
 # redis db used for ratelimiting uploads
 # redis_url = 'redis://localhost'
 redis_url = 'redis://myredis'

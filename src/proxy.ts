@@ -10,7 +10,7 @@ import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {imageBlacklist} from './blacklist'
 import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
-import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
+import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
@@ -53,6 +53,24 @@ const INVALIDATE_TOKEN = config.has('invalidate_token')
 
 if (!Number.isFinite(MAX_IMAGE_SIZE)) {
     throw new Error('Invalid max image size')
+}
+
+/**
+ * Whether a freshly fetched original is worth persisting in the proxy cache.
+ *
+ * Fallback bytes must never be written (they would poison the key), and the
+ * upload/esteem-legacy stores are archives we only read from here. Beyond that
+ * the original is optional: it exists purely so a later request for a different
+ * size or format can re-render without a second upstream fetch, so oversized
+ * ones are skipped rather than allowed to dominate the cache (see
+ * MAX_CACHED_ORIGINAL_SIZE).
+ */
+export function shouldCacheOriginal(
+    bytes: number,
+    opts: {isDefaultImage: boolean, usesUploadStore: boolean, isLegacy: boolean},
+): boolean {
+    if (opts.isDefaultImage || opts.usesUploadStore || opts.isLegacy) { return false }
+    return bytes <= MAX_IMAGE_SIZE && bytes <= MAX_CACHED_ORIGINAL_SIZE
 }
 const SERVICE_URL = new URL(config.get('service_url'))
 
@@ -417,7 +435,7 @@ export async function proxyHandler(ctx: KoaContext) {
             if (result.isFallback) { isDefaultImage = true }
             origData = res.body
             // Don't write fallback data to uploadStore — could corrupt original hash
-            if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
+            if (shouldCacheOriginal(res.bytes, {isDefaultImage, usesUploadStore, isLegacy})) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
                     await storeWrite(origStore, origKey, origData)
@@ -426,7 +444,8 @@ export async function proxyHandler(ctx: KoaContext) {
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
+                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s, bytes=%d, cap=%d)',
+                    origKey, usesUploadStore, isDefaultImage, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
             }
             contentType = await mimeMagic(origData)
         }
@@ -480,7 +499,7 @@ export async function proxyHandler(ctx: KoaContext) {
         APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
 
         // Don't write fallback data to uploadStore — could corrupt original hash
-        if (res.bytes <= MAX_IMAGE_SIZE && !isDefaultImage && !usesUploadStore && !isLegacy) {
+        if (shouldCacheOriginal(res.bytes, {isDefaultImage, usesUploadStore, isLegacy})) {
             ctx.log.debug('storing original image %s', origKey)
             try {
                 await storeWrite(origStore, origKey, origData)
@@ -489,7 +508,8 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s)', origKey, usesUploadStore, isDefaultImage, isLegacy)
+            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s, bytes=%d, cap=%d)',
+                origKey, usesUploadStore, isDefaultImage, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
         }
     }
 
