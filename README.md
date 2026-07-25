@@ -53,9 +53,14 @@ pm2 start ecosystem.config.js
 
 ### Storage Architecture
 
-**Dual Storage System:**
+**Three-tier Storage System:**
 - **Upload Store** - Long-term S3 storage for user uploads (immutable)
 - **Proxy Store** - Ephemeral filesystem/S3 cache for proxied images
+- **Retention Store** (optional) - S3 archive for originals whose upstream origin is dead, so the proxy store can stay freely prunable. Consulted on a proxy-store miss, before the network fetch fallback
+
+The upload and retention stores are **origins, not caches**: cache-bypass flags never skip them and nothing auto-deletes from them. Only the proxy store is safe to LRU-prune.
+
+**What a proxy miss writes:** the rendered variant, plus the untouched original when it is small enough. The original exists only so a later request for a *different* size or format can re-render without a second upstream fetch. Because large originals dominate the cache by volume while being a small share of files, they are skipped above `max_cached_original_size` (default 1MB, `0` disables). Avatar and cover originals are exempt from that cap: they are a bounded, frequently re-read set, and one original feeds up to nine rendered variants.
 
 Images are content-addressed using multihash:
 - Upload keys: `D{base58(sha256(image_data))}`
@@ -82,7 +87,7 @@ POST /hs/:accesstoken          Upload with HiveSigner token
 **Requirements:**
 - Hive account in good standing (minimum reputation: 10)
 - Valid signature or HiveSigner token
-- Image size ≤30MB
+- Image size ≤20MB
 - Account not blacklisted
 - Within rate limit quota (700 uploads/week default)
 
@@ -186,18 +191,24 @@ log_output = 'stdout'
 rpc_node = 'https://api.hive.blog'
 
 # Service URL (used for self-referential URLs)
-service_url = 'https://images.ecency.com'
+service_url = 'https://i.ecency.com'
 
 # Image limits
-max_image_size = 30000000    # 30MB
+max_image_size = 20000000    # 20MB
 max_image_width = 1280
 max_image_height = 1280
 max_custom_image_width = 2000
 max_custom_image_height = 2000
+max_input_pixels = 100000000 # decompression-bomb guard (width*height)
+
+# Largest original the proxy cache keeps a copy of. Rendered variants are always
+# cached; this only bounds the untouched originals kept to avoid a refetch when a
+# different size/format of the same source is requested. 0 disables entirely.
+max_cached_original_size = 1000000  # 1MB
 
 # Default images
-default_avatar = 'https://images.ecency.com/DQm.../avatar.png'
-default_cover = 'https://images.ecency.com/DQm.../cover.png'
+default_avatar = 'https://i.ecency.com/DQm.../avatar.png'
+default_cover = 'https://i.ecency.com/DQm.../cover.png'
 ```
 
 ### S3 Storage
@@ -332,6 +343,8 @@ When primary source fails, tries multiple mirrors in order:
 8. Default fallback image
 
 Each attempt has 10-second timeout. First successful response is returned.
+
+**Fallback results are never persisted.** If every mirror fails and the default image is served, neither the original nor the rendered variant is written to the store, in any handler. A stored fallback would be indistinguishable from a real image on later requests and would be served at the normal 1 hour freshness rather than the fallback's 120 seconds, so a brief upstream outage would look like a permanently broken image until the entry was evicted or manually invalidated. Repeat cost is bounded by the negative cache (10 minutes for a dead URL, 60 seconds for a transient failure), so a broken source is retried at most once per TTL rather than once per request.
 
 ### URL Replacements
 
@@ -510,7 +523,7 @@ make lib
 - **Signature verification** - All uploads require valid Hive account signature
 - **Blacklist system** - Dynamic DMCA compliance with remote updates
 - **Input validation** - All parameters validated before processing
-- **Size limits** - 30MB max upload, 2000x2000 max dimensions
+- **Size limits** - 20MB max upload, 2000x2000 max dimensions
 - **Safe fallbacks** - Malformed URLs return default images, not errors
 - **Content-Type detection** - Server-side validation via file-type
 - **No arbitrary code execution** - All image processing via Sharp (sandboxed)

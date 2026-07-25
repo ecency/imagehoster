@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Hive-powered image hosting and proxying service built with TypeScript, Koa, and Sharp. Provides authenticated image uploads via Hive blockchain signatures and image proxying/resizing capabilities with fallback support. Deployed at `images.ecency.com` behind Cloudflare CDN, with `img.ecency.com` as a non-CDN direct origin (manual user opt-in only, not for automatic fallback).
+Hive-powered image hosting and proxying service built with TypeScript, Koa, and Sharp. Provides authenticated image uploads via Hive blockchain signatures and image proxying/resizing capabilities with fallback support. Deployed at `i.ecency.com` behind Cloudflare CDN (this is `service_url` in config and the host all self-referential URLs are built from). `images.ecency.com` remains a CDN-fronted alias for historical URLs, and `img.ecency.com` is a non-CDN direct origin (manual user opt-in only, not for automatic fallback).
 
 ## Development Commands
 
@@ -71,7 +71,7 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - Hive signature verification: `secp256k1_sign(sha256('ImageSigningChallenge'+image_data))`
 - Rate limiting via Redis (700 uploads per week default)
 - Reputation threshold check (min 10 reputation)
-- Max image size: 30MB (configurable)
+- Max image size: 20MB (`max_image_size`, configurable) — applies to both uploads and proxied fetches
 - Multipart parsing with Busboy, single file per request
 - Content hash stored as multihash identifier
 
@@ -97,7 +97,7 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - URLs with query params: /p/ routes (base58) tried first (preserves params), /0x0/ routes tried last (lose params)
 - Serves default fallback image if all mirrors fail
 - Cache-Control: 2 minutes (max-age=120) for fallback images, 1 hour for successful avatars/covers, 1 year immutable for proxy images
-- Default/fallback images are never stored persistently
+- Default/fallback images are never stored persistently, in **any** handler. `proxy.ts` gates on `!isDefaultImage`; `avatar.ts` and `cover.ts` skip both the original and the rendered variant when `isFetchFallback || isResizeFallback`. Storing them would be indistinguishable from a real image on later requests and would be served at the normal 1h freshness instead of the fallback's 120s. The one deliberate exception is a *profile-lookup* fallback (`isProfileFallback`, a transient RPC miss): it derives both keys from the default image's own URL, so it never occupies a user's key and is safe to cache
 - Sentry tracking: `captureImageFailure()` reports all_fallbacks_failed, unsupported_content_type, metadata_extraction_failed, sharp_tobuffer_failed, all_mirrors_exhausted
 
 **Blacklisting** (src/blacklist.ts)
@@ -150,7 +150,8 @@ Key configuration sections:
 - `redis_url` - Redis for rate limiting and shared profile/account cache
 - `upload_limits` - Rate limit config (duration, max, reputation, app credentials)
 - `upload_store`, `proxy_store` - Blob store configurations
-- `max_image_size`, `max_image_width`, `max_image_height` - Size limits
+- `max_image_size`, `max_image_width`, `max_image_height` - Size limits (`max_image_size` defaults to 20MB)
+- `max_cached_original_size` - Largest original the proxy cache keeps a copy of (default 1MB, `0` disables). Does not apply to avatar/cover originals, which are a bounded, frequently re-read set worth ~0.1% of the store
 - `default_avatar`, `default_cover` - Fallback images
 - `sentry_dsn` - Optional Sentry DSN for error tracking
 - `invalidate_token` - Optional token for cache invalidation API
@@ -171,19 +172,20 @@ Multi-stage Dockerfile with vips/heif/aom dependencies for image processing:
 VCL template at `config/varnish-user.vcl`.
 - Caches only /u/* (avatars/covers) and ?blur= URLs
 - Passes proxy images and uploads through (cached by Cloudflare instead)
-- Fallback avatars detected by max-age=120, cached only 2 minutes
-- After deploys: ban avatar cache to prevent stale fallbacks
+- Fallback avatars detected by max-age=120, cached only 2 minutes. This is a header-level contract: the handlers still emit max-age=120 for every fallback render, so the VCL branch is unaffected by the fact that fallbacks are no longer written to the blob store
+- After deploys: ban avatar cache. Note the original reason for this (fallback bytes persisted in the proxy store under a user's key, outliving the 120s response) no longer applies — those are never stored now, so a ban only clears edge-cached responses
 
 ### Cloudflare
 - Page rule: `cache_everything` for the image domain
 - Tiered cache enabled, Polish off, sort query string on, strong ETags on
-- After deploys: purge avatar prefix to clear stale fallbacks
+- After deploys: purge avatar prefix. As with Varnish, this no longer has to undo persisted fallbacks; it only clears edge copies, which expire on their own in 120s for fallback renders
+- A failed avatar/cover fetch no longer triggers the Cloudflare purge that accompanies a successful store write, so a transient upstream outage leaves the previously cached good avatar in place instead of replacing it with the default
 
 Docker Compose configured for 4 replicas with rolling updates and resource limits.
 
 ## Testing
 
-Tests in `test/` directory use Mocha + ts-node (181 tests). Key test files:
+Tests in `test/` directory use Mocha + ts-node (249 passing). Key test files:
 - `test/upload.ts` - Upload signature verification
 - `test/proxy.ts` - Image proxying, resizing, and storage behavior
 - `test/proxy-formats.ts` - Format conversion (AVIF, WebP, JPEG, PNG)
