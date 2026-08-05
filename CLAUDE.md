@@ -114,17 +114,17 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 
 Legacy proxy routes (`/{W}x{H}/{url}`) redirect to `/p/{base58}` with a `_src=legacy` query param. The proxy handler skips all `storeWrite` calls for legacy requests — images are still fetched, processed, and served, but not persisted to storage. This prevents abuse of the open proxy as free image storage, since the legacy URL format is trivially constructed by anyone.
 
-Modern `/p/{base58}` route (used by Ecency frontends via `proxifyImageSrc()`) stores images normally. Both vision-next and ecency-mobile exclusively use the `/p/` base58 format for proxy URLs.
+Modern `/p/{base58}` route (used by Ecency frontends via `proxifyImageSrc()`) stores images normally. Both vision-web and vision-mobile exclusively use the `/p/` base58 format for proxy URLs.
 
 ### Related Projects
 
-**vision-next** — Ecency web frontend
+**vision-web** — Ecency web frontend
 - Uses `@ecency/render-helper` package for image proxification
 - `proxifyImageSrc()` constructs all proxy URLs as `/p/{base58}?format=match&mode=fit`
 - User can manually select image server in preferences (images.ecency.com, images.hive.blog, img.ecency.com)
 - No automatic fallback to img.ecency.com (removed — caused CPU exhaustion on non-CDN origin)
 
-**ecency-mobile** — Ecency mobile app
+**vision-mobile** — Ecency mobile app
 - Uses same `@ecency/render-helper` for proxy URL construction
 - Avatar/cover URLs use `/u/{username}/avatar|cover` format directly
 - All other images go through `proxifyImageSrc()` → `/p/{base58}` format
