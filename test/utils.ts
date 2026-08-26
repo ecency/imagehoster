@@ -886,6 +886,51 @@ describe('accept header negotiation', function() {
             assert.equal(isBlacklistedUrl('https://steemitimages.com/0x0/https://example.com/exact/listed.jpg'), true)
         })
 
+        it('resolves deeply nested base58 wrappers around a blocked source', function() {
+            let wrapped = 'https://bad-host.example/uploads/a.jpg'
+            for (let i = 0; i < 4; i++) {
+                wrapped = `https://images.hive.blog/p/${ base58Enc(wrapped) }`
+            }
+            assert.equal(isBlacklistedUrl(wrapped), true)
+        })
+
+        it('fails closed when wrappers outrun the inspection budget', function() {
+            // 30 plain-embedded wrapper layers around an ALLOWED source: the
+            // scan budget runs out before every layer is inspected, and an
+            // uninspectable URL must be rejected, not allowed
+            let wrapped = 'https://unrelated.example/a.jpg'
+            for (let i = 0; i < 30; i++) {
+                wrapped = `https://layer${ i }.example/0x0/${ wrapped }`
+            }
+            assert.equal(isBlacklistedUrl(wrapped), true)
+            // while a shallow wrap of the same allowed source resolves and passes
+            assert.equal(isBlacklistedUrl(
+                `https://images.hive.blog/p/${ base58Enc(`https://steemitimages.com/p/${ base58Enc('https://unrelated.example/a.jpg') }`) }`
+            ), false)
+        })
+
+        it('fails closed on base58 tokens padded beyond the decode cap', function() {
+            assert.equal(isBlacklistedUrl(`https://images.hive.blog/p/${ '1'.repeat(5000) }`), true)
+        })
+
+        it('resolves benign URLs with several embedded fragments within budget', function() {
+            // Overlapping suffix extraction must dedupe: without the seen-set
+            // these eight fragments would multiply past the budget and get
+            // rejected despite every host being allowed
+            const refs = Array.from({ length: 8 }, (_, i) => `x${ i }=http://frag${ i }.example/p${ i }`).join('&')
+            assert.equal(isBlacklistedUrl(`https://ok.example/a.jpg?${ refs }`), false)
+        })
+
+        it('rejects fragment-flood URLs quickly instead of scanning combinatorially', function() {
+            const refs = Array.from({ length: 150 }, (_, i) => `y${ i }=http://flood${ i }.example/q${ i }`).join('&')
+            const flood = `https://ok.example/a.jpg?${ refs }`
+            const start = Date.now()
+            const verdict = isBlacklistedUrl(flood)
+            const elapsed = Date.now() - start
+            assert.equal(verdict, true, 'budget exhaustion must reject, not allow')
+            assert(elapsed < 1000, `scan must stay cheap, took ${ elapsed }ms`)
+        })
+
         it('ignores non-string domain entries without throwing', function() {
             initBlacklistService([], [], [42, null, {}, undefined, 'ok.example'] as any)
             try {

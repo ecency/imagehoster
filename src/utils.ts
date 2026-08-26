@@ -463,12 +463,20 @@ function collectEmbeddedUrls(value: string, out: string[]) {
 }
 
 /**
+ * base58 decode is quadratic in token length; any real proxied source URL
+ * yields a far shorter token, so a longer one is either garbage or padding
+ * meant to make the URL uninspectable — flagged unresolved, never decoded.
+ */
+const BASE58_TOKEN_DECODE_CAP = 4096
+
+/**
  * Source URLs hidden inside proxy-wrapper forms: path-embedded
  * (<proxy>/0x0/<source>, <proxy>/WxH/<source>), %-encoded (?url=<encoded>)
  * and base58 proxy tokens (<proxy>/p/<base58>).
  */
-function extractWrappedUrls(url: string): string[] {
+function extractWrappedUrls(url: string): { nested: string[], unresolved: boolean } {
     const nested: string[] = []
+    let unresolved = false
     collectEmbeddedUrls(url, nested)
     try {
         const decoded = decodeURIComponent(url)
@@ -478,28 +486,63 @@ function extractWrappedUrls(url: string): string[] {
     } catch (_e) { /* malformed escapes: nothing extra to scan */ }
     const token = url.match(BASE58_PROXY_TOKEN_RE)
     if (token) {
-        try {
-            const decoded = base58Dec(token[1])
-            if (/^https?:\/\//i.test(decoded)) {
-                nested.push(decoded)
-            }
-        } catch (_e) { /* not a base58 payload */ }
+        if (token[1].length > BASE58_TOKEN_DECODE_CAP) {
+            unresolved = true
+        } else {
+            try {
+                const decoded = base58Dec(token[1])
+                if (/^https?:\/\//i.test(decoded)) {
+                    nested.push(decoded)
+                }
+            } catch (_e) { /* not a base58 payload */ }
+        }
     }
-    return nested
+    return { nested, unresolved }
 }
 
-export function isBlacklistedUrl(url: string, depth: number = 0): boolean {
-    // Only check for exact matches of the empty 0x0 URL, not URLs that start with it
-    if (imageBlacklist.includes(url) || domainBlacklist.includes(url) || isEmptyImageUrl(url)) {
-        return true
+/**
+ * Total unique URL forms inspected per request. Overlapping suffix extraction
+ * dedupes via the seen-set, so legitimate URLs resolve in a handful of items;
+ * the budget only trips on adversarial inputs, which are then rejected.
+ */
+const WRAPPER_SCAN_BUDGET = 25
+
+export function isBlacklistedUrl(url: string): boolean {
+    const seen = new Set<string>([url])
+    const queue: string[] = [url]
+    let processed = 0
+    while (queue.length > 0) {
+        if (processed >= WRAPPER_SCAN_BUDGET) {
+            // Budget exhausted with wrapper forms still unresolved: fail closed.
+            // A URL too deeply or too broadly wrapped to inspect must be
+            // rejected, not treated as allowed
+            return true
+        }
+        const current = queue.pop()
+        if (current === undefined) {
+            break
+        }
+        processed++
+        // Only exact matches of the empty 0x0 URL count, not URLs that start with it
+        if (imageBlacklist.includes(current) || domainBlacklist.includes(current) || isEmptyImageUrl(current)) {
+            return true
+        }
+        // A blocked source can hide behind ANY proxy-wrapper host (public
+        // mirrors included, which the handler never unwraps) — queue every
+        // embedded source form for inspection too
+        const extracted = extractWrappedUrls(current)
+        if (extracted.unresolved) {
+            // a wrapper deliberately padded beyond inspectability: fail closed
+            return true
+        }
+        for (const nested of extracted.nested) {
+            if (!seen.has(nested)) {
+                seen.add(nested)
+                queue.push(nested)
+            }
+        }
     }
-    // A blocked source can hide behind ANY proxy-wrapper host (public mirrors
-    // included, which the handler never unwraps) — check every embedded source
-    // as well, a few levels deep
-    if (depth >= 3) {
-        return false
-    }
-    return extractWrappedUrls(url).some((nested) => isBlacklistedUrl(nested, depth + 1))
+    return false
 }
 
 export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
