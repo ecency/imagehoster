@@ -913,6 +913,20 @@ describe('accept header negotiation', function() {
             assert.equal(isBlacklistedUrl(`https://images.hive.blog/p/${ '1'.repeat(5000) }`), true)
         })
 
+        it('is not blinded by a malformed escape elsewhere in the wrapper', function() {
+            const encodedBlocked = encodeURIComponent('https://bad-host.example/a.jpg')
+            // malformed fragment: upstream never sees it, the encoded source is
+            // still resolved (from the defragmented decode) and blocked
+            assert.equal(isBlacklistedUrl(`https://wsrv.nl/?url=${ encodedBlocked }#%ZZ`), true)
+            // malformed escape in an unrelated query param: the source-relevant
+            // part cannot be decoded, so the URL fails closed
+            assert.equal(isBlacklistedUrl(`https://wsrv.nl/?url=${ encodedBlocked }&junk=%ZZ`), true)
+            // a plain allowed URL with a junk fragment still resolves and passes
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg#%ZZ'), false)
+            // an undecodable URL with no inspectable encoding also fails closed
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg?q=100%'), true)
+        })
+
         it('resolves benign URLs with several embedded fragments within budget', function() {
             // Overlapping suffix extraction must dedupe: without the seen-set
             // these eight fragments would multiply past the budget and get

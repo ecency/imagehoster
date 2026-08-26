@@ -483,7 +483,21 @@ function extractWrappedUrls(url: string): { nested: string[], unresolved: boolea
         if (decoded !== url) {
             collectEmbeddedUrls(decoded, nested)
         }
-    } catch (_e) { /* malformed escapes: nothing extra to scan */ }
+    } catch (_e) {
+        // A malformed escape makes the URL only partially inspectable, but the
+        // fragment never reaches upstream, so retry without it. If the rest
+        // still fails to decode, a hidden encoded source cannot be ruled out:
+        // flag unresolved so the caller fails closed
+        const defragmented = url.split('#', 1)[0]
+        try {
+            const decoded = decodeURIComponent(defragmented)
+            if (decoded !== defragmented) {
+                collectEmbeddedUrls(decoded, nested)
+            }
+        } catch (_e2) {
+            unresolved = true
+        }
+    }
     const token = url.match(BASE58_PROXY_TOKEN_RE)
     if (token) {
         if (token[1].length > BASE58_TOKEN_DECODE_CAP) {
