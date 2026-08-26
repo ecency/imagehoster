@@ -867,6 +867,25 @@ describe('accept header negotiation', function() {
             }
         })
 
+        it('matches blocked sources nested inside public proxy wrappers', function() {
+            // path-embedded wrappers, any outer host and any size segment
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/500x0/https://bad-host.example/uploads/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/0x0/https://cdn.bad-host.example/a.jpg'), true)
+            // doubly wrapped
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/0x0/https://steemitimages.com/0x0/https://bad-host.example/a.jpg'), true)
+            // %-encoded wrapper form
+            assert.equal(isBlacklistedUrl('https://wsrv.nl/?url=' + encodeURIComponent('https://bad-host.example/a.jpg')), true)
+            // base58 proxy-token wrapper form
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/p/' + base58Enc('https://bad-host.example/a.jpg')), true)
+            // wrappers around unlisted sources stay allowed
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/500x0/https://unrelated.example/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/p/' + base58Enc('https://unrelated.example/a.jpg')), false)
+        })
+
+        it('matches exact listed URLs nested inside wrappers', function() {
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/0x0/https://example.com/exact/listed.jpg'), true)
+        })
+
         it('ignores non-string domain entries without throwing', function() {
             initBlacklistService([], [], [42, null, {}, undefined, 'ok.example'] as any)
             try {

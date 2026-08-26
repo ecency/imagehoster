@@ -336,6 +336,40 @@ describe('proxy', function() {
             }
         })
 
+        it('blocks sources wrapped by a public proxy host, cached and uncached', async function() {
+            this.slow(3000)
+            // The nested server stands in for a public proxy wrapper host (it is
+            // NOT an internal service URL, so the handler never unwraps it) and
+            // serves a real image for any path while its host stays unlisted
+            const wrapper = `http://127.0.0.1:${ nestedPort }/0x0/http://blocked-nested.test/c.jpg`
+            const params = 'width=100&mode=fit'
+
+            // Prime while nothing is listed: variant cached under the wrapper's key
+            const prime = await needle('get', `http://localhost:${ port }/p/${ base58Enc(wrapper) }?${ params }`)
+            assert.equal((await sharp(prime.body).metadata()).width, 100)
+
+            initBlacklistService([], [], ['blocked-nested.test'])
+            try {
+                const asSource = (res: any) => res.statusCode === 200 && Buffer.isBuffer(res.body) && res.body.length > 0
+                    ? sharp(res.body).metadata().then((m) => m.width === 100 && m.height === 67).catch(() => false)
+                    : Promise.resolve(false)
+
+                // cached: the primed variant must not be served once the embedded source is listed
+                const cached = await needle('get', `http://localhost:${ port }/p/${ base58Enc(wrapper) }?${ params }`)
+                assert.equal(await asSource(cached), false,
+                    'wrapper-cached variant of a blocked source must not be served')
+
+                // uncached: a fresh wrapper URL must not be fetched at all
+                const before = nestedHits
+                const fresh = `http://127.0.0.1:${ nestedPort }/0x0/http://blocked-nested.test/d.jpg`
+                const uncached = await needle('get', `http://localhost:${ port }/p/${ base58Enc(fresh) }?${ params }`)
+                assert.equal(await asSource(uncached), false, 'fresh wrapper of a blocked source must not be served')
+                assert.equal(nestedHits, before, 'wrapper host must not be contacted for a blocked source')
+            } finally {
+                initBlacklistService([], [], [])
+            }
+        })
+
         it('never contacts a blacklisted source in the fallback fetch chain', async function() {
             this.slow(3000)
             const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}

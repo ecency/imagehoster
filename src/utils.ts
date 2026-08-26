@@ -451,9 +451,55 @@ export function sanitizeIgnoreInvalidateParams(url: URL): URL {
     )
 }
 
-export function isBlacklistedUrl(url: string): boolean {
+const BASE58_PROXY_TOKEN_RE = /\/p\/([1-9A-HJ-NP-Za-km-z]{20,})/
+
+function collectEmbeddedUrls(value: string, out: string[]) {
+    const lower = value.toLowerCase()
+    for (let i = lower.indexOf('http', 1); i !== -1; i = lower.indexOf('http', i + 1)) {
+        if (lower.startsWith('http://', i) || lower.startsWith('https://', i)) {
+            out.push(value.slice(i))
+        }
+    }
+}
+
+/**
+ * Source URLs hidden inside proxy-wrapper forms: path-embedded
+ * (<proxy>/0x0/<source>, <proxy>/WxH/<source>), %-encoded (?url=<encoded>)
+ * and base58 proxy tokens (<proxy>/p/<base58>).
+ */
+function extractWrappedUrls(url: string): string[] {
+    const nested: string[] = []
+    collectEmbeddedUrls(url, nested)
+    try {
+        const decoded = decodeURIComponent(url)
+        if (decoded !== url) {
+            collectEmbeddedUrls(decoded, nested)
+        }
+    } catch (_e) { /* malformed escapes: nothing extra to scan */ }
+    const token = url.match(BASE58_PROXY_TOKEN_RE)
+    if (token) {
+        try {
+            const decoded = base58Dec(token[1])
+            if (/^https?:\/\//i.test(decoded)) {
+                nested.push(decoded)
+            }
+        } catch (_e) { /* not a base58 payload */ }
+    }
+    return nested
+}
+
+export function isBlacklistedUrl(url: string, depth: number = 0): boolean {
     // Only check for exact matches of the empty 0x0 URL, not URLs that start with it
-    return imageBlacklist.includes(url) || domainBlacklist.includes(url) || isEmptyImageUrl(url)
+    if (imageBlacklist.includes(url) || domainBlacklist.includes(url) || isEmptyImageUrl(url)) {
+        return true
+    }
+    // A blocked source can hide behind ANY proxy-wrapper host (public mirrors
+    // included, which the handler never unwraps) — check every embedded source
+    // as well, a few levels deep
+    if (depth >= 3) {
+        return false
+    }
+    return extractWrappedUrls(url).some((nested) => isBlacklistedUrl(nested, depth + 1))
 }
 
 export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
