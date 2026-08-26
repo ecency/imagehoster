@@ -1,10 +1,9 @@
 /** Serve files from upload store. */
 
-import {readStream} from './utils'
+import {isBlacklistedUrl, readStream} from './utils'
 import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
-import {imageBlacklist} from './blacklist'
-import {DEFAULT_AVATAR_HASH, isEmptyImageUrl, MAX_INPUT_PIXELS, SERVICE_BASE_URL} from './constants'
+import {DEFAULT_AVATAR_HASH, MAX_INPUT_PIXELS, SERVICE_BASE_URL} from './constants'
 import Sharp from 'sharp'
 
 function detectMimeType(metadata: Sharp.Metadata): string {
@@ -38,7 +37,7 @@ export async function serveHandler(ctx: KoaContext) {
     const _filename = ctx.params['filename']
 
     const urlString = `${SERVICE_BASE_URL}/${_hash}/${_filename}`
-    if (imageBlacklist.includes(urlString) || isEmptyImageUrl(urlString)) {
+    if (isBlacklistedUrl(urlString)) {
         _hash = DEFAULT_AVATAR_HASH
     }
 

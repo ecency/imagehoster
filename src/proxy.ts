@@ -8,9 +8,8 @@ import * as multihash from 'multihashes'
 import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
-import {imageBlacklist} from './blacklist'
 import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
-import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
+import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
@@ -26,6 +25,7 @@ import {
     getImageKey,
     getProxyImageLimits,
     getSharpMetadataWithRetry,
+    isBlacklistedUrl,
     mimeMagic,
     needsMatchFallback,
     NeedleResponse,
@@ -236,8 +236,8 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     ctx.tag({ normalizedUrl: urlString })
 
-    // Check if URL is in blocklist or is exactly the empty 0x0 URL (not URLs that start with it)
-    if (imageBlacklist.includes(urlString) || isEmptyImageUrl(urlString)) {
+    // Check if URL/domain is in blocklist or is exactly the empty 0x0 URL (not URLs that start with it)
+    if (isBlacklistedUrl(urlString)) {
         ({ url, urlParams } = getDefaultUrlAndParams())
         isDefaultImage = true
         ctx.log.error({ urlString }, 'Falling back to default image due to blacklist or 0x0 URL')

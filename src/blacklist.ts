@@ -6,6 +6,7 @@ import {
     initBlacklistService,
     isImageBlacklistedSync,
     isAccountBlacklistedSync,
+    isDomainBlacklistedSync,
 } from './blacklist-service'
 import { logger } from './logger'
 
@@ -16,6 +17,7 @@ interface Blacklist<T> {
 interface BlacklistData {
     images?: string[]
     accounts?: string[]
+    domains?: string[]
     updated?: string
     version?: string
 }
@@ -23,7 +25,7 @@ interface BlacklistData {
 /**
  * Load blacklist data from JSON file
  */
-function loadBlacklistFile(filepath: string, type: 'images' | 'accounts'): string[] {
+function loadBlacklistFile(filepath: string, type: 'images' | 'accounts' | 'domains'): string[] {
     try {
         const fullPath = path.resolve(__dirname, '..', filepath)
 
@@ -35,7 +37,7 @@ function loadBlacklistFile(filepath: string, type: 'images' | 'accounts'): strin
         const content = fs.readFileSync(fullPath, 'utf8')
         const data: BlacklistData = JSON.parse(content)
 
-        const items = type === 'images' ? data.images : data.accounts
+        const items = data[type]
 
         if (!Array.isArray(items)) {
             logger.warn({ filepath: fullPath }, `invalid blacklist format for ${type}`)
@@ -59,10 +61,11 @@ function loadBlacklistFile(filepath: string, type: 'images' | 'accounts'): strin
 // Load static blacklists from JSON files
 const staticImageBlacklist = loadBlacklistFile('blacklist-images.json', 'images')
 const staticAccountBlacklist = loadBlacklistFile('blacklist-accounts.json', 'accounts')
+const staticDomainBlacklist = loadBlacklistFile('blacklist-domains.json', 'domains')
 
 // Initialize the blacklist service with static data
 // This will also start fetching from remote URLs if configured
-initBlacklistService(staticImageBlacklist, staticAccountBlacklist)
+initBlacklistService(staticImageBlacklist, staticAccountBlacklist, staticDomainBlacklist)
 
 // Export dynamic blacklist objects that check both remote and static lists
 export const imageBlacklist: Blacklist<string> = {
@@ -71,4 +74,9 @@ export const imageBlacklist: Blacklist<string> = {
 
 export const accountBlacklist: Blacklist<string> = {
     includes: (account: string) => isAccountBlacklistedSync(account)
+}
+
+// Matches when the URL's host equals a listed domain or is a subdomain of one
+export const domainBlacklist: Blacklist<string> = {
+    includes: (urlOrHost: string) => isDomainBlacklistedSync(urlOrHost)
 }

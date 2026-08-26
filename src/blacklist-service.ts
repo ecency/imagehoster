@@ -8,6 +8,7 @@ import { fetchUrl } from './utils'
 interface BlacklistData {
     images?: string[]
     accounts?: string[]
+    domains?: string[]
     updated?: string
     version?: string
 }
@@ -15,6 +16,7 @@ interface BlacklistData {
 interface BlacklistCache {
     images: Set<string>
     accounts: Set<string>
+    domains: Set<string>
     lastFetch: number
     failCount: number
 }
@@ -23,6 +25,7 @@ interface BlacklistCache {
 const cache: BlacklistCache = {
     images: new Set(),
     accounts: new Set(),
+    domains: new Set(),
     lastFetch: 0,
     failCount: 0
 }
@@ -30,6 +33,7 @@ const cache: BlacklistCache = {
 // Fallback to static blacklists (imported lazily to avoid circular deps)
 let staticImageBlacklist: string[] = []
 let staticAccountBlacklist: string[] = []
+let staticDomainBlacklist: string[] = []
 
 function normalizeUrl(url: string): string {
     try {
@@ -44,6 +48,56 @@ function normalizeUrl(url: string): string {
     } catch {
         return url
     }
+}
+
+/**
+ * Normalize a domain-list entry to a bare lowercase hostname.
+ * Accepts plain hostnames as well as sloppy entries ("*.host.com", ".host.com",
+ * "https://host.com/path"). Returns '' for entries that cannot be normalized.
+ */
+function normalizeDomain(entry: string): string {
+    let domain = (entry || '').trim().toLowerCase()
+    if (domain.includes('/')) {
+        try {
+            domain = new URL(domain.includes('://') ? domain : `https://${domain}`).hostname
+        } catch {
+            return ''
+        }
+    }
+    domain = domain.replace(/^\*?\./, '').replace(/\.$/, '')
+    return domain
+}
+
+/**
+ * Extract the hostname to test from a URL string (or pass a bare hostname through).
+ */
+function hostnameOf(urlOrHost: string): string {
+    try {
+        return new URL(urlOrHost).hostname.toLowerCase()
+    } catch {
+        return normalizeDomain(urlOrHost)
+    }
+}
+
+/**
+ * True when host equals a listed domain or is a subdomain of one.
+ */
+function hostMatchesDomainList(host: string, domains: Set<string>, staticDomains: string[]): boolean {
+    if (!host || (domains.size === 0 && staticDomains.length === 0)) {
+        return false
+    }
+    let candidate = host
+    while (candidate) {
+        if (domains.has(candidate) || staticDomains.includes(candidate)) {
+            return true
+        }
+        const dot = candidate.indexOf('.')
+        if (dot === -1) {
+            break
+        }
+        candidate = candidate.slice(dot + 1)
+    }
+    return false
 }
 
 const CACHE_TTL = Number.parseInt(config.get('blacklist.cache_ttl') || '300000') // 5 minutes default
@@ -89,6 +143,7 @@ async function fetchBlacklistData(url: string): Promise<BlacklistData | null> {
             url,
             imageCount: (data.images && data.images.length) || 0,
             accountCount: (data.accounts && data.accounts.length) || 0,
+            domainCount: (data.domains && data.domains.length) || 0,
             version: data.version
         }, 'blacklist fetched successfully')
 
@@ -116,8 +171,11 @@ async function updateCache(): Promise<boolean> {
 
     const imageUrl = config.get('blacklist.images_url') as string | undefined
     const accountUrl = config.get('blacklist.accounts_url') as string | undefined
+    // config.has guard: deployments with an older production config may not carry the key
+    const domainsUrl = (config.has('blacklist.domains_url')
+        ? config.get('blacklist.domains_url') : undefined) as string | undefined
 
-    if (!imageUrl && !accountUrl) {
+    if (!imageUrl && !accountUrl && !domainsUrl) {
         logger.debug('no remote blacklist URLs configured, using static lists')
         return false
     }
@@ -148,6 +206,18 @@ async function updateCache(): Promise<boolean> {
         }
     }
 
+    // Fetch domain blacklist
+    if (domainsUrl) {
+        const data = await fetchBlacklistData(domainsUrl)
+        if (data && data.domains && Array.isArray(data.domains)) {
+            cache.domains = new Set(data.domains.map(normalizeDomain).filter(Boolean))
+            updated = true
+            logger.info({ count: cache.domains.size }, 'domain blacklist updated')
+        } else {
+            cache.failCount++
+        }
+    }
+
     if (updated) {
         cache.lastFetch = Date.now()
         cache.failCount = 0
@@ -171,18 +241,21 @@ async function ensureFreshCache(): Promise<void> {
 /**
  * Initialize blacklist service with static fallbacks
  */
-export function initBlacklistService(staticImages: string[], staticAccounts: string[]) {
+export function initBlacklistService(staticImages: string[], staticAccounts: string[], staticDomains: string[] = []) {
     staticImageBlacklist = staticImages.map(normalizeUrl)
     staticAccountBlacklist = staticAccounts
+    staticDomainBlacklist = staticDomains.map(normalizeDomain).filter(Boolean)
 
     // Initialize cache with static data
     cache.images = new Set(staticImageBlacklist)
     cache.accounts = new Set(staticAccounts)
+    cache.domains = new Set(staticDomainBlacklist)
     cache.lastFetch = Date.now()
 
     logger.info({
         imageCount: staticImages.length,
-        accountCount: staticAccounts.length
+        accountCount: staticAccounts.length,
+        domainCount: staticDomainBlacklist.length
     }, 'blacklist service initialized with static data')
 
     // Fetch fresh data in background (don't await)
@@ -253,6 +326,14 @@ export function isAccountBlacklistedSync(account: string): boolean {
 }
 
 /**
+ * Synchronous check whether a URL's host (or a bare hostname) is a blacklisted
+ * domain or a subdomain of one (uses cached data only)
+ */
+export function isDomainBlacklistedSync(urlOrHost: string): boolean {
+    return hostMatchesDomainList(hostnameOf(urlOrHost), cache.domains, staticDomainBlacklist)
+}
+
+/**
  * Get current cache stats (for monitoring/debugging)
  */
 export function getBlacklistStats() {
@@ -264,6 +345,10 @@ export function getBlacklistStats() {
         accounts: {
             cached: cache.accounts.size,
             static: staticAccountBlacklist.length
+        },
+        domains: {
+            cached: cache.domains.size,
+            static: staticDomainBlacklist.length
         },
         lastFetch: new Date(cache.lastFetch).toISOString(),
         cacheAge: Date.now() - cache.lastFetch,

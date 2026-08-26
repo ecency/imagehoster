@@ -36,6 +36,8 @@ import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EMPTY_IMAG
 
 import { APIError } from './../src/error'
 
+import { initBlacklistService } from './../src/blacklist-service'
+
 describe('utils', function() {
 
     describe('parseBool', function() {
@@ -794,6 +796,56 @@ describe('accept header negotiation', function() {
         it('leaves formats every client can read alone', function() {
             assert.equal(needsMatchFallback('image/jpeg', 'image/png,*/*;q=0.8'), false)
             assert.equal(needsMatchFallback('image/webp', 'image/png,*/*;q=0.8'), false)
+        })
+    })
+
+    describe('isBlacklistedUrl', function() {
+        before(function() {
+            initBlacklistService(
+                ['https://example.com/exact/listed.jpg'],
+                [],
+                ['bad-host.example', '*.sloppy.example', 'https://from-url.example/some/path'],
+            )
+        })
+
+        after(function() {
+            // Restore the module-load state so other suites see the real static lists
+            initBlacklistService([], [], [])
+        })
+
+        it('matches exact listed URLs', function() {
+            assert.equal(isBlacklistedUrl('https://example.com/exact/listed.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://example.com/exact/other.jpg'), false)
+        })
+
+        it('matches any URL on a listed domain', function() {
+            assert.equal(isBlacklistedUrl('https://bad-host.example/uploads/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('http://bad-host.example/other/path.png?x=1'), true)
+        })
+
+        it('matches subdomains of a listed domain', function() {
+            assert.equal(isBlacklistedUrl('https://cdn.bad-host.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://a.b.bad-host.example/a.jpg'), true)
+        })
+
+        it('does not match lookalike or suffix-sharing hosts', function() {
+            assert.equal(isBlacklistedUrl('https://notbad-host.example/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://bad-host.example.evil.tld/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg'), false)
+        })
+
+        it('is case-insensitive on the host only', function() {
+            assert.equal(isBlacklistedUrl('https://CDN.Bad-Host.Example/a.jpg'), true)
+        })
+
+        it('normalizes sloppy domain-list entries', function() {
+            assert.equal(isBlacklistedUrl('https://sub.sloppy.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://sloppy.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://from-url.example/anything.jpg'), true)
+        })
+
+        it('keeps matching the empty 0x0 URL', function() {
+            assert.equal(isBlacklistedUrl(EMPTY_IMAGE_URL_PATTERNS[0]), true)
         })
     })
 })

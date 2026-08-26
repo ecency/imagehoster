@@ -12,7 +12,7 @@ import * as path from 'path'
 import Sharp from 'sharp'
 import { URL } from 'url'
 
-import { imageBlacklist } from './blacklist'
+import { domainBlacklist, imageBlacklist } from './blacklist'
 import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
@@ -453,7 +453,7 @@ export function sanitizeIgnoreInvalidateParams(url: URL): URL {
 
 export function isBlacklistedUrl(url: string): boolean {
     // Only check for exact matches of the empty 0x0 URL, not URLs that start with it
-    return imageBlacklist.includes(url) || isEmptyImageUrl(url)
+    return imageBlacklist.includes(url) || domainBlacklist.includes(url) || isEmptyImageUrl(url)
 }
 
 export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {

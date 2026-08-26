@@ -1,7 +1,7 @@
 import { URL } from 'url'
 import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
-import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
+import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse } from './utils'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -126,7 +126,12 @@ export async function fetchImageWithFallbacks(
         return !skipUrls.includes(url.trim())
     })
 
-    if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
+    if (isBlacklistedUrl(urlString)) {
+        // Covers the avatar/cover paths, which have no pre-cache blacklist gate of
+        // their own. Fall through to the default image without touching upstream
+        // and without negative-caching the URL as dead.
+        ctxLog.warn({ urlString }, 'Skipping mirror chain for blacklisted URL or domain')
+    } else if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
         ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
     } else {
         let sawTransientFailure = false
