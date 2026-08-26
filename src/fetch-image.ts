@@ -137,6 +137,14 @@ export class RedirectLimitError extends FallbackChainAbortError {
     }
 }
 
+/** A redirect pointed at a private or otherwise non-public address. */
+export class PrivateTargetError extends FallbackChainAbortError {
+    constructor() {
+        super('Redirect target is not a public URL')
+        this.name = 'PrivateTargetError'
+    }
+}
+
 /**
  * Fetch with redirects followed manually so every Location target is validated
  * before it is requested. Needle's follow_max would fetch a redirect target
@@ -172,7 +180,13 @@ async function fetchWithGuardedRedirects(
             throw new RedirectLimitError()
         }
         if (process.env.NODE_ENV !== 'test') {
-            assertPublicUrl(new URL(next))
+            try {
+                assertPublicUrl(new URL(next))
+            } catch (_e) {
+                // Must abandon the whole chain, not read as an ordinary fetch
+                // failure: the mirrors would follow this redirect themselves
+                throw new PrivateTargetError()
+            }
         }
         current = next
     }

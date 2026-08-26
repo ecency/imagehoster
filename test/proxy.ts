@@ -516,6 +516,47 @@ describe('proxy', function() {
             }
         })
 
+        it('abandons the mirror chain when a redirect targets a private address', async function() {
+            this.slow(3000)
+            this.timeout(10000)
+            const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}
+            const defaultUrl = `http://localhost:${ port }/nonexistent-default.png`
+
+            // Fully mocked, production-mode run: the private-target guard only
+            // arms outside NODE_ENV=test, and assertPublicUrl is syntactic (no
+            // DNS), so a fake public-looking redirector passes the candidate
+            // pre-check and its redirect exposes the gap
+            const utilsModule = require('./../src/utils')
+            const realFetchUrl = utilsModule.fetchUrl
+            let mirrorHits = 0
+            let privateHits = 0
+            utilsModule.fetchUrl = async (url: string, opts: any) => {
+                if (/allowed-redirector\.example/.test(url)) {
+                    return { statusCode: 302, headers: { location: 'http://127.0.0.1:1/private.jpg' }, body: Buffer.alloc(0) }
+                }
+                if (/127\.0\.0\.1:1\//.test(url)) {
+                    privateHits++
+                    return { statusCode: 200, headers: {}, body: fs.readFileSync(path.resolve(__dirname, 'test.jpg')) }
+                }
+                if (/images\.hive\.blog|steemitimages\.com|img\.leopedia\.io|wsrv\.nl/.test(url)) {
+                    mirrorHits++
+                    return { statusCode: 200, headers: {}, body: fs.readFileSync(path.resolve(__dirname, 'test.png')) }
+                }
+                return realFetchUrl(url, opts)
+            }
+            const realNodeEnv = process.env.NODE_ENV
+            process.env.NODE_ENV = 'production'
+            try {
+                const source = 'http://allowed-redirector.example/one.jpg'
+                await fetchImageWithFallbacks(source, base58Enc(source), 'test-agent', defaultUrl, log)
+            } catch (_e) { /* expected: no fallback available */ } finally {
+                process.env.NODE_ENV = realNodeEnv
+                utilsModule.fetchUrl = realFetchUrl
+            }
+            assert.equal(privateHits, 0, 'private redirect target must receive no requests')
+            assert.equal(mirrorHits, 0, 'mirrors must not be handed a URL that redirects to a private target')
+        })
+
         it('never contacts a blacklisted source in the fallback fetch chain', async function() {
             this.slow(3000)
             const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}
