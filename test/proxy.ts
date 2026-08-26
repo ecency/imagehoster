@@ -13,9 +13,9 @@ import {app} from './../src/app'
 import {fetchImageWithFallbacks} from './../src/fetch-image'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
-import {MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
+import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
 import {shouldCacheOriginal} from './../src/proxy'
-import {storeExists, storeWrite, base58Enc} from './../src/utils'
+import {storeExists, storeRemove, storeWrite, base58Enc} from './../src/utils'
 
 import {uploadImage} from './upload'
 
@@ -303,6 +303,16 @@ describe('proxy', function() {
         before((done) => { nestedServer.listen(nestedPort, '127.0.0.1', done) })
         after((done) => { nestedServer.close(done) })
 
+        // Stock the default fallback image so blocked requests resolve it from
+        // the upload store instead of chasing external mirrors for it
+        const defaultKey = new URL(DEFAULT_FALLBACK_IMAGE_URL).pathname.slice(1).split('/')[0]
+        before(async () => {
+            await storeWrite(uploadStore, defaultKey, fs.readFileSync(path.resolve(__dirname, 'test.png')))
+        })
+        after(async () => {
+            await storeRemove(uploadStore, defaultKey)
+        })
+
         it('blocks a blacklisted source wrapped inside an allowed 0x0 proxy URL', async function() {
             this.slow(3000)
             const source = `http://127.0.0.1:${ nestedPort }/nested-test.jpg`
@@ -358,6 +368,8 @@ describe('proxy', function() {
                 const cached = await needle('get', `http://localhost:${ port }/p/${ base58Enc(wrapper) }?${ params }`)
                 assert.equal(await asSource(cached), false,
                     'wrapper-cached variant of a blocked source must not be served')
+                // blocked responses carry the fallback cache contract, not the 1y/600s proxy TTLs
+                assert.equal(cached.headers['cache-control'], 'public,max-age=120')
 
                 // uncached: a fresh wrapper URL must not be fetched at all
                 const before = nestedHits

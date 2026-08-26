@@ -367,19 +367,25 @@ export async function proxyHandler(ctx: KoaContext) {
         // the client asking now. Convert the cached bytes rather than falling
         // through to the origin: the variant is already sized, and the original
         // may have been pruned or its remote host may be down.
+        // A cached variant of the DEFAULT image (a blocked or dead source) must
+        // not ship the immutable 1y header — it would freeze the placeholder at
+        // the edge long after the block is lifted or the origin recovers
+        const variantCacheControl = isDefaultImage
+            ? 'public,max-age=120' // fallback contract: 2 minutes
+            : 'public,max-age=31536000,immutable'
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
             const cached = await readStream(stream)
             const served = await convertCachedMatchVariant(ctx, cached, mimeType, acceptHeader, options)
             ctx.set('Content-Type', served.contentType)
             ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.set('Cache-Control', variantCacheControl)
             ctx.body = served.buffer
             return
         } else {
             ctx.set('Content-Type', mimeType)
             ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.set('Cache-Control', variantCacheControl)
             ctx.body = stream
             return
         }
@@ -724,7 +730,7 @@ export async function proxyHandler(ctx: KoaContext) {
     ctx.set('Vary', 'Accept')
     if (isDefaultImage) {
         ctx.log.error({ finalUrl: urlString }, 'Responding with default image')
-        ctx.set('Cache-Control', 'public,max-age=600') // 10 minutes
+        ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
     } else {
         ctx.set('Cache-Control', 'public,max-age=31536000,immutable') // 1 year
     }
