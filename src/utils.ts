@@ -12,7 +12,7 @@ import * as path from 'path'
 import Sharp from 'sharp'
 import { URL } from 'url'
 
-import { imageBlacklist } from './blacklist'
+import { domainBlacklist, imageBlacklist } from './blacklist'
 import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
@@ -451,9 +451,112 @@ export function sanitizeIgnoreInvalidateParams(url: URL): URL {
     )
 }
 
+const BASE58_PROXY_TOKEN_RE = /\/p\/([1-9A-HJ-NP-Za-km-z]{20,})/
+
+function collectEmbeddedUrls(value: string, out: string[]) {
+    const lower = value.toLowerCase()
+    for (let i = lower.indexOf('http', 1); i !== -1; i = lower.indexOf('http', i + 1)) {
+        if (lower.startsWith('http://', i) || lower.startsWith('https://', i)) {
+            out.push(value.slice(i))
+        }
+    }
+}
+
+/**
+ * base58 decode is quadratic in token length; any real proxied source URL
+ * yields a far shorter token, so a longer one is either garbage or padding
+ * meant to make the URL uninspectable — flagged unresolved, never decoded.
+ */
+const BASE58_TOKEN_DECODE_CAP = 4096
+
+/**
+ * Source URLs hidden inside proxy-wrapper forms: path-embedded
+ * (<proxy>/0x0/<source>, <proxy>/WxH/<source>), %-encoded (?url=<encoded>)
+ * and base58 proxy tokens (<proxy>/p/<base58>).
+ */
+function extractWrappedUrls(url: string): { nested: string[], unresolved: boolean } {
+    const nested: string[] = []
+    let unresolved = false
+    collectEmbeddedUrls(url, nested)
+    try {
+        const decoded = decodeURIComponent(url)
+        if (decoded !== url) {
+            collectEmbeddedUrls(decoded, nested)
+        }
+    } catch (_e) {
+        // A malformed escape makes the URL only partially inspectable, but the
+        // fragment never reaches upstream, so retry without it. If the rest
+        // still fails to decode, a hidden encoded source cannot be ruled out:
+        // flag unresolved so the caller fails closed
+        const defragmented = url.split('#', 1)[0]
+        try {
+            const decoded = decodeURIComponent(defragmented)
+            if (decoded !== defragmented) {
+                collectEmbeddedUrls(decoded, nested)
+            }
+        } catch (_e2) {
+            unresolved = true
+        }
+    }
+    const token = url.match(BASE58_PROXY_TOKEN_RE)
+    if (token) {
+        if (token[1].length > BASE58_TOKEN_DECODE_CAP) {
+            unresolved = true
+        } else {
+            try {
+                const decoded = base58Dec(token[1])
+                if (/^https?:\/\//i.test(decoded)) {
+                    nested.push(decoded)
+                }
+            } catch (_e) { /* not a base58 payload */ }
+        }
+    }
+    return { nested, unresolved }
+}
+
+/**
+ * Total unique URL forms inspected per request. Overlapping suffix extraction
+ * dedupes via the seen-set, so legitimate URLs resolve in a handful of items;
+ * the budget only trips on adversarial inputs, which are then rejected.
+ */
+const WRAPPER_SCAN_BUDGET = 25
+
 export function isBlacklistedUrl(url: string): boolean {
-    // Only check for exact matches of the empty 0x0 URL, not URLs that start with it
-    return imageBlacklist.includes(url) || isEmptyImageUrl(url)
+    const seen = new Set<string>([url])
+    const queue: string[] = [url]
+    let processed = 0
+    while (queue.length > 0) {
+        if (processed >= WRAPPER_SCAN_BUDGET) {
+            // Budget exhausted with wrapper forms still unresolved: fail closed.
+            // A URL too deeply or too broadly wrapped to inspect must be
+            // rejected, not treated as allowed
+            return true
+        }
+        const current = queue.pop()
+        if (current === undefined) {
+            break
+        }
+        processed++
+        // Only exact matches of the empty 0x0 URL count, not URLs that start with it
+        if (imageBlacklist.includes(current) || domainBlacklist.includes(current) || isEmptyImageUrl(current)) {
+            return true
+        }
+        // A blocked source can hide behind ANY proxy-wrapper host (public
+        // mirrors included, which the handler never unwraps) — queue every
+        // embedded source form for inspection too
+        const extracted = extractWrappedUrls(current)
+        if (extracted.unresolved) {
+            // a wrapper deliberately padded beyond inspectability: fail closed
+            return true
+        }
+        for (const nested of extracted.nested) {
+            if (!seen.has(nested)) {
+                seen.add(nested)
+                queue.push(nested)
+            }
+        }
+    }
+    return false
 }
 
 export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {

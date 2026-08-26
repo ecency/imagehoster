@@ -15,6 +15,7 @@ import {
   getImageKey,
   isInternalUploadUrl,
   getUrlHashKey,
+  isBlacklistedUrl,
   mimeMagic,
   OutputFormat,
   purgeCache,
@@ -86,6 +87,17 @@ async function handleAvatar(ctx: KoaContext) {
     isProfileFallback = true
   }
 
+  if (isBlacklistedUrl(avatarUrl)) {
+    // A blacklisted source behaves like a profile fallback: substitute the
+    // default BEFORE keys, ETag and store reads, so variants cached before the
+    // listing became effective are unreachable and the response carries the
+    // 120s fallback header. Keys then derive from the default image's own URL,
+    // the documented safe-to-cache exception.
+    ctx.log.error({ avatarUrl }, 'Falling back to default avatar due to blacklist')
+    avatarUrl = DefaultAvatar
+    isProfileFallback = true
+  }
+
   const size = safeParseInt(ctx.params['size']) || AVATAR_SIZE
   const { url, urlParams } = getDefaultUrlAndParams(avatarUrl)
   const urlString = url.toString()
@@ -110,7 +122,15 @@ async function handleAvatar(ctx: KoaContext) {
     'Last-Modified': profile ? new Date(`${profile.active}Z`).toUTCString() : new Date().toUTCString(),
   })
 
-  if (ctx.fresh && !shouldBypassCache) {
+  // ctx.fresh only consults the conditional headers once the status is
+  // 2xx/304, and Koa's default is 404 at this point — without an explicit 200
+  // the revalidation branch below can never fire
+  ctx.status = 200
+  // The substituted default changes the ETag, but Last-Modified still carries
+  // the profile's timestamp, so an If-Modified-Since-only revalidation would
+  // answer 304 and let the client keep its cached (possibly blocked) bytes —
+  // never take the freshness shortcut for fallback responses
+  if (ctx.fresh && !shouldBypassCache && !isProfileFallback) {
     ctx.status = 304
     return
   }

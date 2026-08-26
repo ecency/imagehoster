@@ -8,9 +8,8 @@ import * as multihash from 'multihashes'
 import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
-import {imageBlacklist} from './blacklist'
 import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
-import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, isEmptyImageUrl, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
+import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
@@ -26,6 +25,7 @@ import {
     getImageKey,
     getProxyImageLimits,
     getSharpMetadataWithRetry,
+    isBlacklistedUrl,
     mimeMagic,
     needsMatchFallback,
     NeedleResponse,
@@ -236,8 +236,8 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     ctx.tag({ normalizedUrl: urlString })
 
-    // Check if URL is in blocklist or is exactly the empty 0x0 URL (not URLs that start with it)
-    if (imageBlacklist.includes(urlString) || isEmptyImageUrl(urlString)) {
+    // Check if URL/domain is in blocklist or is exactly the empty 0x0 URL (not URLs that start with it)
+    if (isBlacklistedUrl(urlString)) {
         ({ url, urlParams } = getDefaultUrlAndParams())
         isDefaultImage = true
         ctx.log.error({ urlString }, 'Falling back to default image due to blacklist or 0x0 URL')
@@ -263,6 +263,16 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     urlString = applyUrlReplacements(urlString)
     url = new URL(urlString)
+    // Re-check after the 0x0-prefix extraction and URL replacements above: the
+    // effective source can differ from the URL checked initially (a blocked
+    // source nested inside an allowed proxy URL), and the extraction can even
+    // overwrite the default-image substitution the first check made
+    if (isBlacklistedUrl(urlString)) {
+        ({ url, urlParams } = getDefaultUrlAndParams())
+        urlString = url.toString()
+        isDefaultImage = true
+        ctx.log.error({ urlString }, 'Falling back to default image due to blacklist after URL normalization')
+    }
     // img.esteem.ws is gone and its mirrors no longer have these images; surviving
     // originals were preserved in the upload store, keyed by the historically
     // rewritten URL (steemitimages.com/0x0/<url>). Unwrap public-proxy prefixes
@@ -357,19 +367,25 @@ export async function proxyHandler(ctx: KoaContext) {
         // the client asking now. Convert the cached bytes rather than falling
         // through to the origin: the variant is already sized, and the original
         // may have been pruned or its remote host may be down.
+        // A cached variant of the DEFAULT image (a blocked or dead source) must
+        // not ship the immutable 1y header — it would freeze the placeholder at
+        // the edge long after the block is lifted or the origin recovers
+        const variantCacheControl = isDefaultImage
+            ? 'public,max-age=120' // fallback contract: 2 minutes
+            : 'public,max-age=31536000,immutable'
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
             const cached = await readStream(stream)
             const served = await convertCachedMatchVariant(ctx, cached, mimeType, acceptHeader, options)
             ctx.set('Content-Type', served.contentType)
             ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.set('Cache-Control', variantCacheControl)
             ctx.body = served.buffer
             return
         } else {
             ctx.set('Content-Type', mimeType)
             ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+            ctx.set('Cache-Control', variantCacheControl)
             ctx.body = stream
             return
         }
@@ -714,7 +730,7 @@ export async function proxyHandler(ctx: KoaContext) {
     ctx.set('Vary', 'Accept')
     if (isDefaultImage) {
         ctx.log.error({ finalUrl: urlString }, 'Responding with default image')
-        ctx.set('Cache-Control', 'public,max-age=600') // 10 minutes
+        ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
     } else {
         ctx.set('Cache-Control', 'public,max-age=31536000,immutable') // 1 year
     }

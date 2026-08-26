@@ -90,6 +90,7 @@ redis_url = 'redis://myredis'
 cache_ttl = 1800000 # 30 minutes in ms
 images_url = 'https://ecency.com/dmca/dmca-images.json'
 accounts_url = 'https://ecency.com/dmca/dmca-accounts.json'
+domains_url = 'https://ecency.com/dmca/dmca-domains.json'
 
 # upload rate and reputation limits, rate limits only enforced if redis db is configured
 [upload_limits]

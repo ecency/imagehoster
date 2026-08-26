@@ -36,6 +36,8 @@ import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EMPTY_IMAG
 
 import { APIError } from './../src/error'
 
+import { initBlacklistService } from './../src/blacklist-service'
+
 describe('utils', function() {
 
     describe('parseBool', function() {
@@ -794,6 +796,164 @@ describe('accept header negotiation', function() {
         it('leaves formats every client can read alone', function() {
             assert.equal(needsMatchFallback('image/jpeg', 'image/png,*/*;q=0.8'), false)
             assert.equal(needsMatchFallback('image/webp', 'image/png,*/*;q=0.8'), false)
+        })
+    })
+
+    describe('isBlacklistedUrl', function() {
+        const initFixture = () => initBlacklistService(
+            ['https://example.com/exact/listed.jpg'],
+            [],
+            ['bad-host.example', '*.sloppy.example', 'https://from-url.example/some/path'],
+        )
+
+        before(initFixture)
+
+        after(function() {
+            // Restore the module-load state so other suites see the real static
+            // lists (the repo's static blacklist files all hold empty lists, so
+            // empty lists ARE the module-load state)
+            initBlacklistService([], [], [])
+        })
+
+        it('matches exact listed URLs', function() {
+            assert.equal(isBlacklistedUrl('https://example.com/exact/listed.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://example.com/exact/other.jpg'), false)
+        })
+
+        it('matches any URL on a listed domain', function() {
+            assert.equal(isBlacklistedUrl('https://bad-host.example/uploads/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('http://bad-host.example/other/path.png?x=1'), true)
+        })
+
+        it('matches subdomains of a listed domain', function() {
+            assert.equal(isBlacklistedUrl('https://cdn.bad-host.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://a.b.bad-host.example/a.jpg'), true)
+        })
+
+        it('does not match lookalike or suffix-sharing hosts', function() {
+            assert.equal(isBlacklistedUrl('https://notbad-host.example/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://bad-host.example.evil.tld/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg'), false)
+        })
+
+        it('is case-insensitive on the host only', function() {
+            assert.equal(isBlacklistedUrl('https://CDN.Bad-Host.Example/a.jpg'), true)
+        })
+
+        it('normalizes sloppy domain-list entries', function() {
+            assert.equal(isBlacklistedUrl('https://sub.sloppy.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://sloppy.example/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://from-url.example/anything.jpg'), true)
+        })
+
+        it('keeps matching the empty 0x0 URL', function() {
+            assert.equal(isBlacklistedUrl(EMPTY_IMAGE_URL_PATTERNS[0]), true)
+        })
+
+        it('matches FQDN hosts with a trailing root dot', function() {
+            assert.equal(isBlacklistedUrl('https://bad-host.example./a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://cdn.bad-host.example./a.jpg'), true)
+        })
+
+        it('matches unicode (IDN) entries against their punycode host form', function() {
+            initBlacklistService([], [], ['bücher.example'])
+            try {
+                assert.equal(isBlacklistedUrl('https://xn--bcher-kva.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://bücher.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://sub.xn--bcher-kva.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://buecher.example/a.jpg'), false)
+            } finally {
+                initFixture()
+            }
+        })
+
+        it('matches blocked sources nested inside public proxy wrappers', function() {
+            // path-embedded wrappers, any outer host and any size segment
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/500x0/https://bad-host.example/uploads/a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/0x0/https://cdn.bad-host.example/a.jpg'), true)
+            // doubly wrapped
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/0x0/https://steemitimages.com/0x0/https://bad-host.example/a.jpg'), true)
+            // %-encoded wrapper form
+            assert.equal(isBlacklistedUrl('https://wsrv.nl/?url=' + encodeURIComponent('https://bad-host.example/a.jpg')), true)
+            // base58 proxy-token wrapper form
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/p/' + base58Enc('https://bad-host.example/a.jpg')), true)
+            // wrappers around unlisted sources stay allowed
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/500x0/https://unrelated.example/a.jpg'), false)
+            assert.equal(isBlacklistedUrl('https://images.hive.blog/p/' + base58Enc('https://unrelated.example/a.jpg')), false)
+        })
+
+        it('matches exact listed URLs nested inside wrappers', function() {
+            assert.equal(isBlacklistedUrl('https://steemitimages.com/0x0/https://example.com/exact/listed.jpg'), true)
+        })
+
+        it('resolves deeply nested base58 wrappers around a blocked source', function() {
+            let wrapped = 'https://bad-host.example/uploads/a.jpg'
+            for (let i = 0; i < 4; i++) {
+                wrapped = `https://images.hive.blog/p/${ base58Enc(wrapped) }`
+            }
+            assert.equal(isBlacklistedUrl(wrapped), true)
+        })
+
+        it('fails closed when wrappers outrun the inspection budget', function() {
+            // 30 plain-embedded wrapper layers around an ALLOWED source: the
+            // scan budget runs out before every layer is inspected, and an
+            // uninspectable URL must be rejected, not allowed
+            let wrapped = 'https://unrelated.example/a.jpg'
+            for (let i = 0; i < 30; i++) {
+                wrapped = `https://layer${ i }.example/0x0/${ wrapped }`
+            }
+            assert.equal(isBlacklistedUrl(wrapped), true)
+            // while a shallow wrap of the same allowed source resolves and passes
+            assert.equal(isBlacklistedUrl(
+                `https://images.hive.blog/p/${ base58Enc(`https://steemitimages.com/p/${ base58Enc('https://unrelated.example/a.jpg') }`) }`
+            ), false)
+        })
+
+        it('fails closed on base58 tokens padded beyond the decode cap', function() {
+            assert.equal(isBlacklistedUrl(`https://images.hive.blog/p/${ '1'.repeat(5000) }`), true)
+        })
+
+        it('is not blinded by a malformed escape elsewhere in the wrapper', function() {
+            const encodedBlocked = encodeURIComponent('https://bad-host.example/a.jpg')
+            // malformed fragment: upstream never sees it, the encoded source is
+            // still resolved (from the defragmented decode) and blocked
+            assert.equal(isBlacklistedUrl(`https://wsrv.nl/?url=${ encodedBlocked }#%ZZ`), true)
+            // malformed escape in an unrelated query param: the source-relevant
+            // part cannot be decoded, so the URL fails closed
+            assert.equal(isBlacklistedUrl(`https://wsrv.nl/?url=${ encodedBlocked }&junk=%ZZ`), true)
+            // a plain allowed URL with a junk fragment still resolves and passes
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg#%ZZ'), false)
+            // an undecodable URL with no inspectable encoding also fails closed
+            assert.equal(isBlacklistedUrl('https://unrelated.example/a.jpg?q=100%'), true)
+        })
+
+        it('resolves benign URLs with several embedded fragments within budget', function() {
+            // Overlapping suffix extraction must dedupe: without the seen-set
+            // these eight fragments would multiply past the budget and get
+            // rejected despite every host being allowed
+            const refs = Array.from({ length: 8 }, (_, i) => `x${ i }=http://frag${ i }.example/p${ i }`).join('&')
+            assert.equal(isBlacklistedUrl(`https://ok.example/a.jpg?${ refs }`), false)
+        })
+
+        it('rejects fragment-flood URLs quickly instead of scanning combinatorially', function() {
+            const refs = Array.from({ length: 150 }, (_, i) => `y${ i }=http://flood${ i }.example/q${ i }`).join('&')
+            const flood = `https://ok.example/a.jpg?${ refs }`
+            const start = Date.now()
+            const verdict = isBlacklistedUrl(flood)
+            const elapsed = Date.now() - start
+            assert.equal(verdict, true, 'budget exhaustion must reject, not allow')
+            assert(elapsed < 1000, `scan must stay cheap, took ${ elapsed }ms`)
+        })
+
+        it('ignores non-string domain entries without throwing', function() {
+            initBlacklistService([], [], [42, null, {}, undefined, 'ok.example'] as any)
+            try {
+                assert.equal(isBlacklistedUrl('https://ok.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://42/a.jpg'), false)
+                assert.equal(isBlacklistedUrl('https://null.example/a.jpg'), false)
+            } finally {
+                initFixture()
+            }
         })
     })
 })

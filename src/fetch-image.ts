@@ -1,7 +1,7 @@
 import { URL } from 'url'
 import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
-import { assertPublicUrl, fetchUrl, getUrlHashKey, NeedleResponse } from './utils'
+import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse } from './utils'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -111,6 +111,87 @@ export function peekDeadUrlTtl(urlString: string): number | undefined {
     return expiry === undefined ? undefined : expiry - Date.now()
 }
 
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
+
+/**
+ * A candidate whose redirects cannot be safely followed. Unlike an ordinary
+ * fetch failure this must abandon the whole mirror chain: the mirrors would be
+ * handed the same allowed outer URL and would follow its redirects further
+ * than we did — straight to whatever we refused to fetch.
+ */
+export class FallbackChainAbortError extends Error {}
+
+/** A redirect pointed at a blacklisted target. */
+export class BlacklistedTargetError extends FallbackChainAbortError {
+    constructor() {
+        super('Redirect target is blacklisted')
+        this.name = 'BlacklistedTargetError'
+    }
+}
+
+/** The redirect limit was exhausted with another redirect still pending. */
+export class RedirectLimitError extends FallbackChainAbortError {
+    constructor() {
+        super('Redirect limit exhausted with a redirect pending')
+        this.name = 'RedirectLimitError'
+    }
+}
+
+/** A redirect pointed at a private or otherwise non-public address. */
+export class PrivateTargetError extends FallbackChainAbortError {
+    constructor() {
+        super('Redirect target is not a public URL')
+        this.name = 'PrivateTargetError'
+    }
+}
+
+/**
+ * Fetch with redirects followed manually so every Location target is validated
+ * before it is requested. Needle's follow_max would fetch a redirect target
+ * with no blacklist or public-address check, letting an allowed URL bounce the
+ * request to a blocked or private one.
+ */
+async function fetchWithGuardedRedirects(
+    urlString: string,
+    opts: any,
+    maxRedirects: number = 5
+): Promise<NeedleResponse> {
+    let current = urlString
+    for (let hop = 0; ; hop++) {
+        const res = await fetchUrl(current, { ...opts, follow_max: 0 } as any)
+        const status = res && res.statusCode
+        if (!status || !REDIRECT_STATUS.has(status)) {
+            return res
+        }
+        const rawLocation = res.headers && (res.headers as any).location
+        const location = Array.isArray(rawLocation) ? rawLocation[0] : rawLocation
+        if (!location) {
+            return res
+        }
+        // Validate the target BEFORE the hop-limit check — a blocked Location
+        // on the final permitted hop must still be recognized as blocked
+        const next = new URL(location, current).toString()
+        if (isBlacklistedUrl(next)) {
+            throw new BlacklistedTargetError()
+        }
+        if (hop >= maxRedirects) {
+            // Another redirect is pending that we will not follow, so where the
+            // chain ultimately leads is unverified: fail closed
+            throw new RedirectLimitError()
+        }
+        if (process.env.NODE_ENV !== 'test') {
+            try {
+                assertPublicUrl(new URL(next))
+            } catch (_e) {
+                // Must abandon the whole chain, not read as an ordinary fetch
+                // failure: the mirrors would follow this redirect themselves
+                throw new PrivateTargetError()
+            }
+        }
+        current = next
+    }
+}
+
 export async function fetchImageWithFallbacks(
     urlString: string,
     urlParams: string,
@@ -126,10 +207,16 @@ export async function fetchImageWithFallbacks(
         return !skipUrls.includes(url.trim())
     })
 
-    if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
+    if (isBlacklistedUrl(urlString)) {
+        // Covers the avatar/cover paths, which have no pre-cache blacklist gate of
+        // their own. Fall through to the default image without touching upstream
+        // and without negative-caching the URL as dead.
+        ctxLog.warn({ urlString }, 'Skipping mirror chain for blacklisted URL or domain')
+    } else if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
         ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
     } else {
         let sawTransientFailure = false
+        let chainAborted = false
         // The HTTPS upgrade is an opportunistic probe: an origin that serves
         // plain HTTP will refuse it, and that tells us nothing about whether the
         // image exists. Only real answers count toward the terminal/transient
@@ -138,6 +225,10 @@ export async function fetchImageWithFallbacks(
             ? urlString.replace('http://', 'https://')
             : null
         for (const candidate of urls) {
+            if (isBlacklistedUrl(candidate)) {
+                ctxLog.warn({ candidate }, 'Skipping blacklisted URL in fallback chain')
+                continue
+            }
             if (process.env.NODE_ENV !== 'test') {
                 try {
                     assertPublicUrl(new URL(candidate))
@@ -148,14 +239,13 @@ export async function fetchImageWithFallbacks(
             }
             try {
                 ctxLog.info({ candidate }, 'Trying fallback fetch')
-                const res = await fetchUrl(candidate, {
+                const res = await fetchWithGuardedRedirects(candidate, {
                     parse_response: false,
-                    follow_max: 5,
                     open_timeout: timeout,
                     response_timeout: timeout,
                     read_timeout: timeout,
                     user_agent: userAgent,
-                } as any)
+                })
 
                 if (
                     res &&
@@ -175,30 +265,42 @@ export async function fetchImageWithFallbacks(
                 }
                 ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
+                if (e instanceof FallbackChainAbortError) {
+                    // Abandon the chain entirely — handing the same URL to the
+                    // public mirrors would just have THEM follow the redirects
+                    // further than we were willing to
+                    ctxLog.warn({ candidate, reason: (e as Error).name }, 'Abandoning mirror chain')
+                    chainAborted = true
+                    break
+                }
                 if (candidate !== speculativeHttpsUrl && !isTerminalError(e)) {
                     sawTransientFailure = true
                 }
                 ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        // Only a chain that failed terminally at every hop is remembered for the
-        // full TTL; if any hop merely timed out or errored, keep it brief.
-        const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
-        ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
-        await markDeadUrl(urlString, ttl)
+        if (!chainAborted) {
+            // Only a chain that failed terminally at every hop is remembered for the
+            // full TTL; if any hop merely timed out or errored, keep it brief.
+            // An aborted chain is NOT negative-cached: a blacklist block has its
+            // own lifetime, and a redirect-limit abort is a policy refusal, not
+            // evidence the URL is dead.
+            const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
+            ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
+            await markDeadUrl(urlString, ttl)
+        }
     }
 
     // Final fallback: default image (avatar or cover)
     try {
         ctxLog.info('Trying final fallback: default image')
-        const def = await fetchUrl(defaultUrl, {
+        const def = await fetchWithGuardedRedirects(defaultUrl, {
             parse_response: false,
-            follow_max: 5,
             open_timeout: timeout,
             response_timeout: timeout,
             read_timeout: timeout,
             user_agent: userAgent,
-        } as any)
+        })
 
         if (
             def &&
