@@ -118,6 +118,19 @@ describe('cover', function() {
         assert(first.headers['last-modified'], 'response should have last-modified')
     })
 
+    it('answers 304 for conditional revalidation of a healthy cover', async function() {
+        this.slow(3000)
+        this.timeout(15000)
+        const warm = await needle('get', `http://localhost:${port}/u/foo/cover`)
+        assert.equal(warm.statusCode, 200)
+        const inm = await needle('get', `http://localhost:${port}/u/foo/cover`,
+            null, { headers: { 'if-none-match': warm.headers.etag as string } })
+        assert.equal(inm.statusCode, 304)
+        const ims = await needle('get', `http://localhost:${port}/u/foo/cover`,
+            null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
+        assert.equal(ims.statusCode, 304)
+    })
+
     it('stops serving cached variants once the source domain is blacklisted', async function() {
         this.slow(5000)
         this.timeout(30000)
@@ -155,6 +168,13 @@ describe('cover', function() {
                 assert(Buffer.isBuffer(res.body) && !warm.body.equals(res.body),
                     'cached source bytes must not be served')
                 assert.equal(srcHits, hitsBefore, 'blocked source must not be re-fetched')
+
+                // a date-only revalidation must not shortcut either: Last-Modified
+                // still carries the profile timestamp the client already has
+                const ims = await needle('get', `http://localhost:${port}/u/blockycover/cover`,
+                    null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
+                assert.equal(ims.statusCode, 200, 'must not answer 304 for If-Modified-Since revalidation')
+                assert.equal(ims.headers['cache-control'], 'public,max-age=120')
             } finally {
                 initBlacklistService([], [], [])
             }

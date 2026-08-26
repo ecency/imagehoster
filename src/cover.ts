@@ -121,7 +121,15 @@ async function handleCover(ctx: KoaContext) {
     'Last-Modified': profile ? new Date(`${profile.active}Z`).toUTCString() : new Date().toUTCString(),
   })
 
-  if (ctx.fresh && !shouldBypassCache) {
+  // ctx.fresh only consults the conditional headers once the status is
+  // 2xx/304, and Koa's default is 404 at this point — without an explicit 200
+  // the revalidation branch below can never fire
+  ctx.status = 200
+  // The substituted default changes the ETag, but Last-Modified still carries
+  // the profile's timestamp, so an If-Modified-Since-only revalidation would
+  // answer 304 and let the client keep its cached (possibly blocked) bytes —
+  // never take the freshness shortcut for fallback responses
+  if (ctx.fresh && !shouldBypassCache && !isProfileFallback) {
     ctx.status = 304
     return
   }
