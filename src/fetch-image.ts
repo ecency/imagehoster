@@ -114,6 +114,19 @@ export function peekDeadUrlTtl(urlString: string): number | undefined {
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
 
 /**
+ * A candidate resolved to a blacklisted target. Unlike an ordinary fetch
+ * failure this must abandon the whole mirror chain: the mirrors would be
+ * handed the same allowed outer URL and would follow the redirect to the
+ * blocked target themselves.
+ */
+export class BlacklistedTargetError extends Error {
+    constructor() {
+        super('Redirect target is blacklisted')
+        this.name = 'BlacklistedTargetError'
+    }
+}
+
+/**
  * Fetch with redirects followed manually so every Location target is validated
  * before it is requested. Needle's follow_max would fetch a redirect target
  * with no blacklist or public-address check, letting an allowed URL bounce the
@@ -138,7 +151,7 @@ async function fetchWithGuardedRedirects(
         }
         const next = new URL(location, current).toString()
         if (isBlacklistedUrl(next)) {
-            throw new Error('Redirect target is blacklisted')
+            throw new BlacklistedTargetError()
         }
         if (process.env.NODE_ENV !== 'test') {
             assertPublicUrl(new URL(next))
@@ -171,6 +184,7 @@ export async function fetchImageWithFallbacks(
         ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
     } else {
         let sawTransientFailure = false
+        let blacklistedRedirect = false
         // The HTTPS upgrade is an opportunistic probe: an origin that serves
         // plain HTTP will refuse it, and that tells us nothing about whether the
         // image exists. Only real answers count toward the terminal/transient
@@ -219,17 +233,29 @@ export async function fetchImageWithFallbacks(
                 }
                 ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
+                if (e instanceof BlacklistedTargetError) {
+                    // Abandon the chain entirely — handing the same URL to the
+                    // public mirrors would just have THEM follow the redirect
+                    // to the blocked target and serve it back to us
+                    ctxLog.warn({ candidate }, 'Abandoning mirror chain: redirect leads to a blacklisted target')
+                    blacklistedRedirect = true
+                    break
+                }
                 if (candidate !== speculativeHttpsUrl && !isTerminalError(e)) {
                     sawTransientFailure = true
                 }
                 ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        // Only a chain that failed terminally at every hop is remembered for the
-        // full TTL; if any hop merely timed out or errored, keep it brief.
-        const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
-        ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
-        await markDeadUrl(urlString, ttl)
+        if (!blacklistedRedirect) {
+            // Only a chain that failed terminally at every hop is remembered for the
+            // full TTL; if any hop merely timed out or errored, keep it brief.
+            // A blacklisted redirect is NOT negative-cached: the block comes from
+            // the list, which has its own lifetime.
+            const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
+            ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
+            await markDeadUrl(urlString, ttl)
+        }
     }
 
     // Final fallback: default image (avatar or cover)

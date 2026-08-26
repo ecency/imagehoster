@@ -401,44 +401,53 @@ describe('proxy', function() {
             }
         })
 
-        it('never follows a redirect to a blacklisted target', async function() {
+        it('never follows a redirect to a blacklisted target, and abandons the mirror chain', async function() {
             this.slow(3000)
             this.timeout(10000)
             const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}
             const defaultUrl = `http://localhost:${ port }/nonexistent-default.png`
-            // keep the chain local: skip the external mirror candidates
-            const mirrorsOf = (u: string, p: string) => [
-                `https://images.hive.blog/p/${ p }`,
-                `https://steemitimages.com/p/${ p }`,
-                `https://images.hive.blog/0x0/${ u }`,
-                `https://steemitimages.com/0x0/${ u }`,
-                `https://img.leopedia.io/0x0/${ u }`,
-                `https://wsrv.nl/?url=${ encodeURIComponent(u) }`,
-            ]
 
-            // control: with nothing listed, the redirect is followed manually
-            // and the target's bytes come back
-            const source = `http://localhost:${ redirectPort }/redirected-a.jpg`
-            const before1 = nestedHits
-            const control = await fetchImageWithFallbacks(source, base58Enc(source), 'test-agent', defaultUrl, log,
-                { skipUrls: mirrorsOf(source, base58Enc(source)) })
-            assert.equal(control.isFallback, false)
-            // the fetch layer returns the raw fixture bytes, unresized
-            const fixture = await sharp(fs.readFileSync(path.resolve(__dirname, 'test.jpg'))).metadata()
-            assert.equal((await sharp(control.res.body).metadata()).width, fixture.width)
-            assert.equal(nestedHits, before1 + 1)
-
-            // with the target's host listed, the redirect must not be followed
-            initBlacklistService([], [], ['127.0.0.1'])
-            const before2 = nestedHits
-            try {
-                const blocked = `http://localhost:${ redirectPort }/redirected-b.jpg`
-                await fetchImageWithFallbacks(blocked, base58Enc(blocked), 'test-agent', defaultUrl, log,
-                    { skipUrls: mirrorsOf(blocked, base58Enc(blocked)) })
-            } catch (_e) { /* expected: no fallback available */ } finally {
-                initBlacklistService([], [], [])
+            // Mock the public mirrors: they would receive the ALLOWED redirector
+            // URL and follow the redirect to the blocked target themselves, so a
+            // mirror answering 200 is exactly the bypass this test pins
+            const utilsModule = require('./../src/utils')
+            const realFetchUrl = utilsModule.fetchUrl
+            let mirrorHits = 0
+            utilsModule.fetchUrl = async (url: string, opts: any) => {
+                if (/images\.hive\.blog|steemitimages\.com|img\.leopedia\.io|wsrv\.nl/.test(url)) {
+                    mirrorHits++
+                    return { statusCode: 200, headers: {}, body: fs.readFileSync(path.resolve(__dirname, 'test.png')) }
+                }
+                return realFetchUrl(url, opts)
             }
-            assert.equal(nestedHits, before2, 'redirect target must receive no requests')
+            try {
+                // control: with nothing listed, the redirect is followed manually
+                // and the target's bytes come back before any mirror is consulted
+                const source = `http://localhost:${ redirectPort }/redirected-a.jpg`
+                const before1 = nestedHits
+                const control = await fetchImageWithFallbacks(source, base58Enc(source), 'test-agent', defaultUrl, log)
+                assert.equal(control.isFallback, false)
+                // the fetch layer returns the raw fixture bytes, unresized
+                const fixture = await sharp(fs.readFileSync(path.resolve(__dirname, 'test.jpg'))).metadata()
+                assert.equal((await sharp(control.res.body).metadata()).width, fixture.width)
+                assert.equal(nestedHits, before1 + 1)
+                assert.equal(mirrorHits, 0)
+
+                // with the target's host listed, the redirect must not be followed
+                // AND the remaining mirror candidates must not be consulted
+                initBlacklistService([], [], ['127.0.0.1'])
+                const before2 = nestedHits
+                try {
+                    const blocked = `http://localhost:${ redirectPort }/redirected-b.jpg`
+                    await fetchImageWithFallbacks(blocked, base58Enc(blocked), 'test-agent', defaultUrl, log)
+                } catch (_e) { /* expected: no fallback available */ } finally {
+                    initBlacklistService([], [], [])
+                }
+                assert.equal(nestedHits, before2, 'redirect target must receive no requests')
+                assert.equal(mirrorHits, 0, 'mirrors must not be handed a URL that redirects to a blocked target')
+            } finally {
+                utilsModule.fetchUrl = realFetchUrl
+            }
         })
 
         it('never contacts a blacklisted source in the fallback fetch chain', async function() {
