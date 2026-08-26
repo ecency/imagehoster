@@ -143,6 +143,10 @@ export async function fetchImageWithFallbacks(
             ? urlString.replace('http://', 'https://')
             : null
         for (const candidate of urls) {
+            if (isBlacklistedUrl(candidate)) {
+                ctxLog.warn({ candidate }, 'Skipping blacklisted URL in fallback chain')
+                continue
+            }
             if (process.env.NODE_ENV !== 'test') {
                 try {
                     assertPublicUrl(new URL(candidate))

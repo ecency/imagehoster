@@ -51,21 +51,24 @@ function normalizeUrl(url: string): string {
 }
 
 /**
- * Normalize a domain-list entry to a bare lowercase hostname.
+ * Normalize a domain-list entry to a bare lowercase ASCII (punycode) hostname.
  * Accepts plain hostnames as well as sloppy entries ("*.host.com", ".host.com",
- * "https://host.com/path"). Returns '' for entries that cannot be normalized.
+ * "host.com.", unicode IDNs, "https://host.com/path"). Returns '' for entries
+ * that cannot be normalized (including non-string values).
  */
 function normalizeDomain(entry: string): string {
-    let domain = (entry || '').trim().toLowerCase()
-    if (domain.includes('/')) {
-        try {
-            domain = new URL(domain.includes('://') ? domain : `https://${domain}`).hostname
-        } catch {
-            return ''
-        }
+    if (typeof entry !== 'string') {
+        return ''
     }
-    domain = domain.replace(/^\*?\./, '').replace(/\.$/, '')
-    return domain
+    let domain = entry.trim().toLowerCase().replace(/^\*?\./, '')
+    try {
+        // Route every entry through URL parsing so unicode hostnames come out
+        // in the same punycode form new URL() yields for request URLs
+        domain = new URL(domain.includes('://') ? domain : `https://${domain}`).hostname
+    } catch {
+        return ''
+    }
+    return domain.replace(/\.$/, '')
 }
 
 /**
@@ -73,7 +76,8 @@ function normalizeDomain(entry: string): string {
  */
 function hostnameOf(urlOrHost: string): string {
     try {
-        return new URL(urlOrHost).hostname.toLowerCase()
+        // trailing-dot FQDN form ("host.example.") must match a "host.example" entry
+        return new URL(urlOrHost).hostname.toLowerCase().replace(/\.$/, '')
     } catch {
         return normalizeDomain(urlOrHost)
     }

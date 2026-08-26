@@ -10,8 +10,10 @@ import * as fs from 'fs'
 import sharp from 'sharp'
 
 import {app} from './../src/app'
+import {fetchImageWithFallbacks} from './../src/fetch-image'
+import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
-import {MAX_CACHED_ORIGINAL_SIZE} from './../src/constants'
+import {MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
 import {shouldCacheOriginal} from './../src/proxy'
 import {storeExists, storeWrite, base58Enc} from './../src/utils'
 
@@ -287,6 +289,68 @@ describe('proxy', function() {
             assert.equal(shouldCacheOriginal(1, {...cacheable, isDefaultImage: true}), false)
             assert.equal(shouldCacheOriginal(1, {...cacheable, usesUploadStore: true}), false)
             assert.equal(shouldCacheOriginal(1, {...cacheable, isLegacy: true}), false)
+        })
+    })
+
+    describe('domain blacklist on nested proxy URLs', function() {
+        // Bound to 127.0.0.1 explicitly so the nested source host is deterministic
+        const nestedPort = port + 3
+        let nestedHits = 0
+        const nestedServer = http.createServer((req, res) => {
+            nestedHits++
+            fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
+        })
+        before((done) => { nestedServer.listen(nestedPort, '127.0.0.1', done) })
+        after((done) => { nestedServer.close(done) })
+
+        it('blocks a blacklisted source wrapped inside an allowed 0x0 proxy URL', async function() {
+            this.slow(3000)
+            const source = `http://127.0.0.1:${ nestedPort }/nested-test.jpg`
+            // A /0x0/-wrapped internal URL is NOT unwrapped by the early
+            // isInternalProxyUrl loop (that handles /p/ forms only) — it goes
+            // through the late 0x0-prefix extraction, past the initial check
+            const nested = `${ SERVICE_BASE_URL }/0x0/${ source }`
+            const params = 'width=100&mode=fit'
+
+            // Prime the variant cache under the source's key, then prove the
+            // nested form resolves to that same cached variant
+            const prime = await needle('get', `http://localhost:${ port }/p/${ base58Enc(source) }?${ params }`)
+            assert.equal((await sharp(prime.body).metadata()).width, 100)
+            const control = await needle('get', `http://localhost:${ port }/p/${ base58Enc(nested) }?${ params }`)
+            assert.equal((await sharp(control.body).metadata()).width, 100)
+
+            initBlacklistService([], [], ['127.0.0.1'])
+            try {
+                const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(nested) }?${ params }`)
+                let servedSource = false
+                if (res.statusCode === 200 && Buffer.isBuffer(res.body) && res.body.length > 0) {
+                    try {
+                        const meta = await sharp(res.body).metadata()
+                        servedSource = meta.width === 100 && meta.height === 67
+                    } catch (_e) { servedSource = false }
+                }
+                assert.equal(servedSource, false,
+                    'blocked nested source must not be served from the primed variant cache')
+            } finally {
+                initBlacklistService([], [], [])
+            }
+        })
+
+        it('never contacts a blacklisted source in the fallback fetch chain', async function() {
+            this.slow(3000)
+            const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}
+            const source = `http://127.0.0.1:${ nestedPort }/fetch-chain-test.jpg`
+            initBlacklistService([], [], ['127.0.0.1'])
+            const before = nestedHits
+            try {
+                // The default image is not stocked in the test stores, so the call
+                // may throw after skipping the chain — only the hit count matters
+                await fetchImageWithFallbacks(source, base58Enc(source), 'test-agent',
+                    `http://localhost:${ port }/nonexistent-default.png`, log)
+            } catch (_e) { /* expected: no fallback available */ } finally {
+                initBlacklistService([], [], [])
+            }
+            assert.equal(nestedHits, before, 'blocked source must receive no requests')
         })
     })
 

@@ -263,6 +263,16 @@ export async function proxyHandler(ctx: KoaContext) {
     urlString = url.toString()
     urlString = applyUrlReplacements(urlString)
     url = new URL(urlString)
+    // Re-check after the 0x0-prefix extraction and URL replacements above: the
+    // effective source can differ from the URL checked initially (a blocked
+    // source nested inside an allowed proxy URL), and the extraction can even
+    // overwrite the default-image substitution the first check made
+    if (isBlacklistedUrl(urlString)) {
+        ({ url, urlParams } = getDefaultUrlAndParams())
+        urlString = url.toString()
+        isDefaultImage = true
+        ctx.log.error({ urlString }, 'Falling back to default image due to blacklist after URL normalization')
+    }
     // img.esteem.ws is gone and its mirrors no longer have these images; surviving
     // originals were preserved in the upload store, keyed by the historically
     // rewritten URL (steemitimages.com/0x0/<url>). Unwrap public-proxy prefixes

@@ -800,16 +800,18 @@ describe('accept header negotiation', function() {
     })
 
     describe('isBlacklistedUrl', function() {
-        before(function() {
-            initBlacklistService(
-                ['https://example.com/exact/listed.jpg'],
-                [],
-                ['bad-host.example', '*.sloppy.example', 'https://from-url.example/some/path'],
-            )
-        })
+        const initFixture = () => initBlacklistService(
+            ['https://example.com/exact/listed.jpg'],
+            [],
+            ['bad-host.example', '*.sloppy.example', 'https://from-url.example/some/path'],
+        )
+
+        before(initFixture)
 
         after(function() {
-            // Restore the module-load state so other suites see the real static lists
+            // Restore the module-load state so other suites see the real static
+            // lists (the repo's static blacklist files all hold empty lists, so
+            // empty lists ARE the module-load state)
             initBlacklistService([], [], [])
         })
 
@@ -846,6 +848,34 @@ describe('accept header negotiation', function() {
 
         it('keeps matching the empty 0x0 URL', function() {
             assert.equal(isBlacklistedUrl(EMPTY_IMAGE_URL_PATTERNS[0]), true)
+        })
+
+        it('matches FQDN hosts with a trailing root dot', function() {
+            assert.equal(isBlacklistedUrl('https://bad-host.example./a.jpg'), true)
+            assert.equal(isBlacklistedUrl('https://cdn.bad-host.example./a.jpg'), true)
+        })
+
+        it('matches unicode (IDN) entries against their punycode host form', function() {
+            initBlacklistService([], [], ['bücher.example'])
+            try {
+                assert.equal(isBlacklistedUrl('https://xn--bcher-kva.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://bücher.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://sub.xn--bcher-kva.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://buecher.example/a.jpg'), false)
+            } finally {
+                initFixture()
+            }
+        })
+
+        it('ignores non-string domain entries without throwing', function() {
+            initBlacklistService([], [], [42, null, {}, undefined, 'ok.example'] as any)
+            try {
+                assert.equal(isBlacklistedUrl('https://ok.example/a.jpg'), true)
+                assert.equal(isBlacklistedUrl('https://42/a.jpg'), false)
+                assert.equal(isBlacklistedUrl('https://null.example/a.jpg'), false)
+            } finally {
+                initFixture()
+            }
         })
     })
 })
