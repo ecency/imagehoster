@@ -450,6 +450,72 @@ describe('proxy', function() {
             }
         })
 
+        it('fails closed on redirects at and beyond the hop limit', async function() {
+            this.slow(3000)
+            this.timeout(10000)
+            const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}
+            const defaultUrl = `http://localhost:${ port }/nonexistent-default.png`
+
+            // /boundary/<k>: five allowed self-redirects, then a redirect to the
+            // blocked target exactly at the follower's hop limit
+            // /endless/<k>: allowed self-redirects forever
+            let chainPort = 0
+            const chainServer = http.createServer((req, res) => {
+                const m = (req.url || '').match(/^\/(boundary|endless)\/(\d+)/)
+                const kind = m ? m[1] : 'endless'
+                const k = m ? parseInt(m[2], 10) : 0
+                // the blocked Location must arrive on the request made at
+                // hop 5, the follower's limit: requests 1-5 are allowed hops
+                const next = kind === 'boundary' && k >= 6
+                    ? `http://127.0.0.1:${ nestedPort }/boundary-final.jpg`
+                    : `http://localhost:${ chainPort }/${ kind }/${ k + 1 }`
+                res.writeHead(302, { Location: next })
+                res.end()
+            })
+            await new Promise<void>((resolve) => {
+                chainServer.listen(0, 'localhost', () => {
+                    chainPort = (chainServer.address() as any).port
+                    resolve()
+                })
+            })
+
+            const utilsModule = require('./../src/utils')
+            const realFetchUrl = utilsModule.fetchUrl
+            let mirrorHits = 0
+            utilsModule.fetchUrl = async (url: string, opts: any) => {
+                if (/images\.hive\.blog|steemitimages\.com|img\.leopedia\.io|wsrv\.nl/.test(url)) {
+                    mirrorHits++
+                    return { statusCode: 200, headers: {}, body: fs.readFileSync(path.resolve(__dirname, 'test.png')) }
+                }
+                return realFetchUrl(url, opts)
+            }
+            try {
+                initBlacklistService([], [], ['127.0.0.1'])
+                const before = nestedHits
+
+                // blocked Location arriving exactly at the hop limit must still
+                // be recognized as blocked, not returned unvalidated
+                try {
+                    const boundary = `http://localhost:${ chainPort }/boundary/1`
+                    await fetchImageWithFallbacks(boundary, base58Enc(boundary), 'test-agent', defaultUrl, log)
+                } catch (_e) { /* expected: no fallback available */ }
+                assert.equal(nestedHits, before, 'boundary redirect target must receive no requests')
+                assert.equal(mirrorHits, 0, 'mirrors must not be consulted after a boundary-blocked redirect')
+
+                // an exhausted limit with a redirect still pending is unverified
+                // territory: the chain must be abandoned, not handed to mirrors
+                try {
+                    const endless = `http://localhost:${ chainPort }/endless/1`
+                    await fetchImageWithFallbacks(endless, base58Enc(endless), 'test-agent', defaultUrl, log)
+                } catch (_e) { /* expected: no fallback available */ }
+                assert.equal(mirrorHits, 0, 'mirrors must not be consulted after the redirect limit is exhausted')
+            } finally {
+                initBlacklistService([], [], [])
+                utilsModule.fetchUrl = realFetchUrl
+                await new Promise<void>((resolve) => { chainServer.close(() => resolve()) })
+            }
+        })
+
         it('never contacts a blacklisted source in the fallback fetch chain', async function() {
             this.slow(3000)
             const log = {info: () => undefined, warn: () => undefined, error: () => undefined, debug: () => undefined}

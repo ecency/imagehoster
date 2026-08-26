@@ -114,15 +114,26 @@ export function peekDeadUrlTtl(urlString: string): number | undefined {
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
 
 /**
- * A candidate resolved to a blacklisted target. Unlike an ordinary fetch
- * failure this must abandon the whole mirror chain: the mirrors would be
- * handed the same allowed outer URL and would follow the redirect to the
- * blocked target themselves.
+ * A candidate whose redirects cannot be safely followed. Unlike an ordinary
+ * fetch failure this must abandon the whole mirror chain: the mirrors would be
+ * handed the same allowed outer URL and would follow its redirects further
+ * than we did — straight to whatever we refused to fetch.
  */
-export class BlacklistedTargetError extends Error {
+export class FallbackChainAbortError extends Error {}
+
+/** A redirect pointed at a blacklisted target. */
+export class BlacklistedTargetError extends FallbackChainAbortError {
     constructor() {
         super('Redirect target is blacklisted')
         this.name = 'BlacklistedTargetError'
+    }
+}
+
+/** The redirect limit was exhausted with another redirect still pending. */
+export class RedirectLimitError extends FallbackChainAbortError {
+    constructor() {
+        super('Redirect limit exhausted with a redirect pending')
+        this.name = 'RedirectLimitError'
     }
 }
 
@@ -146,12 +157,19 @@ async function fetchWithGuardedRedirects(
         }
         const rawLocation = res.headers && (res.headers as any).location
         const location = Array.isArray(rawLocation) ? rawLocation[0] : rawLocation
-        if (!location || hop >= maxRedirects) {
+        if (!location) {
             return res
         }
+        // Validate the target BEFORE the hop-limit check — a blocked Location
+        // on the final permitted hop must still be recognized as blocked
         const next = new URL(location, current).toString()
         if (isBlacklistedUrl(next)) {
             throw new BlacklistedTargetError()
+        }
+        if (hop >= maxRedirects) {
+            // Another redirect is pending that we will not follow, so where the
+            // chain ultimately leads is unverified: fail closed
+            throw new RedirectLimitError()
         }
         if (process.env.NODE_ENV !== 'test') {
             assertPublicUrl(new URL(next))
@@ -184,7 +202,7 @@ export async function fetchImageWithFallbacks(
         ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
     } else {
         let sawTransientFailure = false
-        let blacklistedRedirect = false
+        let chainAborted = false
         // The HTTPS upgrade is an opportunistic probe: an origin that serves
         // plain HTTP will refuse it, and that tells us nothing about whether the
         // image exists. Only real answers count toward the terminal/transient
@@ -233,12 +251,12 @@ export async function fetchImageWithFallbacks(
                 }
                 ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
-                if (e instanceof BlacklistedTargetError) {
+                if (e instanceof FallbackChainAbortError) {
                     // Abandon the chain entirely — handing the same URL to the
-                    // public mirrors would just have THEM follow the redirect
-                    // to the blocked target and serve it back to us
-                    ctxLog.warn({ candidate }, 'Abandoning mirror chain: redirect leads to a blacklisted target')
-                    blacklistedRedirect = true
+                    // public mirrors would just have THEM follow the redirects
+                    // further than we were willing to
+                    ctxLog.warn({ candidate, reason: (e as Error).name }, 'Abandoning mirror chain')
+                    chainAborted = true
                     break
                 }
                 if (candidate !== speculativeHttpsUrl && !isTerminalError(e)) {
@@ -247,11 +265,12 @@ export async function fetchImageWithFallbacks(
                 ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        if (!blacklistedRedirect) {
+        if (!chainAborted) {
             // Only a chain that failed terminally at every hop is remembered for the
             // full TTL; if any hop merely timed out or errored, keep it brief.
-            // A blacklisted redirect is NOT negative-cached: the block comes from
-            // the list, which has its own lifetime.
+            // An aborted chain is NOT negative-cached: a blacklist block has its
+            // own lifetime, and a redirect-limit abort is a policy refusal, not
+            // evidence the URL is dead.
             const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
             ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
             await markDeadUrl(urlString, ttl)
