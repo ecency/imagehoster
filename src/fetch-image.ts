@@ -111,6 +111,42 @@ export function peekDeadUrlTtl(urlString: string): number | undefined {
     return expiry === undefined ? undefined : expiry - Date.now()
 }
 
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308])
+
+/**
+ * Fetch with redirects followed manually so every Location target is validated
+ * before it is requested. Needle's follow_max would fetch a redirect target
+ * with no blacklist or public-address check, letting an allowed URL bounce the
+ * request to a blocked or private one.
+ */
+async function fetchWithGuardedRedirects(
+    urlString: string,
+    opts: any,
+    maxRedirects: number = 5
+): Promise<NeedleResponse> {
+    let current = urlString
+    for (let hop = 0; ; hop++) {
+        const res = await fetchUrl(current, { ...opts, follow_max: 0 } as any)
+        const status = res && res.statusCode
+        if (!status || !REDIRECT_STATUS.has(status)) {
+            return res
+        }
+        const rawLocation = res.headers && (res.headers as any).location
+        const location = Array.isArray(rawLocation) ? rawLocation[0] : rawLocation
+        if (!location || hop >= maxRedirects) {
+            return res
+        }
+        const next = new URL(location, current).toString()
+        if (isBlacklistedUrl(next)) {
+            throw new Error('Redirect target is blacklisted')
+        }
+        if (process.env.NODE_ENV !== 'test') {
+            assertPublicUrl(new URL(next))
+        }
+        current = next
+    }
+}
+
 export async function fetchImageWithFallbacks(
     urlString: string,
     urlParams: string,
@@ -157,14 +193,13 @@ export async function fetchImageWithFallbacks(
             }
             try {
                 ctxLog.info({ candidate }, 'Trying fallback fetch')
-                const res = await fetchUrl(candidate, {
+                const res = await fetchWithGuardedRedirects(candidate, {
                     parse_response: false,
-                    follow_max: 5,
                     open_timeout: timeout,
                     response_timeout: timeout,
                     read_timeout: timeout,
                     user_agent: userAgent,
-                } as any)
+                })
 
                 if (
                     res &&
@@ -200,14 +235,13 @@ export async function fetchImageWithFallbacks(
     // Final fallback: default image (avatar or cover)
     try {
         ctxLog.info('Trying final fallback: default image')
-        const def = await fetchUrl(defaultUrl, {
+        const def = await fetchWithGuardedRedirects(defaultUrl, {
             parse_response: false,
-            follow_max: 5,
             open_timeout: timeout,
             response_timeout: timeout,
             read_timeout: timeout,
             user_agent: userAgent,
-        } as any)
+        })
 
         if (
             def &&
