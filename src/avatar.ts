@@ -15,6 +15,7 @@ import {
   getImageKey,
   isInternalUploadUrl,
   getUrlHashKey,
+  isBlacklistedUrl,
   mimeMagic,
   OutputFormat,
   purgeCache,
@@ -83,6 +84,17 @@ async function handleAvatar(ctx: KoaContext) {
       profile.metadata.profile.profile_image.startsWith('http')) {
     avatarUrl = profile.metadata.profile.profile_image
   } else if (!profile) {
+    isProfileFallback = true
+  }
+
+  if (isBlacklistedUrl(avatarUrl)) {
+    // A blacklisted source behaves like a profile fallback: substitute the
+    // default BEFORE keys, ETag and store reads, so variants cached before the
+    // listing became effective are unreachable and the response carries the
+    // 120s fallback header. Keys then derive from the default image's own URL,
+    // the documented safe-to-cache exception.
+    ctx.log.error({ avatarUrl }, 'Falling back to default avatar due to blacklist')
+    avatarUrl = DefaultAvatar
     isProfileFallback = true
   }
 

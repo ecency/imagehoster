@@ -4,10 +4,14 @@ import * as http from 'http'
 import needle from 'needle'
 import sharp from 'sharp'
 
+import * as fs from 'fs'
+import * as path from 'path'
+
 import {app} from './../src/app'
+import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore} from './../src/common'
 import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
-import {BROKEN_AVATAR_URL} from './index'
+import {BROKEN_AVATAR_URL, mockProfiles} from './index'
 
 describe('avatar', function() {
     let port: number
@@ -127,5 +131,51 @@ describe('avatar', function() {
         assert.equal(first.statusCode, 200)
         assert(first.headers['etag'], 'response should have etag')
         assert(first.headers['last-modified'], 'response should have last-modified')
+    })
+
+    it('stops serving cached variants once the source domain is blacklisted', async function() {
+        this.slow(5000)
+        this.timeout(30000)
+        let srcPort = 0
+        let srcHits = 0
+        const srcServer = http.createServer((req, res) => {
+            srcHits++
+            fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
+        })
+        await new Promise<void>((resolve) => {
+            srcServer.listen(0, '127.0.0.1', () => { srcPort = (srcServer.address() as any).port; resolve() })
+        })
+        mockProfiles.blockyavatar = {
+            name: 'blockyavatar', active: '2024-01-01T00:00:00', created: '2016-01-01T00:00:00',
+            id: 990, post_count: 1, reputation: 25, blacklists: [],
+            stats: { followers: 0, following: 0, rank: 0 },
+            metadata: { profile: { name: 'Blocky', profile_image: `http://127.0.0.1:${srcPort}/blocky.jpg` } },
+        }
+        try {
+            // populate the original and rendered-variant caches
+            const warm = await needle('get', `http://localhost:${port}/u/blockyavatar/avatar`)
+            assert.equal(warm.statusCode, 200)
+            assert.equal(warm.headers['cache-control'], 'public,max-age=3600')
+            assert(srcHits > 0, 'warm request must have fetched the source')
+            const warmEtag = warm.headers.etag as string
+
+            initBlacklistService([], [], ['127.0.0.1'])
+            try {
+                const hitsBefore = srcHits
+                // conditional request against the cached ETag must not shortcut to 304
+                const res = await needle('get', `http://localhost:${port}/u/blockyavatar/avatar`,
+                    null, { headers: { 'if-none-match': warmEtag } })
+                assert.equal(res.statusCode, 200, 'must not answer 304 for the blocked source ETag')
+                assert.equal(res.headers['cache-control'], 'public,max-age=120')
+                assert(Buffer.isBuffer(res.body) && !warm.body.equals(res.body),
+                    'cached source bytes must not be served')
+                assert.equal(srcHits, hitsBefore, 'blocked source must not be re-fetched')
+            } finally {
+                initBlacklistService([], [], [])
+            }
+        } finally {
+            delete mockProfiles.blockyavatar
+            await new Promise<void>((resolve) => { srcServer.close(() => resolve()) })
+        }
     })
 })
