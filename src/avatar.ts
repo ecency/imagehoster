@@ -210,11 +210,12 @@ async function handleAvatar(ctx: KoaContext) {
         try {
           await storeWrite(origStore, origKey, origData)
           // Purge Cloudflare cache for this user's avatar endpoint since we fetched a new image
+          // One call, not four: purgeCache expands each URL across every service
+          // hostname, so four separate calls would be eight requests to Cloudflare.
           const serviceUrl = new URL(config.get('service_url'))
-          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/`)
-          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/small`)
-          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/medium`)
-          purgeCache(`${serviceUrl.origin}/u/${username}/avatar/large`)
+          purgeCache(['', 'small', 'medium', 'large'].map(
+            (size) => `${serviceUrl.origin}/u/${username}/avatar/${size}`
+          ))
         } catch (err) {
           ctx.log.error({ err, origKey }, 'failed to store original avatar image')
           // Continue serving - storage failure shouldn't block response
