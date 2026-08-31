@@ -7,7 +7,14 @@ import {rpc} from './../src/common'
 export const testKeys = {
     foo: PrivateKey.fromSeed('foo'),
     bar: PrivateKey.fromSeed('bar'),
+    // The app account's own posting key, as it would appear on chain.
+    app: PrivateKey.fromSeed('app'),
+    // A key nobody's posting/active authority accepts.
+    stranger: PrivateKey.fromSeed('stranger'),
 }
+
+/** Matches upload_limits.app_account in config/default.toml. */
+export const APP_ACCOUNT = 'ecency.app'
 
 export const mockAccounts: any = {
     foo: {
@@ -36,6 +43,89 @@ export const mockAccounts: any = {
             weight_threshold: 1,
             account_auths: [],
             key_auths: [[testKeys.foo.createPublic().toString(), 1]]
+        }
+    },
+    // The app account itself, so a delegated token can be verified against the
+    // delegate's real on-chain keys rather than trusted on delegation alone.
+    'ecency.app': {
+        name: 'ecency.app',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.app.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.app.createPublic().toString(), 1]]
+        }
+    },
+    // Has delegated posting authority to the app account, which is the shape that
+    // used to authenticate on delegation alone with no signature check at all.
+    hsdelegator: {
+        name: 'hsdelegator',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 1,
+            account_auths: [['ecency.app', 1]],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        }
+    },
+    // No delegation, so an app-signed token must not be accepted for it.
+    hsplain: {
+        name: 'hsplain',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        }
+    },
+    // The signing key exists only under owner, which must never authorise an upload.
+    hsowneronly: {
+        name: 'hsowneronly',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.foo.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.foo.createPublic().toString(), 1]]
+        },
+        owner: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        }
+    },
+    // The signing key's weight (1) is below the threshold (2), so it is a
+    // multisig participant and cannot authorise on its own.
+    hslowweight: {
+        name: 'hslowweight',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 2,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 2,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
         }
     },
     // Avatar only in legacy json_metadata; posting_json_metadata is a non-`profile`
@@ -107,6 +197,18 @@ export const mockProfiles: any = {
                 profile_image: 'https://example.com/bar-avatar.jpg',
             }
         }
+    },
+    hsdelegator: {
+        name: 'hsdelegator', active: '2024-01-01T00:00:00', created: '2016-01-01T00:00:00',
+        id: 20, post_count: 10, reputation: 50, blacklists: [],
+        stats: { followers: 1, following: 1, rank: 0 },
+        metadata: { profile: { name: 'HS Delegator' } }
+    },
+    hsplain: {
+        name: 'hsplain', active: '2024-01-01T00:00:00', created: '2016-01-01T00:00:00',
+        id: 21, post_count: 10, reputation: 50, blacklists: [],
+        stats: { followers: 1, following: 1, rank: 0 },
+        metadata: { profile: { name: 'HS Plain' } }
     },
     // bridge returns an empty avatar/cover — these live only in legacy json_metadata.
     legacyonly: {
