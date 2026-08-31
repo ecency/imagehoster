@@ -30,6 +30,7 @@ import {
     OutputFormat,
     storeRemoveByPrefix,
     storeWrite,
+    expandPurgeUrls,
 } from './../src/utils'
 
 import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EMPTY_IMAGE_URL_PATTERNS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
@@ -955,5 +956,50 @@ describe('accept header negotiation', function() {
                 initFixture()
             }
         })
+    })
+})
+
+describe('expandPurgeUrls', function() {
+    // Cloudflare keys cache objects per hostname, so a purge that names only one
+    // of the origins fronting this service leaves the other serving stale bytes.
+    // In the test config INTERNAL_SERVICE_ORIGINS is the service_url origin plus
+    // the legacy images.ecency.com origin.
+    const [primary, legacy] = INTERNAL_SERVICE_ORIGINS
+
+    it('fans a service URL out across every service origin', function() {
+        const out = expandPurgeUrls(`${primary}/p/sometoken`)
+        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length)
+        assert.ok(out.includes(`${primary}/p/sometoken`))
+        assert.ok(out.includes(`${legacy}/p/sometoken`))
+    })
+
+    it('fans out a URL given on the legacy origin too, not just the primary', function() {
+        const out = expandPurgeUrls(`${legacy}/u/alice/avatar/small`)
+        assert.ok(out.includes(`${primary}/u/alice/avatar/small`))
+        assert.ok(out.includes(`${legacy}/u/alice/avatar/small`))
+    })
+
+    it('preserves the query string on every origin', function() {
+        const out = expandPurgeUrls(`${primary}/p/tok?format=match&mode=fit`)
+        assert.ok(out.includes(`${primary}/p/tok?format=match&mode=fit`))
+        assert.ok(out.includes(`${legacy}/p/tok?format=match&mode=fit`))
+    })
+
+    it('accepts an array and deduplicates the result', function() {
+        const out = expandPurgeUrls([`${primary}/p/tok`, `${legacy}/p/tok`, `${primary}/p/tok`])
+        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length)
+    })
+
+    it('never rewrites a URL belonging to some other host onto ours', function() {
+        const foreign = 'https://images.hive.blog/p/sometoken'
+        assert.deepEqual(expandPurgeUrls(foreign), [foreign])
+    })
+
+    it('passes a non-URL string through untouched rather than throwing', function() {
+        assert.deepEqual(expandPurgeUrls('not a url'), ['not a url'])
+    })
+
+    it('returns an empty list for empty input', function() {
+        assert.deepEqual(expandPurgeUrls([]), [])
     })
 })

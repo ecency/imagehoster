@@ -275,33 +275,83 @@ export function getProxyImageLimits() {
     }
 }
 
+/**
+ * Cloudflare keys cache objects per hostname, so a purge naming only one of the
+ * hostnames that front this service leaves the other one serving the old bytes
+ * until it expires on its own. Every caller builds purge URLs from
+ * `service_url`, so `https://images.ecency.com` was never purged at all.
+ *
+ * `INTERNAL_SERVICE_ORIGINS` is already the set of origins that are "us" (it
+ * backs the double-proxy detection), so reuse it rather than tracking the list
+ * twice and letting the two drift.
+ *
+ * A URL on some other host is passed through untouched: purge inputs are
+ * built from our own origin today, but rewriting an external URL onto ours
+ * would silently purge the wrong object if that ever changes.
+ */
+export function expandPurgeUrls(value: string | string[]): string[] {
+    const input = Array.isArray(value) ? value : [value]
+    const out = new Set<string>()
+    for (const raw of input) {
+        let parsed: URL
+        try {
+            parsed = new URL(raw)
+        } catch (cause) {
+            out.add(raw)
+            continue
+        }
+        if (!INTERNAL_SERVICE_ORIGINS.includes(parsed.origin)) {
+            out.add(raw)
+            continue
+        }
+        for (const origin of INTERNAL_SERVICE_ORIGINS) {
+            out.add(new URL(`${parsed.pathname}${parsed.search}`, origin).toString())
+        }
+    }
+    return [...out]
+}
+
+/** Cloudflare rejects a purge naming more than 30 URLs, which would fail the whole batch. */
+const PURGE_BATCH_SIZE = 30
+
+let purgeUnconfiguredWarned = false
+
 export function purgeCache(value: string | string[]) {
     if (!config.has('cloudflare_token') || !config.has('cloudflare_zone')) {
+        // Warn once rather than per call: a missing config is otherwise
+        // indistinguishable from a successful purge, in the logs and everywhere else.
+        if (!purgeUnconfiguredWarned) {
+            purgeUnconfiguredWarned = true
+            logger.warn('cloudflare_token/cloudflare_zone not configured, CDN purges are being skipped')
+        }
         return
     }
     const CF_KEY = config.get('cloudflare_token') as string
     const CF_ZONE = config.get('cloudflare_zone') as string
-    const files = Array.isArray(value) ? value : [value]
-    if (files.length === 0) {
+    const expanded = expandPurgeUrls(value)
+    if (expanded.length === 0) {
         return
     }
-    fetch(`https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache`, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${CF_KEY}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ files }),
-    }).then(async (res) => {
-        const body = await res.json().catch(() => null) as any
-        if (!res.ok || (body && !body.success)) {
-            logger.error({ status: res.status, body, files }, 'Cloudflare cache purge failed')
-        } else {
-            logger.info({ files }, 'Cloudflare cache purged')
-        }
-    }).catch((err) => {
-        logger.error({ err, files }, 'Cloudflare cache purge network error')
-    })
+    for (let i = 0; i < expanded.length; i += PURGE_BATCH_SIZE) {
+        const files = expanded.slice(i, i + PURGE_BATCH_SIZE)
+        fetch(`https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${CF_KEY}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ files }),
+        }).then(async (res) => {
+            const body = await res.json().catch(() => null) as any
+            if (!res.ok || (body && !body.success)) {
+                logger.error({ status: res.status, body, files }, 'Cloudflare cache purge failed')
+            } else {
+                logger.info({ files }, 'Cloudflare cache purged')
+            }
+        }).catch((err) => {
+            logger.error({ err, files }, 'Cloudflare cache purge network error')
+        })
+    }
 }
 
 export function stripWebpOrPng(value: string): string {
