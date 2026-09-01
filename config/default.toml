@@ -131,3 +131,9 @@ max_custom_image_height = 2000
 # Must stay well under Varnish's 60s backend first_byte_timeout so an exhausted
 # mirror walk can attempt the placeholder rather than being cut off as a 503.
 #fetch_deadline_ms = 25000
+
+# Threads libvips uses per operation. Sharp already clamps this to 1 on glibc,
+# but only while it does not detect jemalloc, so setting it explicitly makes the
+# invariant independent of allocator detection. Note libvips ignores the
+# VIPS_CONCURRENCY environment variable once a value has been set explicitly.
+sharp_concurrency = 1

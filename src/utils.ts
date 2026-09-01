@@ -18,6 +18,35 @@ import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
 
+/**
+ * Pin how many threads libvips uses per operation.
+ *
+ * Sharp sets this to 1 on glibc, but only when it does NOT detect jemalloc
+ * (node_modules/sharp/lib/utility.js). So the clamp this service depends on is a
+ * side effect of allocator detection: preloading jemalloc, for any reason, would
+ * silently restore libvips' default of one thread per core in every worker
+ * process at once. With 6 workers on 12 hardware threads that is 72 pixel threads
+ * competing for 12 cores, and nothing in the code would say why.
+ *
+ * Setting it explicitly makes the invariant the service actually relies on
+ * visible and independent of that detection. It is behaviour-neutral today: the
+ * value it sets is the value already in effect.
+ *
+ * Anything non-finite or below 1 is coerced to 1, deliberately: libvips treats 0
+ * as "keep the current value", which under a future preload would mean the
+ * init-derived core count rather than the intended clamp.
+ */
+const SHARP_CONCURRENCY = (() => {
+    if (!config.has('sharp_concurrency')) { return 1 }
+    const v = Number(config.get('sharp_concurrency'))
+    return Number.isFinite(v) && v >= 1 ? Math.floor(v) : 1
+})()
+Sharp.concurrency(SHARP_CONCURRENCY)
+
+export function getSharpConcurrency(): number {
+    return Sharp.concurrency()
+}
+
 export const AcceptedContentTypes = [
     'image/gif',
     'image/jpeg',
