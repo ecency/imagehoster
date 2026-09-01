@@ -4,6 +4,7 @@ import cluster from 'cluster'
 import config from 'config'
 import * as http from 'http'
 import Koa from 'koa'
+import * as fs from 'fs'
 import * as os from 'os'
 
 import './sentry' // Initialize Sentry early
@@ -11,7 +12,7 @@ import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
 import {logger, loggerMiddleware} from './logger'
 import {routes} from './routes'
-import {parseBool} from './utils'
+import {getSharpConcurrency, parseBool} from './utils'
 
 export const app = new Koa()
 export const version = require('./version')
@@ -107,6 +108,15 @@ async function main() {
         const port = config.get('port')
         await listen(port)
         logger.info('listening on port %d', port)
+        // Both of these have gone wrong silently before, so state them at boot.
+        // The allocator line reads /proc/self/maps rather than trusting config:
+        // it reports what is actually mapped into this process.
+        let allocator = 'glibc'
+        try {
+            allocator = fs.readFileSync('/proc/self/maps', 'utf8').includes('jemalloc') ? 'jemalloc' : 'glibc'
+        } catch (cause) { allocator = 'unknown' }
+        logger.warn({sharpConcurrency: getSharpConcurrency(), allocator, node: process.versions.node},
+            'image pipeline configured')
     }
 
     const exit = async () => {
