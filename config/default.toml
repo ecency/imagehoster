@@ -44,7 +44,15 @@ default_cover = 'https://i.ecency.com/DQmdA9wjRyGmDwrTza59yLSjCWMEc9sFD5sC4ZU5kL
 # log level to output at
 #log_level = 'debug'
 #log_level = 'info'
-log_level = 'error'
+# warn, not error. Everything this service logs at warn is operational and worth
+# seeing: upstream fetch failures, fetch-deadline truncations, blacklist skips,
+# unauthenticated ignorecache attempts, retention-store lookup failures, and the
+# boot line stating the resolved libvips concurrency and allocator. At 'error'
+# the service hides its own diagnostics, including the telemetry the fetch
+# deadline is meant to be retuned from. Production already overrides this to
+# warn; the shipped default was simply out of step with how the service is run.
+# Nothing at warn is per-request on the success path.
+log_level = 'warn'
 
 # where to write logs, can be file path or stdout/err
 log_output = 'stdout'

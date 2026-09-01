@@ -323,9 +323,9 @@ export async function fetchImageWithFallbacks(
             // own lifetime, and a redirect-limit abort is a policy refusal, not
             // evidence the URL is dead.
             // A walk cut short by the deadline learned nothing conclusive, so it
-            // only ever earns the short TTL. warn, not info: production runs at
-            // log_level=warn, and this line is the telemetry that says whether the
-            // budget is set right.
+            // only ever earns the short TTL. warn, not info: this line is the
+            // telemetry the budget is retuned from, and warn is the level the
+            // shipped default emits at.
             const transient = sawTransientFailure || deadlineHit
             const ttl = transient ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
             ctxLog.warn(
