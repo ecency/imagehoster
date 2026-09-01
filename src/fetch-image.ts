@@ -339,9 +339,10 @@ export async function fetchImageWithFallbacks(
     try {
         ctxLog.info('Trying final fallback: default image')
         // Deliberately NOT clamped by the deadline: this is the escape hatch that
-        // turns an exhausted chain into a 200 placeholder instead of an error, so it
-        // must still run when the budget is already blown. Bounded tightly on its
-        // own because it loops back through this service's own edge stack.
+        // lets an exhausted chain answer with a placeholder rather than an error, so
+        // it must still run when the budget is already blown. It can itself fail on
+        // its own timeouts, in which case the request still ends in an error.
+        // Bounded tightly because it loops back through this service's own edge.
         const def = await fetchWithGuardedRedirects(defaultUrl, {
             parse_response: false,
             open_timeout: explicitTimeout !== undefined ? explicitTimeout : FETCH_DEFAULT_OPEN_MS,

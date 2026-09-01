@@ -187,8 +187,10 @@ export const FETCH_MIN_REMAINING_MS = 1500
 /**
  * The default-image fetch is deliberately NOT clamped by the deadline.
  *
- * It is the escape hatch that turns an exhausted chain into a 200 placeholder
- * instead of an error, so it must still run when the budget is already blown.
+ * It is the escape hatch that gives an exhausted chain a chance to answer with a
+ * placeholder instead of an error, so it must still run when the budget is
+ * already blown. It is not a guarantee: this fetch has its own timeouts and can
+ * fail, in which case the request still ends in an error.
  * It is bounded separately and tightly because it loops back through this
  * service's own Cloudflare-nginx-Varnish stack.
  */

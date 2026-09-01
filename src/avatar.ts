@@ -42,8 +42,8 @@ const AVATAR_SIZE = 256
 async function handleAvatar(ctx: KoaContext) {
   ctx.tag({ handler: 'avatar' })
   // One wall-clock budget for every upstream fetch this request makes, so an
-  // exhausted mirror chain ends as a placeholder well inside the 60s Varnish
-  // allows the backend rather than being cut off as a 503.
+  // exhausted mirror chain gets the chance to answer with a placeholder well
+  // inside the 60s Varnish allows the backend, rather than being cut off as a 503.
   const fetchDeadlineAt = Date.now() + FETCH_DEADLINE_MS
 
   APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
@@ -65,7 +65,8 @@ async function handleAvatar(ctx: KoaContext) {
   // Unauthenticated `ignorecache` additionally bypassed the 300s Redis profile
   // cache (forcing a Hive RPC per request) and fired a Cloudflare purge for this
   // user on success, evicting a perfectly good cached avatar. Same gate as
-  // `invalidate`; neutralised rather than rejected.
+  // `invalidate`; neutralised rather than rejected, so the request resumes normal
+  // cache handling rather than being guaranteed a hit.
   if (ignorecache && !hasValidInvalidateKey(ctx)) {
     ctx.log.warn({username}, 'ignoring unauthenticated ignorecache')
     ignorecache = undefined

@@ -183,8 +183,8 @@ export async function proxyHandler(ctx: KoaContext) {
     ctx.tag({handler: 'proxy'})
     // One budget for every upstream fetch this request makes, including the
     // metadata re-walk. Keeps the origin's own worst case comfortably under the
-    // 60s Varnish allows the backend, so an exhausted chain ends as a placeholder
-    // instead of being cut off as a 503.
+    // 60s Varnish allows the backend, so an exhausted chain gets the chance to
+    // answer with a placeholder instead of being cut off as a 503.
     const fetchDeadlineAt = Date.now() + FETCH_DEADLINE_MS
 
     APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
@@ -197,8 +197,11 @@ export async function proxyHandler(ctx: KoaContext) {
     // variant and original, re-fetch upstream, re-decode, re-encode) but was
     // historically unauthenticated, so any anonymous caller could turn one cheap
     // cache hit into a full miss plus a mirror-chain walk. Honour it only for a
-    // caller holding the invalidate token; otherwise treat it as absent and serve
-    // from cache as normal. Neutralised rather than rejected so a stray benign
+    // caller holding the invalidate token; otherwise treat it as absent, so the
+    // request resumes normal cache handling. That is not a guaranteed cache hit:
+    // a genuine miss still fetches and renders, and Varnish passes these to the
+    // backend either way. What it removes is the ability to force a miss on a
+    // variant that IS cached. Neutralised rather than rejected so a stray benign
     // caller still gets its image.
     if (options.ignorecache && !hasValidInvalidateKey(ctx)) {
         ctx.log.warn({url: ctx.params.url}, 'ignoring unauthenticated ignorecache')
