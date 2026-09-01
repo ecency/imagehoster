@@ -31,9 +31,6 @@ import {
 } from './utils'
 
 const DefaultCover = config.get('default_cover') as string
-const INVALIDATE_TOKEN = config.has('invalidate_token')
-  ? config.get('invalidate_token') as string
-  : ''
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
 const COVER_WIDTH = 1344
@@ -73,9 +70,8 @@ async function handleCover(ctx: KoaContext) {
   }
   const shouldBypassCache = !!(ignorecache || invalidate)
   if (invalidate) {
-    const invalidateKey = ctx.get('x-invalidate-key')
     APIError.assert(
-      INVALIDATE_TOKEN && invalidateKey && invalidateKey === INVALIDATE_TOKEN,
+      hasValidInvalidateKey(ctx),
       { code: APIError.Code.Deplorable, message: 'Forbidden: invalid invalidate key' }
     )
   }

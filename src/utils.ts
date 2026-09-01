@@ -323,10 +323,15 @@ let purgeUnconfiguredWarned = false
 /**
  * True when the request carries the operator's invalidate token.
  *
- * Shared by the `invalidate` gate and the `ignorecache` gate: both force the same
- * expensive work (skip the stored variant, re-fetch upstream, re-decode, re-encode)
- * so they belong behind the same credential. Returns false when no token is
- * configured, so an unset `invalidate_token` fails closed.
+ * The single gate for both `invalidate` and `ignorecache`, in all three handlers.
+ * They force the same expensive work (skip the stored variant, re-fetch upstream,
+ * re-decode, re-encode) so they belong behind the same credential, and behind one
+ * implementation of it rather than three that can drift apart.
+ *
+ * An unset `invalidate_token` fails closed. The explicit check for that is belt
+ * and braces: the equality below already rejects everything when `configured` is
+ * empty, because an absent header fails `!!presented` and a present one can never
+ * equal ''. Kept because relying on that is too subtle for an auth boundary.
  */
 export function hasValidInvalidateKey(ctx: any): boolean {
     const configured = config.has('invalidate_token') ? config.get('invalidate_token') as string : ''

@@ -161,6 +161,23 @@ describe('proxy', function() {
             assert.equal(meta.format, 'jpeg')
         })
 
+        it('should reject invalidate without the invalidate key', async function() {
+            // The rejection path had no cover, so a refactor of the gate could not
+            // be caught. Deplorable maps to 403 in src/error.ts.
+            this.slow(1000)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit&invalidate=1`)
+            assert.equal(res.statusCode, 403)
+        })
+
+        it('should reject invalidate with a wrong invalidate key', async function() {
+            this.slow(1000)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit&invalidate=1`,
+                null, { headers: { 'x-invalidate-key': 'not-the-token' } })
+            assert.equal(res.statusCode, 403)
+        })
+
         it('should not remove esteem-legacy originals on invalidate', async function() {
             this.slow(1000)
             serveImage = false
