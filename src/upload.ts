@@ -75,20 +75,32 @@ const broadcasterPubKey: PublicKey | undefined = (() => {
     }
 })()
 
-/** True when `account` has granted `delegate` posting or active authority at full weight. */
-function hasDelegatedTo(account: HiveAccount, delegate: string): boolean {
-    for (const type of ['posting', 'active']) {
+type AuthorityType = 'posting' | 'active'
+
+/**
+ * Authority levels at which `account` has granted `delegate` enough weight to act
+ * alone.
+ *
+ * The level is returned rather than a boolean because a delegation is satisfied
+ * only by the delegate's authority at the SAME level. Collapsing the two lets an
+ * account that delegated only active authority be acted on with the delegate's
+ * posting key, which is the weaker and far more widely held of the two.
+ */
+function delegatedAuthorityTypes(account: HiveAccount, delegate: string): AuthorityType[] {
+    const types: AuthorityType[] = []
+    for (const type of ['posting', 'active'] as AuthorityType[]) {
         const authority: HiveAccountAuthority = account[type]
         if (!authority || !Array.isArray(authority.account_auths)) {
             continue
         }
         for (const [name, weight] of authority.account_auths) {
             if (name === delegate && weight >= authority.weight_threshold) {
-                return true
+                types.push(type)
+                break
             }
         }
     }
-    return false
+    return types
 }
 
 if (new URL('http://blä.se').toString() !== 'http://xn--bl-wia.se/') {
@@ -227,11 +239,17 @@ export async function uploadHsHandler(ctx: KoaContext) {
         //
         // Verifying against the delegate's own on-chain keys also survives a
         // rotation of the app key, which trusting app_posting_wif alone does not.
-        if (!validSignature && hasDelegatedTo(account, UPLOAD_LIMITS.app_account)) {
+        const delegatedTypes = validSignature
+            ? []
+            : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
+        if (delegatedTypes.length > 0) {
             const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
             if (appAccount) {
-                validSignature = authoritySignedBy(appAccount.posting, hash, parsedSignature)
-                    || authoritySignedBy(appAccount.active, hash, parsedSignature)
+                // Same authority level only: a posting delegation is not satisfied
+                // by the delegate's active key, and an active delegation is not
+                // satisfied by the delegate's weaker posting key.
+                validSignature = delegatedTypes.some(
+                    (type) => authoritySignedBy(appAccount[type], hash, parsedSignature))
             } else {
                 ctx.log.error({app: UPLOAD_LIMITS.app_account},
                     'could not load app account to verify a delegated token')
@@ -337,6 +355,16 @@ export async function uploadHandler(ctx: KoaContext) {
               .includes(signedMessage.type)
             && signedMessage.app
           ) {
+                // A token authenticates the account it names, and nothing else.
+                // Without this the app-signed branch below accepts a token minted
+                // for one account submitted under any other account's URL: the
+                // signature still verifies (it is the app's key), while the quota,
+                // reputation gate and attribution all use the URL account. The
+                // /hs/ handler has always asserted this; this path had not.
+                APIError.assert(
+                    String(tokenObj.authors[0]).toLowerCase() === account.name,
+                    APIError.Code.InvalidSignature,
+                )
                 const message = JSON.stringify({
                     signed_message: signedMessage,
                     authors: tokenObj.authors,
@@ -362,11 +390,14 @@ export async function uploadHandler(ctx: KoaContext) {
                     validSignature = authoritySignedBy(account.posting, hash, parsedSigns)
                         || authoritySignedBy(account.active, hash, parsedSigns)
                 }
-                if (!validSignature && hasDelegatedTo(account, UPLOAD_LIMITS.app_account)) {
+                const delegatedTypes = validSignature
+                    ? []
+                    : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
+                if (delegatedTypes.length > 0) {
                     const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
                     if (appAccount) {
-                        validSignature = authoritySignedBy(appAccount.posting, hash, parsedSigns)
-                            || authoritySignedBy(appAccount.active, hash, parsedSigns)
+                        validSignature = delegatedTypes.some(
+                            (type) => authoritySignedBy(appAccount[type], hash, parsedSigns))
                     }
                 }
             }

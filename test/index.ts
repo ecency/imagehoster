@@ -9,8 +9,14 @@ export const testKeys = {
     bar: PrivateKey.fromSeed('bar'),
     // The app account's own posting key, as it would appear on chain.
     app: PrivateKey.fromSeed('app'),
+    // The app account's ACTIVE key, distinct from its posting key, so tests can
+    // tell the two authority levels apart.
+    appActive: PrivateKey.fromSeed('app-active'),
     // A key nobody's posting/active authority accepts.
     stranger: PrivateKey.fromSeed('stranger'),
+    // The key in upload_limits.app_posting_wif. Distinct from the ecency.app
+    // on-chain keys above, modelling a rotated app key.
+    appConfigured: PrivateKey.fromSeed('app-configured'),
 }
 
 /** Matches upload_limits.app_account in config/default.toml. */
@@ -58,7 +64,23 @@ export const mockAccounts: any = {
         active: {
             weight_threshold: 1,
             account_auths: [],
-            key_auths: [[testKeys.app.createPublic().toString(), 1]]
+            key_auths: [[testKeys.appActive.createPublic().toString(), 1]]
+        }
+    },
+    // Delegated ACTIVE authority to the app but not posting. The app's weaker
+    // posting key must not satisfy that delegation.
+    hsactiveonly: {
+        name: 'hsactiveonly',
+        reputation: '10525900772718',
+        posting: {
+            weight_threshold: 1,
+            account_auths: [],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
+        },
+        active: {
+            weight_threshold: 1,
+            account_auths: [['ecency.app', 1]],
+            key_auths: [[testKeys.bar.createPublic().toString(), 1]]
         }
     },
     // Has delegated posting authority to the app account, which is the shape that
@@ -209,6 +231,12 @@ export const mockProfiles: any = {
         id: 21, post_count: 10, reputation: 50, blacklists: [],
         stats: { followers: 1, following: 1, rank: 0 },
         metadata: { profile: { name: 'HS Plain' } }
+    },
+    hsactiveonly: {
+        name: 'hsactiveonly', active: '2024-01-01T00:00:00', created: '2016-01-01T00:00:00',
+        id: 22, post_count: 10, reputation: 50, blacklists: [],
+        stats: { followers: 1, following: 1, rank: 0 },
+        metadata: { profile: { name: 'HS Active Only' } }
     },
     // bridge returns an empty avatar/cover — these live only in legacy json_metadata.
     legacyonly: {

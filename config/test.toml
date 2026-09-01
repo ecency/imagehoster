@@ -27,3 +27,12 @@ type = 'memory'
 
 [proxy_store]
 type = 'memory'
+
+# Deterministic throwaway key (PrivateKey.fromSeed('app-configured')), NOT a real
+# credential. Deliberately different from the ecency.app on-chain keys in the test
+# fixtures, which models a rotated app key: the configured key still authenticates
+# tokens we minted, while the delegation path verifies against current chain state.
+# Without this set, PrivateKey.fromString('') throws and the whole app-signature
+# branch is unreachable, so its tests would pass for the wrong reason.
+[upload_limits]
+app_posting_wif = '5JUqNo9okJuj2yqF4d1odFBw3rX8g9hPXy9SQHiC9vSsvGG7F3E'

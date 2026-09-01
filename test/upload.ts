@@ -232,7 +232,92 @@ describe('hivesigner upload auth', function() {
         assert.equal(response.statusCode, 404)
     })
 
+    it('rejects an app-signed token when the account delegated only ACTIVE and the app signed with posting', async function() {
+        // A delegation is satisfied only by the delegate's authority at the SAME
+        // level. Collapsing the two let the app's weaker, far more widely held
+        // posting key stand in for an active-authority delegation.
+        this.slow(1000)
+        const token = makeHsToken({author: 'hsactiveonly', signer: testKeys.app})
+        const {response} = await uploadWithHsToken(data, port, token)
+        assert.equal(response.statusCode, 400)
+    })
+
+    it('accepts an app-signed token when the account delegated ACTIVE and the app signed with its active key', async function() {
+        this.slow(1000)
+        const token = makeHsToken({author: 'hsactiveonly', signer: testKeys.appActive})
+        const {response} = await uploadWithHsToken(data, port, token)
+        assert.equal(response.statusCode, 200)
+    })
+
+    it('rejects an app active-key signature against a posting-only delegation', async function() {
+        this.slow(1000)
+        const token = makeHsToken({author: 'hsdelegator', signer: testKeys.appActive})
+        const {response} = await uploadWithHsToken(data, port, token)
+        assert.equal(response.statusCode, 400)
+    })
+
     it('keeps APP_ACCOUNT aligned with the delegation fixture', function() {
         assert.equal(APP_ACCOUNT, 'ecency.app')
+    })
+})
+
+
+async function uploadWithHiveSigParam(data: Buffer, port: number, username: string, token: string) {
+    return new Promise<any>((resolve, reject) => {
+        const payload = {
+            image_file: {filename: 'test.jpg', buffer: data, content_type: 'image/jpeg'},
+        }
+        const sig = encodeURIComponent(`hive${ token }`)
+        needle.post(`:${ port }/${ username }/${ sig }`, payload, {multipart: true}, (error, response, body) => {
+            if (error) { reject(error) } else { resolve({response, body}) }
+        })
+    })
+}
+
+/** Same token, but base64 rather than base64url: this path decodes it directly. */
+function makeHiveParamToken(opts: {author: string, signer: any}) {
+    const signedMessage = {type: 'posting', app: 'ecency.app'}
+    const authors = [opts.author]
+    const timestamp = 1700000000
+    const message = JSON.stringify({signed_message: signedMessage, authors, timestamp})
+    const hash = crypto.createHash('sha256').update(message).digest()
+    const signature = opts.signer.sign(Buffer.from(hash)).toString()
+    return Buffer.from(JSON.stringify({signed_message: signedMessage, authors, timestamp, signatures: [signature]}))
+        .toString('base64')
+}
+
+describe('hivesigner token replay via the username path', function() {
+    const port = 63208
+    const server = http.createServer(app.callback())
+    let data: Buffer
+
+    before((done) => {
+        data = fs.readFileSync(path.resolve(__dirname, 'test.jpg'))
+        server.listen(port, 'localhost', done)
+    })
+    after((done) => { server.close(done) })
+
+    it('rejects a token whose author does not match the username in the URL', async function() {
+        // The app signature verifies (it is genuinely the app's key), so without
+        // an author/account check the upload would be accepted and attributed to
+        // the URL account, spending their quota and their abuse-report standing.
+        this.slow(1000)
+        const token = makeHiveParamToken({author: 'hsdelegator', signer: testKeys.appConfigured})
+        const {response} = await uploadWithHiveSigParam(data, port, 'hsplain', token)
+        assert.equal(response.statusCode, 400)
+    })
+
+    it('rejects a self-signed token replayed under another username', async function() {
+        this.slow(1000)
+        const token = makeHiveParamToken({author: 'hsplain', signer: testKeys.bar})
+        const {response} = await uploadWithHiveSigParam(data, port, 'hsdelegator', token)
+        assert.equal(response.statusCode, 400)
+    })
+
+    it('still accepts a token whose author matches the username', async function() {
+        this.slow(1000)
+        const token = makeHiveParamToken({author: 'hsplain', signer: testKeys.bar})
+        const {response} = await uploadWithHiveSigParam(data, port, 'hsplain', token)
+        assert.equal(response.statusCode, 200)
     })
 })
