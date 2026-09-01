@@ -161,6 +161,23 @@ describe('proxy', function() {
             assert.equal(meta.format, 'jpeg')
         })
 
+        it('should reject invalidate without the invalidate key', async function() {
+            // The rejection path had no cover, so a refactor of the gate could not
+            // be caught. Deplorable maps to 403 in src/error.ts.
+            this.slow(1000)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit&invalidate=1`)
+            assert.equal(res.statusCode, 403)
+        })
+
+        it('should reject invalidate with a wrong invalidate key', async function() {
+            this.slow(1000)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(esteemUrl) }?width=100&mode=fit&invalidate=1`,
+                null, { headers: { 'x-invalidate-key': 'not-the-token' } })
+            assert.equal(res.statusCode, 403)
+        })
+
         it('should not remove esteem-legacy originals on invalidate', async function() {
             this.slow(1000)
             serveImage = false
@@ -215,10 +232,56 @@ describe('proxy', function() {
                 createHash('sha1').update(u).digest(), 'sha1'
             ))
             await storeWrite(uploadStore, k, fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
-            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(u) }?width=90&mode=fit&ignorecache=1`)
+            // Authenticated: an unauthenticated ignorecache is now inert, so without
+            // the header this would still pass but would no longer exercise a bypass.
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(u) }?width=90&mode=fit&ignorecache=1`,
+                null, { headers: { 'x-invalidate-key': 'test-invalidate-token' } })
             const meta = await sharp(res.body).metadata()
             assert.equal(meta.width, 90)
             assert((await storeExists(uploadStore, k)) === true, 'archive object must survive ignorecache')
+        })
+
+        it('should ignore an unauthenticated ignorecache and serve the cached variant', async function() {
+            // ignorecache forces the same work as invalidate: skip the stored variant,
+            // re-fetch upstream, re-decode, re-encode. Anonymous callers must not be
+            // able to turn one cheap cache hit into a full miss.
+            this.slow(1000)
+            const u = `http://localhost:${ port+2 }/unauth-ignorecache.jpg`
+            const origKey = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(u).digest(), 'sha1'
+            ))
+            // Prime BOTH the original and the rendered variant, then point the source
+            // at a path the local test server does not serve: if the gate leaks, the
+            // handler refetches and the request cannot succeed from cache.
+            const variantKey = `${ origKey }_120x0`
+            const primed = await sharp(fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+                .resize(120, null, { fit: 'inside' }).jpeg().toBuffer()
+            await storeWrite(proxyStore, variantKey, primed)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(u) }?width=120&mode=fit&ignorecache=1`)
+            assert.equal(res.statusCode, 200)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 120, 'must have been served from the primed variant')
+        })
+
+        it('should honour ignorecache when the invalidate key is presented', async function() {
+            this.slow(1000)
+            const u = `http://localhost:${ port+2 }/auth-ignorecache.jpg`
+            const origKey = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(u).digest(), 'sha1'
+            ))
+            // A primed variant at the WRONG size: an honoured bypass must skip it and
+            // re-render from the real source, so the served width proves the bypass ran.
+            const variantKey = `${ origKey }_130x0`
+            const wrong = await sharp(fs.readFileSync(path.resolve(__dirname, 'test.jpg')))
+                .resize(40, null, { fit: 'inside' }).jpeg().toBuffer()
+            await storeWrite(proxyStore, variantKey, wrong)
+            const res = await needle('get',
+                `http://localhost:${ port }/p/${ base58Enc(u) }?width=130&mode=fit&ignorecache=1`,
+                null, { headers: { 'x-invalidate-key': 'test-invalidate-token' } })
+            assert.equal(res.statusCode, 200)
+            const meta = await sharp(res.body).metadata()
+            assert.equal(meta.width, 130, 'authenticated bypass must re-render, not serve the stale variant')
         })
 
         it('should keep archive objects that fail sharp metadata extraction', async function() {

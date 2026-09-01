@@ -124,7 +124,7 @@ GET /p/:url?width=W&height=H&mode=M&format=F
   - `jpeg`, `png`, `webp`, `avif` - Force specific format
 
 **Cache Control:**
-- `ignorecache=1` - Bypass cache for this request
+- `ignorecache=1` - Force a refetch and re-render of this variant. Requires header `X-Invalidate-Key` matching `invalidate_token`; without it the parameter is dropped and the request is handled normally (which may still be a cache miss).
 - `invalidate=1` - Purge cache and refetch
   - Requires header `X-Invalidate-Key` matching configured `invalidate_token`
 

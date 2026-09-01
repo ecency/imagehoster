@@ -126,3 +126,8 @@ max_custom_image_height = 2000
 # [retention_store]
 # type = 's3'
 # s3_bucket = 'eretention'
+
+# Wall-clock budget for the whole upstream fetch chain of one request, in ms.
+# Must stay well under Varnish's 60s backend first_byte_timeout so an exhausted
+# mirror walk can attempt the placeholder rather than being cut off as a 503.
+#fetch_deadline_ms = 25000
