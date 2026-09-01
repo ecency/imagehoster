@@ -371,6 +371,35 @@ export function hasValidInvalidateKey(ctx: any): boolean {
     return !!presented && presented === configured
 }
 
+/**
+ * A form of a user-supplied URL that is safe to write to a log.
+ *
+ * Source URLs come from post bodies, so their query strings are attacker-chosen
+ * and sometimes carry credentials: sampling 2,000 live /p/ tokens found 2% with
+ * a query string and two carrying real access tokens (a Firebase Storage
+ * `token`, a googleusercontent `key`). Logging those verbatim writes working
+ * credentials into the log stream and anything downstream of it, which is the
+ * same class of mistake as the upload token that once reached Sentry.
+ *
+ * Origin and path are kept because that is what identifies the image during
+ * triage. The query is replaced by a count so its presence is still visible.
+ * Anything unparseable is truncated rather than passed through, since a string
+ * that is not a URL is exactly the case where assumptions are least safe.
+ */
+export function redactUrlForLog(value: string | undefined | null): string {
+    if (!value) {
+        return ''
+    }
+    let parsed: URL
+    try {
+        parsed = new URL(value)
+    } catch (cause) {
+        return value.slice(0, 120)
+    }
+    const params = [...parsed.searchParams.keys()].length
+    return `${parsed.origin}${parsed.pathname}` + (params > 0 ? `?<${params} param(s) redacted>` : '')
+}
+
 export function purgeCache(value: string | string[]) {
     if (!config.has('cloudflare_token') || !config.has('cloudflare_zone')) {
         // Warn once rather than per call: a missing config is otherwise

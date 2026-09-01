@@ -12,7 +12,7 @@ import {
     FETCH_READ_TIMEOUT_MS,
     FETCH_RESPONSE_TIMEOUT_MS,
 } from './constants'
-import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse } from './utils'
+import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse, redactUrlForLog } from './utils'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
@@ -235,9 +235,9 @@ export async function fetchImageWithFallbacks(
         // Covers the avatar/cover paths, which have no pre-cache blacklist gate of
         // their own. Fall through to the default image without touching upstream
         // and without negative-caching the URL as dead.
-        ctxLog.warn({ urlString }, 'Skipping mirror chain for blacklisted URL or domain')
+        ctxLog.warn({ urlString: redactUrlForLog(urlString) }, 'Skipping mirror chain for blacklisted URL or domain')
     } else if (!options.skipNegativeCache && await isKnownDeadUrl(urlString)) {
-        ctxLog.info({ urlString }, 'Skipping mirror chain for recently failed URL')
+        ctxLog.info({ urlString: redactUrlForLog(urlString) }, 'Skipping mirror chain for recently failed URL')
     } else {
         let sawTransientFailure = false
         let chainAborted = false
@@ -254,23 +254,23 @@ export async function fetchImageWithFallbacks(
         for (const candidate of urls) {
             if (remainingMs() < FETCH_MIN_REMAINING_MS) {
                 deadlineHit = true
-                ctxLog.warn({ urlString, attempted }, 'Fetch deadline reached, stopping mirror walk')
+                ctxLog.warn({ urlString: redactUrlForLog(urlString), attempted }, 'Fetch deadline reached, stopping mirror walk')
                 break
             }
             if (isBlacklistedUrl(candidate)) {
-                ctxLog.warn({ candidate }, 'Skipping blacklisted URL in fallback chain')
+                ctxLog.warn({ candidate: redactUrlForLog(candidate) }, 'Skipping blacklisted URL in fallback chain')
                 continue
             }
             if (process.env.NODE_ENV !== 'test') {
                 try {
                     assertPublicUrl(new URL(candidate))
                 } catch (e) {
-                    ctxLog.warn({ candidate }, 'Skipping private URL in fallback chain')
+                    ctxLog.warn({ candidate: redactUrlForLog(candidate) }, 'Skipping private URL in fallback chain')
                     continue
                 }
             }
             try {
-                ctxLog.info({ candidate }, 'Trying fallback fetch')
+                ctxLog.info({ candidate: redactUrlForLog(candidate) }, 'Trying fallback fetch')
                 attempted++
                 // Phase timers are re-armed per redirect leg, so they cannot bound a
                 // candidate on their own. The signal spans every hop because
@@ -290,7 +290,7 @@ export async function fetchImageWithFallbacks(
                     Math.floor(res.statusCode / 100) === 2 &&
                     Buffer.isBuffer(res.body)
                 ) {
-                    ctxLog.info({ candidate }, 'Fetch succeeded')
+                    ctxLog.info({ candidate: redactUrlForLog(candidate) }, 'Fetch succeeded')
                     // A bypassed re-fetch (e.g. invalidate) may have proven a
                     // negatively cached URL alive again — drop the stale entry
                     await clearDeadUrl(urlString)
@@ -300,20 +300,20 @@ export async function fetchImageWithFallbacks(
                 if (candidate !== speculativeHttpsUrl && !isTerminalStatus(res && res.statusCode)) {
                     sawTransientFailure = true
                 }
-                ctxLog.warn({ candidate, code: res && res.statusCode }, 'Fetch failed status')
+                ctxLog.warn({ candidate: redactUrlForLog(candidate), code: res && res.statusCode }, 'Fetch failed status')
             } catch (e) {
                 if (e instanceof FallbackChainAbortError) {
                     // Abandon the chain entirely — handing the same URL to the
                     // public mirrors would just have THEM follow the redirects
                     // further than we were willing to
-                    ctxLog.warn({ candidate, reason: (e as Error).name }, 'Abandoning mirror chain')
+                    ctxLog.warn({ candidate: redactUrlForLog(candidate), reason: (e as Error).name }, 'Abandoning mirror chain')
                     chainAborted = true
                     break
                 }
                 if (candidate !== speculativeHttpsUrl && !isTerminalError(e)) {
                     sawTransientFailure = true
                 }
-                ctxLog.error(e, `Fetch error at ${candidate}`)
+                ctxLog.error(e, `Fetch error at ${redactUrlForLog(candidate)}`)
             }
         }
         if (!chainAborted && attempted > 0) {
@@ -329,7 +329,7 @@ export async function fetchImageWithFallbacks(
             const transient = sawTransientFailure || deadlineHit
             const ttl = transient ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
             ctxLog.warn(
-                { urlString, ttl, transient, attempted, deadlineHit, elapsedMs: Date.now() - walkStart },
+                { urlString: redactUrlForLog(urlString), ttl, transient, attempted, deadlineHit, elapsedMs: Date.now() - walkStart },
                 'Negative-caching exhausted URL')
             await markDeadUrl(urlString, ttl)
         }

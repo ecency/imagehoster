@@ -28,6 +28,7 @@ import {
     isInternalUploadUrl,
     ScalingMode,
     OutputFormat,
+    redactUrlForLog,
     storeRemoveByPrefix,
     storeWrite,
     expandPurgeUrls,
@@ -1001,5 +1002,48 @@ describe('expandPurgeUrls', function() {
 
     it('returns an empty list for empty input', function() {
         assert.deepEqual(expandPurgeUrls([]), [])
+    })
+})
+
+describe('redactUrlForLog', function() {
+    // Source URLs come from post bodies, so their query strings are attacker-chosen.
+    // Sampling 2,000 live /p/ tokens found 2% carrying a query string and two
+    // carrying real credentials, so these must never reach the log stream verbatim.
+
+    it('strips a Firebase Storage download token', function() {
+        const out = redactUrlForLog(
+            'https://firebasestorage.googleapis.com/v0/b/x.appspot.com/o/i.jpg?alt=media&token=8f3a-secret')
+        assert(!out.includes('8f3a-secret'), 'token must not survive')
+        assert(!out.includes('token='), 'param names must not survive either')
+        assert(out.startsWith('https://firebasestorage.googleapis.com/v0/b/x.appspot.com/o/i.jpg'))
+    })
+
+    it('keeps origin and path, which is what identifies the image', function() {
+        assert.equal(
+            redactUrlForLog('https://images.hive.blog/p/2bP4pJr4wVimqCWjYimXJe2cnCgn7xgWFC3wnAKkdCa'),
+            'https://images.hive.blog/p/2bP4pJr4wVimqCWjYimXJe2cnCgn7xgWFC3wnAKkdCa')
+    })
+
+    it('records that a query existed, and how many params, without their values', function() {
+        const out = redactUrlForLog('https://example.com/a.jpg?w=100&t=abc&key=secret')
+        assert.equal(out, 'https://example.com/a.jpg?<3 param(s) redacted>')
+    })
+
+    it('redacts the wrapped URL in a mirror candidate too', function() {
+        const out = redactUrlForLog('https://wsrv.nl/?url=https%3A%2F%2Fexample.com%2Fa.jpg%3Ftoken%3Dsecret')
+        assert(!out.includes('secret'), 'a token wrapped inside a mirror URL must not survive')
+        assert(out.startsWith('https://wsrv.nl/'))
+    })
+
+    it('truncates rather than passing through something that is not a URL', function() {
+        const long = 'x'.repeat(500)
+        const out = redactUrlForLog(long)
+        assert(out.length <= 120, `expected truncation, got ${ out.length }`)
+    })
+
+    it('handles empty and missing input without throwing', function() {
+        assert.equal(redactUrlForLog(''), '')
+        assert.equal(redactUrlForLog(undefined), '')
+        assert.equal(redactUrlForLog(null), '')
     })
 })

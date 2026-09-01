@@ -226,7 +226,8 @@ describe('proxy', function() {
         })
 
         it('should serve rescued originals even with ignorecache (archive is origin, not cache)', async function() {
-            this.slow(1000)
+            this.timeout(15000)
+            this.slow(2000)
             const u = `http://localhost:${ port+2 }/ignorecache-test.jpg`
             const k = 'U' + multihash.toB58String(multihash.encode(
                 createHash('sha1').update(u).digest(), 'sha1'
@@ -265,7 +266,11 @@ describe('proxy', function() {
         })
 
         it('should honour ignorecache when the invalidate key is presented', async function() {
-            this.slow(1000)
+            // An honoured bypass does a real upstream fetch plus a re-render, which
+            // runs ~1-2s alone and occasionally crosses mocha's 2s default under
+            // full-suite load. slow() only affects reporting, not the deadline.
+            this.timeout(15000)
+            this.slow(2000)
             const u = `http://localhost:${ port+2 }/auth-ignorecache.jpg`
             const origKey = 'U' + multihash.toB58String(multihash.encode(
                 createHash('sha1').update(u).digest(), 'sha1'
