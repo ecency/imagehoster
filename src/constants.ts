@@ -141,3 +141,58 @@ export function applyUrlReplacements(urlString: string): string {
 
     return result
 }
+
+/**
+ * Wall-clock budget for the whole upstream fetch chain of one request.
+ *
+ * A proxy miss can walk up to eight mirror candidates, and each candidate used to
+ * get the full 10s for every phase, so a request against a dead-but-listening
+ * origin could spend well over a minute upstream. Varnish gives the backend 60s
+ * (the VCL sets no first_byte_timeout, so its default applies) and Cloudflare 100s,
+ * so the origin's own budget exceeded the one its caller was willing to wait: the
+ * request was cut off as a 503 rather than finishing as a placeholder. That
+ * inversion is the likeliest source of the standing 1.0% 503 rate.
+ *
+ * 25s leaves room for the reserved default-image fetch, a metadata re-walk and a
+ * worst-case encode while staying comfortably under 60s.
+ *
+ * Retune without a rebuild by restarting with
+ * NODE_CONFIG='{"fetch_deadline_ms":40000}': config/ is baked into the image, so
+ * editing a toml on the box does nothing unless it is mounted.
+ */
+export const FETCH_DEADLINE_MS = (() => {
+    if (!config.has('fetch_deadline_ms')) { return 25000 }
+    const v = Number(config.get('fetch_deadline_ms'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 25000
+})()
+
+/**
+ * Per-candidate phase timeouts.
+ *
+ * needle arms these as separate serial phases and re-arms them per redirect leg,
+ * so the phase values alone do not bound a candidate. FETCH_CANDIDATE_WALL_MS is
+ * the actual per-candidate ceiling, enforced with an AbortSignal that spans every
+ * hop. Connect is the cheapest signal that an origin is gone, so it gets the
+ * shortest leash; read gets the longest because a slow-but-alive origin streaming
+ * a large image should still succeed.
+ */
+export const FETCH_OPEN_TIMEOUT_MS = 4000
+export const FETCH_RESPONSE_TIMEOUT_MS = 8000
+export const FETCH_READ_TIMEOUT_MS = 10000
+export const FETCH_CANDIDATE_WALL_MS = 12000
+
+/** Below this much remaining budget, starting another candidate cannot finish. */
+export const FETCH_MIN_REMAINING_MS = 1500
+
+/**
+ * The default-image fetch is deliberately NOT clamped by the deadline.
+ *
+ * It is the escape hatch that turns an exhausted chain into a 200 placeholder
+ * instead of an error, so it must still run when the budget is already blown.
+ * It is bounded separately and tightly because it loops back through this
+ * service's own Cloudflare-nginx-Varnish stack.
+ */
+export const FETCH_DEFAULT_OPEN_MS = 2000
+export const FETCH_DEFAULT_RESPONSE_MS = 3000
+export const FETCH_DEFAULT_READ_MS = 3000
+export const FETCH_DEFAULT_WALL_MS = 5000

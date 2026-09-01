@@ -1,6 +1,17 @@
 import { URL } from 'url'
 import { redisDel, redisGet, redisSet } from './common'
 import { captureImageFailure } from './sentry'
+import {
+    FETCH_CANDIDATE_WALL_MS,
+    FETCH_DEFAULT_OPEN_MS,
+    FETCH_DEFAULT_READ_MS,
+    FETCH_DEFAULT_RESPONSE_MS,
+    FETCH_DEFAULT_WALL_MS,
+    FETCH_MIN_REMAINING_MS,
+    FETCH_OPEN_TIMEOUT_MS,
+    FETCH_READ_TIMEOUT_MS,
+    FETCH_RESPONSE_TIMEOUT_MS,
+} from './constants'
 import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse } from './utils'
 
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
@@ -198,10 +209,23 @@ export async function fetchImageWithFallbacks(
     userAgent: string,
     defaultUrl: string,
     ctxLog: any,
-    options: { timeout?: number; skipUrls?: string[]; skipNegativeCache?: boolean } = {}
+    options: {
+        timeout?: number
+        skipUrls?: string[]
+        skipNegativeCache?: boolean
+        deadlineAt?: number
+    } = {}
 ): Promise<{ res: NeedleResponse; isFallback: boolean }> {
-    const timeout = options.timeout !== undefined && options.timeout !== null ? options.timeout : 10000
     const skipUrls = (options.skipUrls !== undefined && options.skipUrls !== null) ? options.skipUrls : []
+    // No deadline means no budget, which keeps every existing caller and the whole
+    // test suite on their current behaviour.
+    const remainingMs = () => options.deadlineAt === undefined ? Infinity : options.deadlineAt - Date.now()
+    // needle treats a timeout of <= 0 as "no timer", the exact opposite of what a
+    // blown budget means, so never let a clamp reach zero.
+    const clamped = (ms: number) => Math.max(1, Math.min(ms, remainingMs()))
+    // An explicit timeout still wins over the split defaults: the tests rely on it.
+    const explicitTimeout = options.timeout !== undefined && options.timeout !== null ? options.timeout : undefined
+    const phase = (fallback: number) => clamped(explicitTimeout !== undefined ? explicitTimeout : fallback)
 
     const urls = buildFallbackUrls(urlString, urlParams).filter((url) => {
         return !skipUrls.includes(url.trim())
@@ -217,6 +241,9 @@ export async function fetchImageWithFallbacks(
     } else {
         let sawTransientFailure = false
         let chainAborted = false
+        let deadlineHit = false
+        let attempted = 0
+        const walkStart = Date.now()
         // The HTTPS upgrade is an opportunistic probe: an origin that serves
         // plain HTTP will refuse it, and that tells us nothing about whether the
         // image exists. Only real answers count toward the terminal/transient
@@ -225,6 +252,11 @@ export async function fetchImageWithFallbacks(
             ? urlString.replace('http://', 'https://')
             : null
         for (const candidate of urls) {
+            if (remainingMs() < FETCH_MIN_REMAINING_MS) {
+                deadlineHit = true
+                ctxLog.warn({ urlString, attempted }, 'Fetch deadline reached, stopping mirror walk')
+                break
+            }
             if (isBlacklistedUrl(candidate)) {
                 ctxLog.warn({ candidate }, 'Skipping blacklisted URL in fallback chain')
                 continue
@@ -239,12 +271,17 @@ export async function fetchImageWithFallbacks(
             }
             try {
                 ctxLog.info({ candidate }, 'Trying fallback fetch')
+                attempted++
+                // Phase timers are re-armed per redirect leg, so they cannot bound a
+                // candidate on their own. The signal spans every hop because
+                // fetchWithGuardedRedirects spreads these opts into each one.
                 const res = await fetchWithGuardedRedirects(candidate, {
                     parse_response: false,
-                    open_timeout: timeout,
-                    response_timeout: timeout,
-                    read_timeout: timeout,
+                    open_timeout: phase(FETCH_OPEN_TIMEOUT_MS),
+                    response_timeout: phase(FETCH_RESPONSE_TIMEOUT_MS),
+                    read_timeout: phase(FETCH_READ_TIMEOUT_MS),
                     user_agent: userAgent,
+                    signal: AbortSignal.timeout(clamped(FETCH_CANDIDATE_WALL_MS)),
                 })
 
                 if (
@@ -279,14 +316,21 @@ export async function fetchImageWithFallbacks(
                 ctxLog.error(e, `Fetch error at ${candidate}`)
             }
         }
-        if (!chainAborted) {
+        if (!chainAborted && attempted > 0) {
             // Only a chain that failed terminally at every hop is remembered for the
             // full TTL; if any hop merely timed out or errored, keep it brief.
             // An aborted chain is NOT negative-cached: a blacklist block has its
             // own lifetime, and a redirect-limit abort is a policy refusal, not
             // evidence the URL is dead.
-            const ttl = sawTransientFailure ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
-            ctxLog.info({ urlString, ttl, transient: sawTransientFailure }, 'Negative-caching exhausted URL')
+            // A walk cut short by the deadline learned nothing conclusive, so it
+            // only ever earns the short TTL. warn, not info: production runs at
+            // log_level=warn, and this line is the telemetry that says whether the
+            // budget is set right.
+            const transient = sawTransientFailure || deadlineHit
+            const ttl = transient ? NEGATIVE_TTL_TRANSIENT_SECONDS : NEGATIVE_TTL_SECONDS
+            ctxLog.warn(
+                { urlString, ttl, transient, attempted, deadlineHit, elapsedMs: Date.now() - walkStart },
+                'Negative-caching exhausted URL')
             await markDeadUrl(urlString, ttl)
         }
     }
@@ -294,12 +338,17 @@ export async function fetchImageWithFallbacks(
     // Final fallback: default image (avatar or cover)
     try {
         ctxLog.info('Trying final fallback: default image')
+        // Deliberately NOT clamped by the deadline: this is the escape hatch that
+        // turns an exhausted chain into a 200 placeholder instead of an error, so it
+        // must still run when the budget is already blown. Bounded tightly on its
+        // own because it loops back through this service's own edge stack.
         const def = await fetchWithGuardedRedirects(defaultUrl, {
             parse_response: false,
-            open_timeout: timeout,
-            response_timeout: timeout,
-            read_timeout: timeout,
+            open_timeout: explicitTimeout !== undefined ? explicitTimeout : FETCH_DEFAULT_OPEN_MS,
+            response_timeout: explicitTimeout !== undefined ? explicitTimeout : FETCH_DEFAULT_RESPONSE_MS,
+            read_timeout: explicitTimeout !== undefined ? explicitTimeout : FETCH_DEFAULT_READ_MS,
             user_agent: userAgent,
+            signal: AbortSignal.timeout(FETCH_DEFAULT_WALL_MS),
         })
 
         if (

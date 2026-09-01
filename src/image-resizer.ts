@@ -27,6 +27,8 @@ export async function resizeImageWithOptions(
     // passed through — far cheaper to decode/store and it keeps large animated
     // GIFs out of worker memory.
     forceStill: boolean = false,
+    // Wall-clock budget for any upstream re-fetch this resize triggers.
+    deadlineAt?: number,
 ): Promise<{ buffer: Buffer; contentType: string; isFallback: boolean }> {
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
 
@@ -34,7 +36,7 @@ export async function resizeImageWithOptions(
     let isFallback = false
     try {
         const { metadata, buffer, isFallback: fallbackUsed } = await import('./utils').then((mod) =>
-            mod.getSharpMetadataWithRetry(origData, urlString, urlParams, userAgent, fallbackUrl, logger)
+            mod.getSharpMetadataWithRetry(origData, urlString, urlParams, userAgent, fallbackUrl, logger, deadlineAt)
         )
         meta = metadata
         isFallback = fallbackUsed
