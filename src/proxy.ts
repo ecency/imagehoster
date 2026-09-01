@@ -9,7 +9,18 @@ import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
-import { AVIF_EFFORT, EMPTY_IMAGE_URL_PATTERNS, applyUrlReplacements, MAX_CACHED_ORIGINAL_SIZE, MAX_INPUT_PIXELS } from './constants'
+import {
+    AVIF_EFFORT,
+    EMPTY_IMAGE_URL_PATTERNS,
+    applyUrlReplacements,
+    FETCH_DEADLINE_MS,
+    FETCH_DEFAULT_OPEN_MS,
+    FETCH_DEFAULT_READ_MS,
+    FETCH_DEFAULT_RESPONSE_MS,
+    FETCH_DEFAULT_WALL_MS,
+    MAX_CACHED_ORIGINAL_SIZE,
+    MAX_INPUT_PIXELS,
+} from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
@@ -25,6 +36,7 @@ import {
     getImageKey,
     getProxyImageLimits,
     getSharpMetadataWithRetry,
+    hasValidInvalidateKey,
     isBlacklistedUrl,
     mimeMagic,
     needsMatchFallback,
@@ -169,6 +181,11 @@ async function convertCachedMatchVariant(
 
 export async function proxyHandler(ctx: KoaContext) {
     ctx.tag({handler: 'proxy'})
+    // One budget for every upstream fetch this request makes, including the
+    // metadata re-walk. Keeps the origin's own worst case comfortably under the
+    // 60s Varnish allows the backend, so an exhausted chain ends as a placeholder
+    // instead of being cut off as a 503.
+    const fetchDeadlineAt = Date.now() + FETCH_DEADLINE_MS
 
     APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
     APIError.assertParams(ctx.params, ['url'])
@@ -176,6 +193,17 @@ export async function proxyHandler(ctx: KoaContext) {
     const acceptHeader = ctx.get('accept') || ''
     const isLegacy = ctx.query['_src'] === 'legacy'
     const options = parseOptions(ctx.query, acceptHeader)
+    // `ignorecache` forces the same expensive path as `invalidate` (skip the stored
+    // variant and original, re-fetch upstream, re-decode, re-encode) but was
+    // historically unauthenticated, so any anonymous caller could turn one cheap
+    // cache hit into a full miss plus a mirror-chain walk. Honour it only for a
+    // caller holding the invalidate token; otherwise treat it as absent and serve
+    // from cache as normal. Neutralised rather than rejected so a stray benign
+    // caller still gets its image.
+    if (options.ignorecache && !hasValidInvalidateKey(ctx)) {
+        ctx.log.warn({url: ctx.params.url}, 'ignoring unauthenticated ignorecache')
+        options.ignorecache = undefined
+    }
     const shouldBypassCache = !!(options.ignorecache || options.invalidate)
     if (options.invalidate) {
         const invalidateKey = ctx.get('x-invalidate-key')
@@ -449,7 +477,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
                 DefaultAvatar,
                 ctx.log,
-                { skipNegativeCache: !!options.invalidate }
+                { skipNegativeCache: !!options.invalidate, deadlineAt: fetchDeadlineAt }
             )
             res = result.res
             if (result.isFallback) { isDefaultImage = true }
@@ -480,7 +508,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
                 DefaultAvatar,
                 ctx.log,
-                { skipNegativeCache: !!options.invalidate }
+                { skipNegativeCache: !!options.invalidate, deadlineAt: fetchDeadlineAt }
             )
             res = result.res
             isDefaultImage = result.isFallback
@@ -497,11 +525,18 @@ export async function proxyHandler(ctx: KoaContext) {
         if (!AcceptedContentTypes.includes(contentType)) {
             ctx.log.error({ url: urlString, type: contentType }, 'Unsupported content type, defaulted')
             captureImageFailure('unsupported_content_type', ctx, { urlString, contentType })
+            // needle leaves response/read timeouts disabled by default, so this
+            // could hang indefinitely, and it loops back through this service's own
+            // edge stack to fetch it.
             const fallbackRes = await fetchUrl(DefaultAvatar, {
                 parse_response: false,
                 follow_max: 3,
                 user_agent: 'EcencyProxy/1.0',
-            })
+                open_timeout: FETCH_DEFAULT_OPEN_MS,
+                response_timeout: FETCH_DEFAULT_RESPONSE_MS,
+                read_timeout: FETCH_DEFAULT_READ_MS,
+                signal: AbortSignal.timeout(FETCH_DEFAULT_WALL_MS),
+            } as any)
             const fallbackBuffer = fallbackRes.body
             isDefaultImage = true
             return await serveOrBuildFallbackImage(
@@ -550,7 +585,8 @@ export async function proxyHandler(ctx: KoaContext) {
                 urlParams,
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
                 DefaultAvatar,
-                ctx.log
+                ctx.log,
+                fetchDeadlineAt
             )
             metadata = metaResult.metadata
             origData = metaResult.buffer
@@ -578,7 +614,11 @@ export async function proxyHandler(ctx: KoaContext) {
                 }
                 const fallbackRes = await fetchUrl(DefaultAvatar, {
                     parse_response: false, follow_max: 3, user_agent: 'EcencyProxy/1.0',
-                })
+                    open_timeout: FETCH_DEFAULT_OPEN_MS,
+                    response_timeout: FETCH_DEFAULT_RESPONSE_MS,
+                    read_timeout: FETCH_DEFAULT_READ_MS,
+                    signal: AbortSignal.timeout(FETCH_DEFAULT_WALL_MS),
+                } as any)
                 return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
                 })

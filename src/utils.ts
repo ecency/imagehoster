@@ -184,7 +184,10 @@ export async function getSharpMetadataWithRetry(
     urlParams: string,
     userAgent: string,
     fallbackUrl: string,
-    logger: any
+    logger: any,
+    // Without this the metadata-failure re-walk starts its own unbounded mirror
+    // chain, on exactly the requests that are already slowest.
+    deadlineAt?: number
 ): Promise<{ buffer: Buffer; metadata: Sharp.Metadata; isFallback: boolean }> {
     const image = Sharp(origData, { failOnError: false, limitInputPixels: MAX_INPUT_PIXELS })
 
@@ -199,6 +202,7 @@ export async function getSharpMetadataWithRetry(
         try {
             fallback = await fetchImageWithFallbacks(urlString, urlParams, userAgent, fallbackUrl, logger, {
                 skipUrls: [urlString], // prevent infinite loop
+                deadlineAt,
             })
         } catch (fetchErr) {
             logger.error({
@@ -315,6 +319,23 @@ export function expandPurgeUrls(value: string | string[]): string[] {
 const PURGE_BATCH_SIZE = 30
 
 let purgeUnconfiguredWarned = false
+
+/**
+ * True when the request carries the operator's invalidate token.
+ *
+ * Shared by the `invalidate` gate and the `ignorecache` gate: both force the same
+ * expensive work (skip the stored variant, re-fetch upstream, re-decode, re-encode)
+ * so they belong behind the same credential. Returns false when no token is
+ * configured, so an unset `invalidate_token` fails closed.
+ */
+export function hasValidInvalidateKey(ctx: any): boolean {
+    const configured = config.has('invalidate_token') ? config.get('invalidate_token') as string : ''
+    if (!configured) {
+        return false
+    }
+    const presented = ctx && typeof ctx.get === 'function' ? ctx.get('x-invalidate-key') : ''
+    return !!presented && presented === configured
+}
 
 export function purgeCache(value: string | string[]) {
     if (!config.has('cloudflare_token') || !config.has('cloudflare_zone')) {

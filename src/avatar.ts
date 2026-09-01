@@ -9,12 +9,14 @@ import {clientGoneSignal} from './encode-limit'
 import {resizeImageWithOptions} from './image-resizer'
 
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
+import { FETCH_DEADLINE_MS } from './constants'
 import { APIError } from './error'
 import {
   getDefaultUrlAndParams,
   getImageKey,
   isInternalUploadUrl,
   getUrlHashKey,
+  hasValidInvalidateKey,
   isBlacklistedUrl,
   mimeMagic,
   OutputFormat,
@@ -39,6 +41,10 @@ const AVATAR_SIZE = 256
 
 async function handleAvatar(ctx: KoaContext) {
   ctx.tag({ handler: 'avatar' })
+  // One wall-clock budget for every upstream fetch this request makes, so an
+  // exhausted mirror chain ends as a placeholder well inside the 60s Varnish
+  // allows the backend rather than being cut off as a 503.
+  const fetchDeadlineAt = Date.now() + FETCH_DEADLINE_MS
 
   APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
   APIError.assertParams(ctx.params, ['username'])
@@ -54,8 +60,16 @@ async function handleAvatar(ctx: KoaContext) {
 
   // Check for cache bypass parameters
   const query = ctx.request.query
-  const ignorecache = Number.parseInt(query['ignorecache'] as string) || undefined
+  let ignorecache = Number.parseInt(query['ignorecache'] as string) || undefined
   const invalidate = Number.parseInt(query['invalidate'] as string) || undefined
+  // Unauthenticated `ignorecache` additionally bypassed the 300s Redis profile
+  // cache (forcing a Hive RPC per request) and fired a Cloudflare purge for this
+  // user on success, evicting a perfectly good cached avatar. Same gate as
+  // `invalidate`; neutralised rather than rejected.
+  if (ignorecache && !hasValidInvalidateKey(ctx)) {
+    ctx.log.warn({username}, 'ignoring unauthenticated ignorecache')
+    ignorecache = undefined
+  }
   const shouldBypassCache = !!(ignorecache || invalidate)
   if (invalidate) {
     const invalidateKey = ctx.get('x-invalidate-key')
@@ -196,7 +210,7 @@ async function handleAvatar(ctx: KoaContext) {
   } else {
     ctx.tag({ store: 'fetch' })
     try {
-      const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultAvatar, ctx.log, { skipNegativeCache: !!invalidate })
+      const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultAvatar, ctx.log, { skipNegativeCache: !!invalidate, deadlineAt: fetchDeadlineAt })
       const res = result.res
       isFetchFallback = result.isFallback
       origData = res.body
@@ -239,7 +253,8 @@ async function handleAvatar(ctx: KoaContext) {
       DefaultAvatar,
       ctx.log,
       clientGoneSignal(ctx),
-      true // forceStill: avatars never need animation
+      true, // forceStill: avatars never need animation
+      fetchDeadlineAt
   )
   contentType = finalType
   isResizeFallback = isFallback
