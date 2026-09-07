@@ -12,6 +12,7 @@ import {app} from './../src/app'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore} from './../src/common'
 import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
+import {realEtag} from './../src/served-image'
 import {BROKEN_AVATAR_URL, mockProfiles, pointHealthyProfileAt} from './index'
 
 describe('avatar', function() {
@@ -170,8 +171,9 @@ describe('avatar', function() {
         assert.equal(warm.statusCode, 200)
         assert.equal(warm.headers['cache-control'], 'public,max-age=120')
         const realUrl = mockProfiles.foo.metadata.profile.profile_image
-        const realEtags = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
-            etag(getImageKey(getUrlHashKey(realUrl), { width: 256, height: 256, mode: ScalingMode.Cover, format } as any)))
+        const keys = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
+            getImageKey(getUrlHashKey(realUrl), { width: 256, height: 256, mode: ScalingMode.Cover, format } as any))
+        const realEtags = keys.flatMap((k) => [etag(k), realEtag(k, warm.body)])
         assert(!realEtags.includes(warm.headers.etag as string),
             'placeholder must not wear the ETag the real avatar would have')
         // and a client presenting the placeholder ETag is not told it is current

@@ -3,7 +3,6 @@
 import {AbstractBlobStore} from 'abstract-blob-store'
 import config from 'config'
 import {createHash} from 'crypto'
-import etag from 'etag'
 import * as multihash from 'multihashes'
 import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
@@ -380,7 +379,8 @@ export async function proxyHandler(ctx: KoaContext) {
         )
     }
     const imageKey = getImageKey(origKey, options)
-    ctx.set('ETag', etag(imageKey))
+    // No validator yet: a real variant's ETag is derived from its stored bytes
+    // (see realEtag), so it is set once those are in hand, on a hit or a render
     ctx.tag({imageKey})
     if (options.invalidate) {
         // Purge CDN first (fire-and-forget)
@@ -445,6 +445,9 @@ export async function proxyHandler(ctx: KoaContext) {
         // substituted request derives its key from the default image, so a
         // client's copy of a blocked source cannot match; the guard is belt and
         // braces.
+        // The validator names the stored bytes, so a client holding a copy the
+        // repair replaced presents a different one and is not told to keep it
+        ctx.set('ETag', etagFor(realImage(head), imageKey, head))
         if (ctx.fresh && !shouldBypassCache && !substitution) {
             file.destroy()
             ctx.status = 304
@@ -477,7 +480,7 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.set('Content-Type', servedType)
         ctx.set('Vary', 'Accept')
         ctx.set('Cache-Control', cacheControlFor(served, IMMUTABLE_CACHE_CONTROL))
-        ctx.set('ETag', etagFor(served, imageKey))
+        ctx.set('ETag', etagFor(served, imageKey, head))
         ctx.body = served.bytes
         return
         } // end healthy cached variant
@@ -820,6 +823,6 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
     ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
-    ctx.set('ETag', etagFor(rendered, imageKey))
+    ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes))
     ctx.body = rendered.bytes
 }

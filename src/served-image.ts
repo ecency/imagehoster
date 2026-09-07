@@ -124,11 +124,44 @@ export function passthroughEtag(imageKey: string): string {
     return etag(imageKey + '|passthrough')
 }
 
-export function etagFor(image: {kind: Provenance}, imageKey: string): string {
+/**
+ * How many leading bytes of a real variant take part in its validator. Every
+ * encoder writes its identity into the first few hundred bytes (container
+ * boxes, headers, quantisation tables), so a prefix distinguishes a repaired
+ * render from the bytes it replaced, a re-encode from the render before it, and
+ * a raw container from a variant, while staying cheap on the cache-hit path,
+ * which already reads this much to sniff the type.
+ */
+export const REAL_ETAG_HEAD_BYTES = 16384
+
+/**
+ * Validator of a real variant: the key together with the leading bytes of the
+ * stored representation.
+ *
+ * A validator derived from the key alone said "same key, same bytes", which was
+ * false whenever the bytes under a key changed: a repaired variant, a fixed
+ * encoder, a raw container written by a bug and later replaced. Clients holding
+ * the old copy were told it was current forever. Tying the validator to the
+ * bytes makes any change of representation change the validator, so
+ * revalidation replaces the copy. The key is mixed in so two keys whose renders
+ * happen to share a prefix never validate each other.
+ */
+export function realEtag(imageKey: string, head: Buffer): string {
+    return etag(Buffer.concat([Buffer.from(imageKey + '|'), head.subarray(0, REAL_ETAG_HEAD_BYTES)]))
+}
+
+/**
+ * The validator for a value. For a real variant the leading bytes are required:
+ * on a miss they are the rendered bytes, on a hit the sniffed head of the stored
+ * file, which are the same bytes.
+ */
+export function etagFor(image: {kind: Provenance}, imageKey: string, head?: Buffer): string {
     switch (image.kind) {
         case 'fallback': return fallbackEtag(imageKey)
         case 'passthrough': return passthroughEtag(imageKey)
-        default: return etag(imageKey)
+        default:
+            if (!head) { throw new Error('a real variant needs its leading bytes for a validator') }
+            return realEtag(imageKey, head)
     }
 }
 

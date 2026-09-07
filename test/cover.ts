@@ -12,6 +12,7 @@ import {app} from './../src/app'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore} from './../src/common'
 import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
+import {realEtag} from './../src/served-image'
 import {BROKEN_COVER_URL, mockProfiles, pointHealthyProfileAt} from './index'
 
 describe('cover', function() {
@@ -155,8 +156,9 @@ describe('cover', function() {
         assert.equal(warm.statusCode, 200)
         assert.equal(warm.headers['cache-control'], 'public,max-age=120')
         const realUrl = mockProfiles.foo.metadata.profile.cover_image
-        const realEtags = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
-            etag(getImageKey(getUrlHashKey(realUrl), { width: 1344, height: 240, mode: ScalingMode.Fit, format } as any)))
+        const keys = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
+            getImageKey(getUrlHashKey(realUrl), { width: 1344, height: 240, mode: ScalingMode.Fit, format } as any))
+        const realEtags = keys.flatMap((k) => [etag(k), realEtag(k, warm.body)])
         assert(!realEtags.includes(warm.headers.etag as string),
             'placeholder must not wear the ETag the real cover would have')
         // and a client presenting the placeholder ETag is not told it is current

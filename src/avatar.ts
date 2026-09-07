@@ -2,7 +2,6 @@
 
 import { AbstractBlobStore } from 'abstract-blob-store'
 import config from 'config'
-import etag from 'etag'
 import {URL} from 'url'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {clientGoneSignal} from './encode-limit'
@@ -133,23 +132,19 @@ async function handleAvatar(ctx: KoaContext) {
   }
   const imageKey = getImageKey(origKey, options)
 
-  ctx.set({
-    'ETag': etag(imageKey),
-    'Last-Modified': profile ? new Date(`${profile.active}Z`).toUTCString() : new Date().toUTCString(),
-  })
+  // No validator yet: a real variant's ETag is derived from its stored bytes
+  // (see realEtag) and is set once those are in hand. Last-Modified is set now
+  // because it describes the profile, not the bytes.
+  ctx.set('Last-Modified', profile ? new Date(`${profile.active}Z`).toUTCString() : new Date().toUTCString())
 
   // ctx.fresh only consults the conditional headers once the status is
-  // 2xx/304, and Koa's default is 404 at this point — without an explicit 200
-  // the revalidation branch below can never fire
+  // 2xx/304, and Koa's default is 404 at this point, so without an explicit 200
+  // the revalidation branch inside the cache-hit block could never fire. The 304
+  // itself is answered only there, with a healthy stored variant in hand: a
+  // validator alone does not prove the bytes behind it are what this key renders
+  // to today, and an If-Modified-Since-only revalidation would otherwise let the
+  // client keep a copy of whatever it holds.
   ctx.status = 200
-  // The substituted default changes the ETag, but Last-Modified still carries
-  // the profile's timestamp, so an If-Modified-Since-only revalidation would
-  // answer 304 and let the client keep its cached (possibly blocked) bytes —
-  // never take the freshness shortcut for fallback responses
-  if (ctx.fresh && !shouldBypassCache && !isProfileFallback) {
-    ctx.status = 304
-    return
-  }
 
   if (await storeExists(proxyStore, imageKey) && !shouldBypassCache) {
     ctx.tag({ store: 'resized' })
@@ -161,10 +156,19 @@ async function handleAvatar(ctx: KoaContext) {
     const served: ServedImage<NodeJS.ReadableStream> = isProfileFallback
       ? fallbackImage(stream, 'profile lookup fell back, default substituted')
       : realImage(stream)
+    ctx.set('ETag', etagFor(served, imageKey, head))
+    // never take the freshness shortcut for a fallback response: the substituted
+    // default changes the ETag, but Last-Modified still carries the profile's
+    // timestamp, so an If-Modified-Since-only revalidation would answer 304 and let
+    // the client keep its cached (possibly blocked) bytes
+    if (ctx.fresh && !shouldBypassCache && !isProfileFallback) {
+      if ((stream as any).destroy) { (stream as any).destroy() }
+      ctx.status = 304
+      return
+    }
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
     ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
-    ctx.set('ETag', etagFor(served, imageKey))
     ctx.body = stream
     return
   }
@@ -301,7 +305,7 @@ async function handleAvatar(ctx: KoaContext) {
   } else {
     ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
   }
-  ctx.set('ETag', etagFor(response, imageKey))
+  ctx.set('ETag', etagFor(response, imageKey, response.bytes))
   ctx.body = response.bytes
 }
 
