@@ -23,6 +23,10 @@ import {
 } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
+import {
+    cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, Provenance, realImage,
+    ServedImage, storeImage, worstOf,
+} from './served-image'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
@@ -52,7 +56,6 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
-    storeWrite,
     supportsAvif,
     supportsWebP
 } from './utils'
@@ -76,31 +79,25 @@ if (!Number.isFinite(MAX_IMAGE_SIZE)) {
  */
 export function shouldCacheOriginal(
     bytes: number,
-    opts: {isDefaultImage: boolean, usesUploadStore: boolean, isLegacy: boolean},
+    opts: {image: {kind: Provenance}, usesUploadStore: boolean, isLegacy: boolean},
     cap: number = MAX_CACHED_ORIGINAL_SIZE,
 ): boolean {
-    if (opts.isDefaultImage || opts.usesUploadStore || opts.isLegacy) { return false }
+    if (opts.image.kind === 'fallback' || opts.usesUploadStore || opts.isLegacy) { return false }
     // A cap of 0 means "never cache originals". Checked before the comparison
     // because `0 <= 0` would otherwise let a zero-byte body through.
     if (cap <= 0) { return false }
     return bytes <= MAX_IMAGE_SIZE && bytes <= cap
 }
 
-/**
- * ETag for a placeholder served in place of `imageKey`.
- *
- * The real variant's ETag is derived from the key alone, so a placeholder that
- * shared it would be validated by the real image and vice versa: a cache holding
- * the placeholder asks "still the same?", the origin answers with the recovered
- * image under the same ETag, the cache in front of us collapses that into a 304,
- * and the placeholder outlives its 120s contract by as long as anyone keeps
- * asking. Deterministic, so a placeholder still revalidates as a placeholder.
- */
-export function fallbackEtag(imageKey: string): string {
-    return etag(imageKey + '|fallback')
-}
 
 const SERVICE_URL = new URL(config.get('service_url'))
+/** A rendered variant is addressed by a key that encodes its inputs, so it never changes. */
+const IMMUTABLE_CACHE_CONTROL = 'public,max-age=31536000,immutable'
+
+const fromFetch = (result: {res: NeedleResponse, isFallback: boolean}): ServedImage =>
+    result.isFallback
+        ? fallbackImage(result.res.body, 'every mirror failed, default substituted')
+        : realImage(result.res.body)
 
 // Public proxy hosts that old post bodies wrapped around img.esteem.ws URLs
 // (e.g. https://steemitimages.com/500x0/https://img.esteem.ws/abc.jpg)
@@ -242,7 +239,9 @@ export async function proxyHandler(ctx: KoaContext) {
     })()
     let url = parseProxiedUrl(cleanUrl)
     let urlParams = cleanUrl
-    let isDefaultImage = false
+    // Set when the request itself is answered with the default image (a blocked
+    // source): every byte fetched from here on stands in for what was asked
+    let substitution: FallbackImage<null> | undefined
 
     // resolve double proxied images
     while (isInternalProxyUrl(url)) {
@@ -283,7 +282,7 @@ export async function proxyHandler(ctx: KoaContext) {
     // Check if URL/domain is in blocklist or is exactly the empty 0x0 URL (not URLs that start with it)
     if (isBlacklistedUrl(urlString)) {
         ({ url, urlParams } = getDefaultUrlAndParams())
-        isDefaultImage = true
+        substitution = fallbackImage(null, 'blocked source, default substituted')
         ctx.log.error({ urlString }, 'Falling back to default image due to blacklist or 0x0 URL')
     }
 
@@ -314,7 +313,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (isBlacklistedUrl(urlString)) {
         ({ url, urlParams } = getDefaultUrlAndParams())
         urlString = url.toString()
-        isDefaultImage = true
+        substitution = fallbackImage(null, 'blocked source, default substituted')
         ctx.log.error({ urlString }, 'Falling back to default image due to blacklist after URL normalization')
     }
     // img.esteem.ws is gone and its mirrors no longer have these images; surviving
@@ -382,8 +381,16 @@ export async function proxyHandler(ctx: KoaContext) {
             } catch (_e) { /* may not exist */ }
         }
     }
-    // check if content is same with user cache
-    if (ctx.fresh && !shouldBypassCache) {
+    // ctx.fresh only consults the conditional headers once the status is
+    // 2xx/304, and Koa's default is 404 at this point, so without an explicit
+    // 200 this branch could never fire (and never did). The ETag set above is
+    // the REAL variant's: a placeholder never shares it (see etagFor), so a
+    // match means the client holds the real bytes for this key, and those are
+    // immutable whatever the source is doing today. A substituted request
+    // derives its key from the default image, so a client's copy of a blocked
+    // source can never match it either; the guard is belt and braces.
+    ctx.status = 200
+    if (ctx.fresh && !shouldBypassCache && !substitution) {
         ctx.status = 304
         return
     }
@@ -411,13 +418,16 @@ export async function proxyHandler(ctx: KoaContext) {
         // the client asking now. Convert the cached bytes rather than falling
         // through to the origin: the variant is already sized, and the original
         // may have been pruned or its remote host may be down.
-        // A cached variant of the DEFAULT image (a blocked or dead source) must
-        // not ship the immutable 1y header — it would freeze the placeholder at
-        // the edge long after the block is lifted or the origin recovers
-        const variantCacheControl = isDefaultImage
-            ? 'public,max-age=120' // fallback contract: 2 minutes
-            : 'public,max-age=31536000,immutable'
-        if (isDefaultImage) { ctx.set('ETag', fallbackEtag(imageKey)) }
+        // The store only ever holds real variants (storeImage refuses the rest),
+        // so a hit is real unless this whole request was substituted: a cached
+        // variant of the DEFAULT image standing in for a blocked source must not
+        // ship the immutable 1y header or the real ETag, or it would freeze the
+        // placeholder at the edge long after the block is lifted
+        const served: ServedImage<NodeJS.ReadableStream> = substitution
+            ? fallbackImage(stream, substitution.reason)
+            : realImage(stream)
+        ctx.set('ETag', etagFor(served, imageKey))
+        const variantCacheControl = cacheControlFor(served, IMMUTABLE_CACHE_CONTROL)
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
             const cached = await readStream(stream)
@@ -437,7 +447,7 @@ export async function proxyHandler(ctx: KoaContext) {
     }
 
     // check if we have the original
-    let origData: Buffer
+    let origin: ServedImage
     let origFromCache = false
     // esteem-legacy originals are authoritative and unrefetchable: ignorecache/
     // invalidate still re-derives variants but never bypasses the stored original
@@ -472,8 +482,8 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.tag({store: 'original'})
         let res: NeedleResponse
         try {
-            origData = await readStream(servingStore.createReadStream(origKey))
-            contentType = await mimeMagic(origData)
+            origin = worstOf(realImage(await readStream(servingStore.createReadStream(origKey))), substitution)
+            contentType = await mimeMagic(origin.bytes)
             // Validate stored data is actually an image — stale error pages or
             // truncated responses may have been cached by a previous request
             if (!AcceptedContentTypes.includes(contentType.toLowerCase())) {
@@ -497,22 +507,20 @@ export async function proxyHandler(ctx: KoaContext) {
                 { skipNegativeCache: !!options.invalidate, deadlineAt: fetchDeadlineAt }
             )
             res = result.res
-            if (result.isFallback) { isDefaultImage = true }
-            origData = res.body
-            // Don't write fallback data to uploadStore — could corrupt original hash
-            if (shouldCacheOriginal(res.bytes, {isDefaultImage, usesUploadStore, isLegacy})) {
+            origin = worstOf(fromFetch(result), substitution)
+            if (shouldCacheOriginal(res.bytes, {image: origin, usesUploadStore, isLegacy})) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
-                    await storeWrite(origStore, origKey, origData)
+                    await storeImage(origStore, origKey, origin)
                 } catch (err) {
                     ctx.log.error({ err, origKey }, 'failed to store original proxy image (readStream catch)')
                     // Continue serving - storage failure shouldn't block response
                 }
             } else {
-                ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s, bytes=%d, cap=%d)',
-                    origKey, usesUploadStore, isDefaultImage, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
+                ctx.log.debug('not-storing original %s (upload=%s, kind=%s, legacy=%s, bytes=%d, cap=%d)',
+                    origKey, usesUploadStore, origin.kind, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
             }
-            contentType = await mimeMagic(origData)
+            contentType = await mimeMagic(origin.bytes)
         }
     } else {
         ctx.tag({ store: 'fetch' })
@@ -528,15 +536,14 @@ export async function proxyHandler(ctx: KoaContext) {
                 { skipNegativeCache: !!options.invalidate, deadlineAt: fetchDeadlineAt }
             )
             res = result.res
-            isDefaultImage = result.isFallback
+            origin = worstOf(fromFetch(result), substitution)
         } catch (err) {
             ctx.log.error({ err, urlString }, 'fetchImageWithFallbacks failed')
             captureImageFailure('all_fallbacks_failed', ctx, { urlString, error: String(err) })
             throw new APIError({ code: APIError.Code.InvalidImage, info: { fallback: 'true' } })
         }
 
-        origData = res.body
-        contentType = await mimeMagic(origData)
+        contentType = await mimeMagic(origin.bytes)
         contentType = contentType.toLowerCase()
 
         if (!AcceptedContentTypes.includes(contentType)) {
@@ -555,7 +562,6 @@ export async function proxyHandler(ctx: KoaContext) {
                 signal: AbortSignal.timeout(FETCH_DEFAULT_WALL_MS),
             } as any)
             const fallbackBuffer = fallbackRes.body
-            isDefaultImage = true
             return await serveOrBuildFallbackImage(
                 ctx,
                 fallbackBuffer,
@@ -568,20 +574,19 @@ export async function proxyHandler(ctx: KoaContext) {
             )
         }
 
-        APIError.assert(Buffer.isBuffer(origData), APIError.Code.InvalidImage)
+        APIError.assert(Buffer.isBuffer(origin.bytes), APIError.Code.InvalidImage)
 
-        // Don't write fallback data to uploadStore — could corrupt original hash
-        if (shouldCacheOriginal(res.bytes, {isDefaultImage, usesUploadStore, isLegacy})) {
+        if (shouldCacheOriginal(res.bytes, {image: origin, usesUploadStore, isLegacy})) {
             ctx.log.debug('storing original image %s', origKey)
             try {
-                await storeWrite(origStore, origKey, origData)
+                await storeImage(origStore, origKey, origin)
             } catch (err) {
                 ctx.log.error({ err, origKey }, 'failed to store original proxy image')
                 // Continue serving - storage failure shouldn't block response
             }
         } else {
-            ctx.log.debug('not-storing original %s (upload=%s, default=%s, legacy=%s, bytes=%d, cap=%d)',
-                origKey, usesUploadStore, isDefaultImage, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
+            ctx.log.debug('not-storing original %s (upload=%s, kind=%s, legacy=%s, bytes=%d, cap=%d)',
+                origKey, usesUploadStore, origin.kind, isLegacy, res.bytes, MAX_CACHED_ORIGINAL_SIZE)
         }
     }
 
@@ -591,13 +596,13 @@ export async function proxyHandler(ctx: KoaContext) {
     let encodeFallback = false
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
-        rv = origData
+        rv = origin.bytes
     } else {
 
         let metadata: Sharp.Metadata
         try {
             const metaResult = await getSharpMetadataWithRetry(
-                origData,
+                origin.bytes,
                 urlString,
                 urlParams,
                 'EcencyProxy/1.0 (+https://github.com/ecency)',
@@ -606,8 +611,12 @@ export async function proxyHandler(ctx: KoaContext) {
                 fetchDeadlineAt
             )
             metadata = metaResult.metadata
-            origData = metaResult.buffer
-            contentType = await mimeMagic(origData)
+            // The retry may have swapped the bytes for the default image; the
+            // provenance travels with them from here on
+            origin = metaResult.isFallback
+                ? fallbackImage(metaResult.buffer, 'source unreadable, default substituted')
+                : derive(origin, metaResult.buffer)
+            contentType = await mimeMagic(origin.bytes)
             // Use metadata.pages when available; if null, fall back to content-type detection
             // (conservative: assume GIF/APNG are animated when pages can't be determined)
             const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
@@ -615,9 +624,6 @@ export async function proxyHandler(ctx: KoaContext) {
                 isAnimated = metadata.pages > 1
             } else {
                 isAnimated = isGifOrApng
-            }
-            if (metaResult.isFallback) {
-                isDefaultImage = true
             }
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey }, 'getSharpMetadataWithRetry failed')
@@ -648,9 +654,9 @@ export async function proxyHandler(ctx: KoaContext) {
         // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
         // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
         if (isAnimated && !options.blur) {
-            rv = origData
+            rv = origin.bytes
         } else {
-        const image = buildSharpPipeline(origData, isAnimated)
+        const image = buildSharpPipeline(origin.bytes, isAnimated)
 
         const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
         let width: number | undefined = safeParseInt(options.width)
@@ -752,28 +758,31 @@ export async function proxyHandler(ctx: KoaContext) {
                 // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
                 // but browsers likely can — serve the original unresized bytes
                 ctx.log.warn({ origKey }, 'serving original upload bytes after toBuffer failure')
-                rv = origData
-                contentType = await mimeMagic(origData)
+                rv = origin.bytes
+                contentType = await mimeMagic(origin.bytes)
             } else if (origFromCache) {
                 // Sharp can't process this image (e.g. truncated JPEG) but browsers
                 // are lenient and will render it fine — serve the original bytes
                 ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on cached image')
                 try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
-                rv = origData
-                contentType = await mimeMagic(origData)
+                rv = origin.bytes
+                contentType = await mimeMagic(origin.bytes)
             } else {
                 // Sharp can't process but browsers are lenient — serve original bytes
                 ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on fetched image')
-                rv = origData
-                contentType = await mimeMagic(origData)
+                rv = origin.bytes
+                contentType = await mimeMagic(origin.bytes)
             }
         }
         } // end non-animated Sharp pipeline
 
-        if (!isDefaultImage && !isLegacy && !encodeFallback) {
+        // Legacy requests are never persisted (open proxy, see legacy-proxy.ts) and
+        // unprocessed originals are not a variant. A placeholder is refused by
+        // storeImage itself, whichever branch above produced it.
+        if (!isLegacy && !encodeFallback) {
             ctx.log.debug('storing converted %s', imageKey)
             try {
-                await storeWrite(proxyStore, imageKey, rv)
+                await storeImage(proxyStore, imageKey, derive(origin, rv))
             } catch (err) {
                 ctx.log.error({ err, imageKey }, 'failed to store converted proxy image')
                 // Continue serving - storage failure shouldn't block response
@@ -782,15 +791,16 @@ export async function proxyHandler(ctx: KoaContext) {
 
     }
 
+    // Whatever was rendered inherits the provenance of what it was rendered from,
+    // and the headers are a function of that value, not of a flag beside it
+    const rendered = derive(origin, rv)
     ctx.set('Content-Type', contentType)
     // Vary on Accept header for proper content negotiation caching
     ctx.set('Vary', 'Accept')
-    if (isDefaultImage) {
-        ctx.log.error({ finalUrl: urlString }, 'Responding with default image')
-        ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
-        ctx.set('ETag', fallbackEtag(imageKey))
-    } else {
-        ctx.set('Cache-Control', 'public,max-age=31536000,immutable') // 1 year
+    if (isFallbackImage(rendered)) {
+        ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
-    ctx.body = rv
+    ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
+    ctx.set('ETag', etagFor(rendered, imageKey))
+    ctx.body = rendered.bytes
 }

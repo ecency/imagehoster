@@ -12,6 +12,10 @@ import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from 
 import { FETCH_DEADLINE_MS } from './constants'
 import { APIError } from './error'
 import {
+  cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
+  storeImage, worstOf,
+} from './served-image'
+import {
   getDefaultUrlAndParams,
   getImageKey,
   isInternalUploadUrl,
@@ -26,11 +30,12 @@ import {
   ScalingMode,
   storeExists,
   storeRemove,
-  storeWrite,
   supportsAvif,
   supportsWebP,
 } from './utils'
 
+/** A real avatar is fresh for an hour so profile changes propagate. */
+const REAL_CACHE_CONTROL = 'public,max-age=3600'
 const DefaultAvatar = config.get('default_avatar') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -150,9 +155,16 @@ async function handleAvatar(ctx: KoaContext) {
     ctx.tag({ store: 'resized' })
     const file = proxyStore.createReadStream(imageKey)
     const { head, stream } = await import('stream-head').then((mod) => mod.default(file, { bytes: 16384 }))
+    // The store only holds real variants (storeImage refuses the rest), so a hit
+    // is real unless the whole request was substituted for a missing or blocked
+    // profile; the response then carries the fallback contract and its own ETag
+    const served: ServedImage<NodeJS.ReadableStream> = isProfileFallback
+      ? fallbackImage(stream, 'profile lookup fell back, default substituted')
+      : realImage(stream)
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', isProfileFallback ? 'public,max-age=120' : 'public,max-age=3600')
+    ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
+    ctx.set('ETag', etagFor(served, imageKey))
     ctx.body = stream
     return
   }
@@ -176,10 +188,8 @@ async function handleAvatar(ctx: KoaContext) {
     }
   }
 
-  let origData: Buffer
+  let origin: ServedImage
   let contentType: string
-  let isFetchFallback = false
-  let isResizeFallback = false
 
   const haveLocalOriginal = await storeExists(origStore, origKey) && !shouldBypassCache
   // Archive of originals whose upstream is gone. An origin, not a cache, so
@@ -198,28 +208,29 @@ async function handleAvatar(ctx: KoaContext) {
 
   if (haveLocalOriginal) {
     ctx.tag({ store: 'original' })
-    origData = await readStream(origStore.createReadStream(origKey))
-    contentType = await mimeMagic(origData)
+    origin = realImage(await readStream(origStore.createReadStream(origKey)))
+    contentType = await mimeMagic(origin.bytes)
   } else if (retentionData) {
     ctx.tag({ store: 'retention' })
-    origData = retentionData
-    contentType = await mimeMagic(origData)
+    origin = realImage(retentionData)
+    contentType = await mimeMagic(origin.bytes)
   } else {
     ctx.tag({ store: 'fetch' })
     try {
       const result = await fetchImageWithFallbacks(urlString, urlParams, ctx.get('user-agent') || 'EcencyProxy/1.0 (+https://github.com/ecency)', DefaultAvatar, ctx.log, { skipNegativeCache: !!invalidate, deadlineAt: fetchDeadlineAt })
       const res = result.res
-      isFetchFallback = result.isFallback
-      origData = res.body
-      contentType = await mimeMagic(origData)
+      origin = result.isFallback
+        ? fallbackImage(res.body, 'every mirror failed, default substituted')
+        : realImage(res.body)
+      contentType = await mimeMagic(origin.bytes)
 
-      // isFetchFallback means these are the default avatar's bytes, not this
-      // user's image. Persisting them under the user's key would make every
-      // later request serve the default as if it were their real avatar.
-      if (res.bytes <= Number.parseInt(config.get('max_image_size')) && !isFetchFallback) {
+      // A fallback here is the default avatar's bytes, not this user's image.
+      // storeImage refuses to persist it under the user's key regardless; the
+      // explicit check is what keeps the purge and the log honest.
+      if (res.bytes <= Number.parseInt(config.get('max_image_size')) && !isFallbackImage(origin)) {
         ctx.log.debug('storing original %s', origKey)
         try {
-          await storeWrite(origStore, origKey, origData)
+          await storeImage(origStore, origKey, origin)
           // Purge Cloudflare cache for this user's avatar endpoint since we fetched a new image
           // One call, not four: purgeCache expands each URL across every service
           // hostname, so four separate calls would be eight requests to Cloudflare.
@@ -232,7 +243,7 @@ async function handleAvatar(ctx: KoaContext) {
           // Continue serving - storage failure shouldn't block response
         }
       } else {
-        ctx.log.debug('not-storing original %s (bytes=%d, fallback=%s)', origKey, res.bytes, isFetchFallback)
+        ctx.log.debug('not-storing original %s (bytes=%d, kind=%s)', origKey, res.bytes, origin.kind)
       }
     } catch (cause) {
       ctx.log.error(cause, 'Image fetch failed')
@@ -241,7 +252,7 @@ async function handleAvatar(ctx: KoaContext) {
   }
 
   const { buffer: rv, contentType: finalType, isFallback } = await resizeImageWithOptions(
-      origData,
+      origin.bytes,
       contentType,
       options,
       urlString,
@@ -254,29 +265,32 @@ async function handleAvatar(ctx: KoaContext) {
       fetchDeadlineAt
   )
   contentType = finalType
-  isResizeFallback = isFallback
+  // A render inherits the provenance of its source; a resize that had to fall
+  // back to the default is a placeholder whatever the source was
+  const rendered: ServedImage = isFallback
+    ? fallbackImage(rv, 'source unrenderable, default substituted')
+    : derive(origin, rv)
 
-  // Fallback bytes must never be persisted under the requested key. They are the
-  // default avatar standing in for an image we could not fetch or render, and a
-  // stored copy is indistinguishable from a real one on later requests: it would
-  // be served at the normal one-hour freshness until evicted or invalidated.
-  // A profile-lookup fallback is deliberately excluded here — it derives both
-  // keys from the default avatar's own URL, so it never occupies a user's key.
-  const isImageFallback = isFetchFallback || isResizeFallback
-  if (!isImageFallback) {
-    ctx.log.debug('storing converted %s', imageKey)
-    try {
-      await storeWrite(proxyStore, imageKey, rv)
-    } catch (err) {
-      ctx.log.error({ err, imageKey }, 'failed to store converted avatar image')
-      // Continue serving - storage failure shouldn't block response
+  // A placeholder must never be persisted under the requested key: a stored copy
+  // is indistinguishable from a real one on later requests and would be served
+  // at the normal one-hour freshness until evicted or invalidated. storeImage
+  // enforces that; a profile-lookup fallback is unaffected because it derives
+  // both keys from the default image's own URL and never occupies a user's key.
+  try {
+    if (await storeImage(proxyStore, imageKey, rendered)) {
+      ctx.log.debug('stored converted %s', imageKey)
+    } else {
+      ctx.log.debug('not-storing fallback variant %s (%s)', imageKey, (rendered as FallbackImage).reason)
     }
-  } else {
-    ctx.log.debug('not-storing fallback variant %s (fetch=%s, resize=%s)',
-        imageKey, isFetchFallback, isResizeFallback)
+  } catch (err) {
+    ctx.log.error({ err, imageKey }, 'failed to store converted avatar image')
+    // Continue serving - storage failure shouldn't block response
   }
 
-  const isFinalFallback = isImageFallback || isProfileFallback
+  // What the client asked for was this user's avatar; a real render inside a
+  // substituted request is still a placeholder for that
+  const response = worstOf(rendered, isProfileFallback
+    ? fallbackImage(null, 'profile lookup fell back, default substituted') : undefined)
 
   ctx.set('Content-Type', contentType)
   // Vary on Accept header for proper content negotiation caching
@@ -285,11 +299,10 @@ async function handleAvatar(ctx: KoaContext) {
   if (shouldBypassCache) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
-    ctx.set('Cache-Control', isFinalFallback
-        ? 'public,max-age=120'
-        : 'public,max-age=3600')
+    ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
   }
-  ctx.body = rv
+  ctx.set('ETag', etagFor(response, imageKey))
+  ctx.body = response.bytes
 }
 
 export async function avatarHandler(ctx: KoaContext) {

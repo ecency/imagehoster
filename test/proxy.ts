@@ -8,6 +8,7 @@ import * as multihash from 'multihashes'
 import * as path from 'path'
 import * as fs from 'fs'
 import sharp from 'sharp'
+import etag from 'etag'
 import Koa from 'koa'
 
 import {app} from './../src/app'
@@ -17,7 +18,10 @@ import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
 import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
 import {shouldCacheOriginal} from './../src/proxy'
-import {storeExists, storeRemove, storeWrite, base58Enc} from './../src/utils'
+import {fallbackEtag, fallbackImage, realImage} from './../src/served-image'
+import {
+    base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, ScalingMode, storeExists, storeRemove, storeWrite,
+} from './../src/utils'
 
 import {uploadImage} from './upload'
 
@@ -173,6 +177,56 @@ describe('proxy', function() {
                 assert.equal(res.headers['cache-control'], 'public,max-age=120')
             } finally {
                 await new Promise<void>((resolve) => textServer.close(() => resolve()))
+            }
+        })
+    })
+
+    describe('conditional requests', function() {
+        it('answers 304 for a client holding the real variant, and 200 for one holding a placeholder', async function() {
+            this.slow(3000)
+            serveImage = true
+            const source = `http://localhost:${ port+1 }/test.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            const warm = await needle('get', url)
+            assert.equal(warm.statusCode, 200)
+            assert.equal(warm.headers['cache-control'], 'public,max-age=31536000,immutable')
+
+            // Koa's default status is 404 until a body is set and ctx.fresh only looks
+            // at conditional headers on a 2xx, so this branch never fired before
+            const inm = await needle('get', url, null, { headers: { 'if-none-match': warm.headers.etag as string } })
+            assert.equal(inm.statusCode, 304)
+
+            // the placeholder ETag for the same key is not the real one, so a client
+            // that cached a placeholder is handed the real image, never a 304
+            const opts = {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), opts)
+            assert.equal(warm.headers.etag, etag(key), 'real ETag is derived from the key')
+            const stale = await needle('get', url, null, { headers: { 'if-none-match': fallbackEtag(key) } })
+            assert.equal(stale.statusCode, 200)
+            assert.equal((await sharp(stale.body).metadata()).width, 120)
+        })
+
+        it('never answers 304 for a substituted request', async function() {
+            this.slow(3000)
+            const source = `http://127.0.0.1:${ port+1 }/blocked-cond.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            initBlacklistService([], [], ['127.0.0.1'])
+            try {
+                const placeholder = await needle('get', url)
+                assert.equal(placeholder.statusCode, 200)
+                assert.equal(placeholder.headers['cache-control'], 'public,max-age=120')
+                // the substituted key is the default image's; even its real ETag must not shortcut
+                const defaultUrl = getDefaultUrlAndParams().url
+                const defaultKey = getImageKey('U' + multihash.toB58String(multihash.encode(
+                    createHash('sha1').update(defaultUrl.toString()).digest(), 'sha1')),
+                    {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+                for (const candidate of [placeholder.headers.etag as string, etag(defaultKey)]) {
+                    const res = await needle('get', url, null, { headers: { 'if-none-match': candidate } })
+                    assert.equal(res.statusCode, 200, `must not answer 304 for ${ candidate }`)
+                }
+            } finally {
+                initBlacklistService([], [], [])
             }
         })
     })
@@ -437,7 +491,7 @@ describe('proxy', function() {
     })
 
     describe('original caching cap', function() {
-        const cacheable = {isDefaultImage: false, usesUploadStore: false, isLegacy: false}
+        const cacheable = {image: realImage(Buffer.alloc(0)), usesUploadStore: false, isLegacy: false}
         const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
 
         it('should keep the test cap below the upload limit', function() {
@@ -468,7 +522,7 @@ describe('proxy', function() {
         })
 
         it('should still skip fallback, upload-store and legacy originals', function() {
-            assert.equal(shouldCacheOriginal(1, {...cacheable, isDefaultImage: true}), false)
+            assert.equal(shouldCacheOriginal(1, {...cacheable, image: fallbackImage(Buffer.alloc(0), 'test')}), false)
             assert.equal(shouldCacheOriginal(1, {...cacheable, usesUploadStore: true}), false)
             assert.equal(shouldCacheOriginal(1, {...cacheable, isLegacy: true}), false)
         })
