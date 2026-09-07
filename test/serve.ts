@@ -84,6 +84,8 @@ describe('serve', function() {
             method: 'POST',
             params: { hash: 'DQmSomeHash', filename: 'test.jpg' },
             tag() {},
+            set() {},
+            remove() {},
             app: { emit() {} },
         }
 

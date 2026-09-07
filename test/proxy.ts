@@ -8,9 +8,11 @@ import * as multihash from 'multihashes'
 import * as path from 'path'
 import * as fs from 'fs'
 import sharp from 'sharp'
+import Koa from 'koa'
 
 import {app} from './../src/app'
-import {fetchImageWithFallbacks} from './../src/fetch-image'
+import {APIError, errorMiddleware} from './../src/error'
+import {clearDeadUrl, fetchImageWithFallbacks, markDeadUrl} from './../src/fetch-image'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
 import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
@@ -61,6 +63,118 @@ describe('proxy', function() {
         assert.equal(meta.height, 67)
         assert.equal(meta.format, 'jpeg')
         assert.equal(meta.space, 'srgb')
+    })
+
+    describe('error and placeholder responses stay out of the caches', function() {
+        // The 1x1 placeholder upload and the default avatar are fetched from the
+        // configured hosts when the substituted paths run; nothing below depends on
+        // that fetch succeeding except the placeholder tests, which say so.
+
+        it('answers a malformed proxy key with a 400 and nothing a cache could keep', async function() {
+            this.slow(1000)
+            for (const bad of ['not-valid-base58!!!', base58Enc('not a url'),
+                '3W72119s5BjW3w55E9m2dpuZgVrNq2aY9kcSn9SY4wgjN3KWKyHprjyV9f7rjvBoQnFKrVP9XPjYGE3jRJcJqyq']) {
+                const res = await needle('get', `http://localhost:${ port }/p/${ bad }?format=match&height=500&mode=fit&width=600`)
+                assert.equal(res.statusCode, 400, `${ bad }: status`)
+                assert.equal(res.body.error.name, 'invalid_proxy_url', `${ bad }: body ${ JSON.stringify(res.body) }`)
+                assert.equal(res.headers['etag'], undefined, `${ bad }: error response must carry no ETag`)
+                assert.equal(res.headers['last-modified'], undefined, `${ bad }: error response must carry no Last-Modified`)
+                assert.equal(res.headers['cache-control'], 'no-store, no-cache', `${ bad }: cache-control`)
+            }
+        })
+
+        it('answers an error with no-store even on a path that had already set headers', async function() {
+            this.slow(1000)
+            serveImage = true
+            const source = `http://localhost:${ port+1 }/test.jpg`
+            const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit&invalidate=1`)
+            assert.equal(res.statusCode, 403)
+            assert.equal(res.headers['etag'], undefined)
+            assert.equal(res.headers['cache-control'], 'no-store, no-cache')
+        })
+
+        it('strips validators the handler set before it failed', async function() {
+            // The handlers set ETag(imageKey) before doing any work, so an error
+            // raised later would otherwise go out wearing the image's validator and
+            // a cache could revalidate the error body against the real image
+            const failing = new Koa()
+            failing.on('error', () => undefined) // the thrown APIError is the point of the test
+            failing.use(errorMiddleware as any)
+            failing.use(async (ctx) => {
+                ctx.set('ETag', '"the-image-etag"')
+                ctx.set('Last-Modified', new Date().toUTCString())
+                ctx.set('Cache-Control', 'public,max-age=31536000,immutable')
+                throw new APIError({code: APIError.Code.InvalidImage})
+            })
+            const failingServer = http.createServer(failing.callback())
+            await new Promise<void>((resolve) => failingServer.listen(0, 'localhost', () => resolve()))
+            try {
+                const failingPort = (failingServer.address() as any).port
+                const res = await needle('get', `http://localhost:${ failingPort }/anything`)
+                assert.equal(res.statusCode, 400)
+                assert.equal(res.headers['etag'], undefined, 'ETag set before the failure must not survive it')
+                assert.equal(res.headers['last-modified'], undefined, 'Last-Modified set before the failure must not survive it')
+                assert.equal(res.headers['cache-control'], 'no-store, no-cache')
+            } finally {
+                await new Promise<void>((resolve) => failingServer.close(() => resolve()))
+            }
+        })
+
+        it('gives a placeholder for a dead source its own ETag and the 120s contract', async function() {
+            this.slow(5000)
+            this.timeout(15000)
+            const source = `http://localhost:${ port+1 }/etag-placeholder-${ Date.now() }.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit`
+            // A negatively cached URL skips the mirror walk and goes straight to the
+            // default image, which is the fetch-fallback path with the source's key
+            await markDeadUrl(source)
+            try {
+                const placeholder = await needle('get', url)
+                assert.equal(placeholder.statusCode, 200)
+                assert.equal(placeholder.headers['cache-control'], 'public,max-age=120')
+                assert(placeholder.headers['etag'], 'placeholder carries an ETag so a placeholder still revalidates as one')
+                const again = await needle('get', url)
+                assert.equal(again.headers['etag'], placeholder.headers['etag'], 'placeholder ETag is deterministic')
+
+                // Now the source is alive: the real image must not share the placeholder's ETag,
+                // or a cache holding the placeholder would be told it is still current
+                await clearDeadUrl(source)
+                serveImage = true
+                const real = await needle('get', url)
+                assert.equal(real.statusCode, 200)
+                assert.equal(real.headers['cache-control'], 'public,max-age=31536000,immutable')
+                assert.equal((await sharp(real.body).metadata()).width, 100)
+                assert.notEqual(real.headers['etag'], placeholder.headers['etag'],
+                    'real image and its placeholder must never validate each other')
+            } finally {
+                await clearDeadUrl(source)
+            }
+        })
+
+        it('serves the built placeholder for an unsupported source type under the 120s contract', async function() {
+            this.slow(5000)
+            this.timeout(15000)
+            // A binary body needle keeps as a Buffer (a text body comes back as a
+            // string and the fetch chain rejects it before this path is reached),
+            // with magic bytes that match no image type
+            const textServer = http.createServer((_req, res) => {
+                res.writeHead(200, {'content-type': 'application/octet-stream'})
+                res.end(Buffer.from([0x00, 0x01, 0x02, 0x03, 0x7f, 0x45, 0x4c, 0x46, 0xde, 0xad, 0xbe, 0xef]))
+            })
+            await new Promise<void>((resolve) => textServer.listen(0, 'localhost', () => resolve()))
+            const textPort = (textServer.address() as any).port
+            try {
+                const res = await needle('get',
+                    `http://localhost:${ port }/p/${ base58Enc(`http://localhost:${ textPort }/notes.txt`) }?width=100&mode=fit`)
+                assert.equal(res.statusCode, 200)
+                // the builder always renders the default as JPEG for format=match,
+                // which is how this path is told apart from the fetch-fallback one
+                assert.equal(res.headers['content-type'], 'image/jpeg')
+                assert.equal(res.headers['cache-control'], 'public,max-age=120')
+            } finally {
+                await new Promise<void>((resolve) => textServer.close(() => resolve()))
+            }
+        })
     })
 
     it('should proxy stored image when source is gone', async function() {

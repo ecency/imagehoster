@@ -34,7 +34,7 @@ import {
     expandPurgeUrls,
 } from './../src/utils'
 
-import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EMPTY_IMAGE_URL_PATTERNS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
+import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -299,15 +299,29 @@ describe('utils', function() {
             assert.equal(result.toString(), 'https://example.com/image.jpg')
         })
 
-        it('should return fallback for invalid base58', function() {
-            const result = parseProxiedUrl('not-valid-base58!!!')
-            assert.equal(result.toString(), DEFAULT_FALLBACK_IMAGE_URL)
+        const rejectsAsInvalidProxyUrl = (err: any) =>
+            err instanceof APIError && err.code === APIError.Code.InvalidProxyUrl
+
+        it('rejects a key that is not base58 as a client error', function() {
+            // Used to substitute the 1x1 placeholder upload silently, which then
+            // travelled the normal pipeline as a real image (stored, immutable)
+            assert.throws(() => parseProxiedUrl('not-valid-base58!!!'), rejectsAsInvalidProxyUrl)
         })
 
-        it('should return fallback for non-URL after decoding', function() {
-            const encoded = base58Enc('not a url')
-            const result = parseProxiedUrl(encoded)
-            assert.equal(result.toString(), DEFAULT_FALLBACK_IMAGE_URL)
+        it('rejects a key that decodes to something other than a URL', function() {
+            assert.throws(() => parseProxiedUrl(base58Enc('not a url')), rejectsAsInvalidProxyUrl)
+            // valid base58 whose bytes are binary noise, the shape seen in production
+            assert.throws(() => parseProxiedUrl(
+                '3W72119s5BjW3w55E9m2dpuZgVrNq2aY9kcSn9SY4wgjN3KWKyHprjyV9f7rjvBoQnFKrVP9XPjYGE3jRJcJqyq'),
+                rejectsAsInvalidProxyUrl)
+        })
+
+        it('never resolves an undecodable key to the placeholder upload', function() {
+            for (const bad of ['not-valid-base58!!!', base58Enc('not a url')]) {
+                let resolved: URL | undefined
+                try { resolved = parseProxiedUrl(bad) } catch (_e) { /* expected */ }
+                assert.equal(resolved, undefined, `${ bad } resolved to ${ resolved }`)
+            }
         })
     })
 
@@ -494,6 +508,21 @@ describe('constants', function() {
         it('should have valid DEFAULT_FALLBACK_IMAGE_URL', function() {
             assert(DEFAULT_FALLBACK_IMAGE_URL.startsWith(SERVICE_BASE_URL))
             assert(DEFAULT_FALLBACK_IMAGE_URL.includes('1x1_000000.png'))
+        })
+
+        it('fits the fetch deadline, the default-image fetch and the render inside the edge budget', function() {
+            // Varnish's .first_byte_timeout for the image backend. A walk that has
+            // not answered by then is a 503 at the edge regardless of what the
+            // origin does next, so the placeholder path only exists if the whole
+            // worst case ends before it. Change the VCL and this value together.
+            assert.equal(EDGE_FIRST_BYTE_TIMEOUT_MS, 20000)
+            assert(FETCH_DEADLINE_DEFAULT_MS + FETCH_DEFAULT_WALL_MS + FETCH_RENDER_SLACK_MS <= EDGE_FIRST_BYTE_TIMEOUT_MS,
+                `deadline ${ FETCH_DEADLINE_DEFAULT_MS } + default fetch ${ FETCH_DEFAULT_WALL_MS } + render ${ FETCH_RENDER_SLACK_MS } exceeds ${ EDGE_FIRST_BYTE_TIMEOUT_MS }`)
+            // and it still leaves room for a full slow candidate plus at least the
+            // minimum needed to start another, or the chain degenerates to one try
+            assert(FETCH_DEADLINE_DEFAULT_MS >= FETCH_CANDIDATE_WALL_MS + FETCH_MIN_REMAINING_MS - 1000)
+            // the test config sets no override, so the live value is the default
+            assert.equal(FETCH_DEADLINE_MS, FETCH_DEADLINE_DEFAULT_MS)
         })
 
         it('should have valid DEFAULT_AVATAR_HASH', function() {
