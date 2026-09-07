@@ -12,6 +12,7 @@ import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
 import {logger, loggerMiddleware} from './logger'
 import {routes} from './routes'
+import {encodeBudget} from './encode-limit'
 import {getSharpConcurrency, parseBool} from './utils'
 
 export const app = new Koa()
@@ -115,8 +116,19 @@ async function main() {
         try {
             allocator = fs.readFileSync('/proc/self/maps', 'utf8').includes('jemalloc') ? 'jemalloc' : 'glibc'
         } catch (cause) { allocator = 'unknown' }
-        logger.warn({sharpConcurrency: getSharpConcurrency(), allocator, node: process.versions.node},
-            'image pipeline configured')
+        const budget = encodeBudget()
+        logger.warn({
+            sharpConcurrency: getSharpConcurrency(), allocator, node: process.versions.node,
+            libuvPool: budget.poolSize, encodeLimit: budget.limit, encodeRequested: budget.requested,
+            freePoolSlots: budget.freeSlots,
+        }, 'image pipeline configured')
+        if (budget.cappedByPool) {
+            // The CPU rule wanted more encodes than the pool can carry while still
+            // leaving room for file reads. Raise UV_THREADPOOL_SIZE rather than
+            // lowering num_workers further; see encode-limit.ts.
+            logger.warn({libuvPool: budget.poolSize, encodeRequested: budget.requested, encodeLimit: budget.limit},
+                'encode limit capped by the libuv threadpool size')
+        }
     }
 
     const exit = async () => {

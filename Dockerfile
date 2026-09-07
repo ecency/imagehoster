@@ -207,6 +207,17 @@ ENV NODE_ENV=production
 # RSS until the box swaps. 2 arenas trades negligible alloc concurrency for far
 # lower, stable RSS.
 ENV MALLOC_ARENA_MAX=2
+# Size the libuv threadpool. Sharp encodes, fs reads, dns.lookup and zlib all
+# share it, and libuv's default is 4 threads per process. With encodes bounded
+# by encode-limit.ts (2 per worker on the production shape) the default left 2
+# slots for every cached-variant read and every mirror DNS lookup, and lowering
+# num_workers would have raised the encode share to all 4. 16 keeps the encode
+# cap CPU-driven and leaves the rest of the pool to the cheap work that makes up
+# most requests. Thread stacks are virtual memory; 16 per worker is negligible.
+# encode-limit.ts caps encodes to leave slots free whatever this is set to, and
+# app.ts logs the resulting budget at boot. Note libuv reads this with atoi():
+# a non-numeric value means ONE thread, not the default.
+ENV UV_THREADPOOL_SIZE=16
 
 HEALTHCHECK --interval=20s --timeout=10s --start-period=5s \
   CMD /bin/sh -c 'wget -nv -t1 -O /dev/null "http://localhost:${PORT}/healthcheck" || exit 1'
