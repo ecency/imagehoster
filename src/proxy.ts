@@ -158,8 +158,13 @@ function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): P
 
 /**
  * Transcode an already-sized cached Match variant for a client that cannot
- * decode its format. Animated sources and encode failures fall back to the
- * cached bytes: an image that one client cannot render beats a failed request.
+ * decode its format. An animated source is handed back as it is (transcoding
+ * would drop its frames) and is still the real variant. A failed conversion
+ * also hands the cached bytes back, because an image one client cannot render
+ * beats a failed request, but as a PASSTHROUGH: those bytes are not what this
+ * client asked for, so they must not carry the variant's ETag or its year of
+ * freshness, or a conditional request would keep validating them long after
+ * the conversion recovers.
  */
 async function convertCachedMatchVariant(
     ctx: KoaContext,
@@ -167,24 +172,23 @@ async function convertCachedMatchVariant(
     mimeType: string,
     acceptHeader: string,
     options: ProxyOptions
-): Promise<{buffer: Buffer, contentType: string}> {
+): Promise<{image: ServedImage, contentType: string}> {
     try {
         const metadata = await Sharp(cached, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
         if (metadata.pages != null && metadata.pages > 1) {
-            // Transcoding an animated source here would drop its frames
-            return {buffer: cached, contentType: mimeType}
+            return {image: realImage(cached), contentType: mimeType}
         }
         const image = buildSharpPipeline(cached, false)
         const contentType = applyMatchFallbackFormat(image, mimeType, acceptHeader, metadata.hasAlpha)
         const buffer = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
         ctx.log.debug({ mimeType, contentType }, 'converted cached match variant for client')
-        return {buffer, contentType}
+        return {image: realImage(buffer), contentType}
     } catch (err) {
         if (isEncodeAborted(err)) {
             throw err
         }
         ctx.log.error({ err, mimeType }, 'failed to convert cached match variant')
-        return {buffer: cached, contentType: mimeType}
+        return {image: passthroughImage(cached, 'cached variant conversion failed, stored bytes served'), contentType: mimeType}
     }
 }
 
@@ -422,28 +426,27 @@ export async function proxyHandler(ctx: KoaContext) {
         // so a hit is real unless this whole request was substituted: a cached
         // variant of the DEFAULT image standing in for a blocked source must not
         // ship the immutable 1y header or the real ETag, or it would freeze the
-        // placeholder at the edge long after the block is lifted
-        const served: ServedImage<NodeJS.ReadableStream> = substitution
-            ? fallbackImage(stream, substitution.reason)
-            : realImage(stream)
-        ctx.set('ETag', etagFor(served, imageKey))
-        const variantCacheControl = cacheControlFor(served, IMMUTABLE_CACHE_CONTROL)
+        // placeholder at the edge long after the block is lifted. A conversion
+        // for the client's Accept can also fail and hand the stored bytes back
+        // as a passthrough, so the value, and the headers derived from it, are
+        // settled only after that step has had its say.
+        let served: ServedImage<NodeJS.ReadableStream | Buffer>
+        let servedType = mimeType
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
             const cached = await readStream(stream)
-            const served = await convertCachedMatchVariant(ctx, cached, mimeType, acceptHeader, options)
-            ctx.set('Content-Type', served.contentType)
-            ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', variantCacheControl)
-            ctx.body = served.buffer
-            return
+            const converted = await convertCachedMatchVariant(ctx, cached, mimeType, acceptHeader, options)
+            served = worstOf(converted.image, substitution)
+            servedType = converted.contentType
         } else {
-            ctx.set('Content-Type', mimeType)
-            ctx.set('Vary', 'Accept')
-            ctx.set('Cache-Control', variantCacheControl)
-            ctx.body = stream
-            return
+            served = worstOf(realImage(stream), substitution)
         }
+        ctx.set('Content-Type', servedType)
+        ctx.set('Vary', 'Accept')
+        ctx.set('Cache-Control', cacheControlFor(served, IMMUTABLE_CACHE_CONTROL))
+        ctx.set('ETag', etagFor(served, imageKey))
+        ctx.body = served.bytes
+        return
     }
 
     // check if we have the original

@@ -262,7 +262,7 @@ describe('proxy', function() {
                 const res = await needle('get', url)
                 assert.equal(res.statusCode, 200)
                 assert.equal(res.body.length, heic.length, 'the original bytes are handed through')
-                assert.equal(res.headers['cache-control'], 'public,max-age=31536000,immutable', 'real content keeps the real freshness')
+                assert.equal(res.headers['cache-control'], 'public,max-age=3600', 'a passthrough is fresh for an hour, not a year')
                 assert.equal(res.headers.etag, passthroughEtag(key))
                 assert.notEqual(res.headers.etag, etag(key), 'a passthrough must not wear the variant ETag')
                 assert.equal(await storeExists(proxyStore, key), false, 'a passthrough must not be stored as the variant')
@@ -271,6 +271,68 @@ describe('proxy', function() {
                 assert.equal(inm.statusCode, 200)
             } finally {
                 await new Promise<void>((resolve) => heicServer.close(() => resolve()))
+            }
+        })
+
+        it('does not let a failed cached conversion validate as the recovered variant', async function() {
+            this.slow(3000)
+            // A stored AVIF variant asked for by a client that cannot take AVIF is
+            // converted on the way out. If that conversion fails the stored bytes are
+            // handed back; they must not carry the variant ETag, or the client would
+            // be told "not modified" once the conversion works again.
+            const source = 'http://review.invalid/cached-avif.jpg'
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 100, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+            const avif = await sharp(path.resolve(__dirname, 'test.jpg')).resize(100).avif().toBuffer()
+            await storeWrite(proxyStore, key, avif)
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit&format=match`
+            const gate = require('./../src/encode-limit')
+            const realRunEncode = gate.runEncode
+            try {
+                gate.runEncode = async () => { throw new Error('simulated transient encode failure') }
+                const first = await needle('get', url, null, {headers: {accept: 'image/jpeg'}})
+                assert.equal(first.statusCode, 200)
+                assert.equal(first.headers['content-type'], 'image/avif', 'stored bytes handed back unconverted')
+                assert.equal(first.headers.etag, passthroughEtag(key))
+                assert.equal(first.headers['cache-control'], 'public,max-age=3600')
+                gate.runEncode = realRunEncode
+                const recovered = await needle('get', url, null,
+                    {headers: {accept: 'image/jpeg', 'if-none-match': first.headers.etag as string}})
+                assert.equal(recovered.statusCode, 200, 'incompatible AVIF must not validate as the recovered JPEG')
+                assert.equal(recovered.headers['content-type'], 'image/jpeg')
+                assert.equal(recovered.headers.etag, etag(key), 'the converted variant is real again')
+                assert.equal(recovered.headers['cache-control'], 'public,max-age=31536000,immutable')
+            } finally {
+                gate.runEncode = realRunEncode
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('renders the requested variant after a transient encode failure', async function() {
+            this.slow(3000)
+            serveImage = true
+            const source = `http://localhost:${ port+1 }/test.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=800&mode=fit&format=jpeg`
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 800, mode: ScalingMode.Fit, format: OutputFormat.JPEG} as any)
+            const gate = require('./../src/encode-limit')
+            const realRunEncode = gate.runEncode
+            try {
+                gate.runEncode = async () => { throw new Error('simulated transient encode failure') }
+                const first = await needle('get', url)
+                assert.equal(first.statusCode, 200)
+                const originalWidth = (await sharp(path.resolve(__dirname, 'test.jpg')).metadata()).width
+                assert.equal((await sharp(first.body).metadata()).width, originalWidth, 'the unresized original was handed through')
+                assert.equal(first.headers.etag, passthroughEtag(key))
+                assert.equal(await storeExists(proxyStore, key), false, 'a passthrough is not stored as the variant')
+                gate.runEncode = realRunEncode
+                const recovered = await needle('get', url, null, {headers: {'if-none-match': first.headers.etag as string}})
+                assert.equal(recovered.statusCode, 200, 'unresized bytes must not validate as the recovered 800px variant')
+                assert.equal((await sharp(recovered.body).metadata()).width, 800)
+                assert.equal(recovered.headers.etag, etag(key))
+            } finally {
+                gate.runEncode = realRunEncode
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
             }
         })
 

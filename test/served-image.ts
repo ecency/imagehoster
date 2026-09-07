@@ -5,7 +5,7 @@ import etag from 'etag'
 import {proxyStore} from './../src/common'
 import {
     cacheControlFor, derive, etagFor, FALLBACK_CACHE_CONTROL, fallbackEtag, fallbackImage, isFallbackImage,
-    passthroughEtag, passthroughImage, realImage, storeImage, worstOf,
+    PASSTHROUGH_CACHE_CONTROL, passthroughEtag, passthroughImage, realImage, storeImage, worstOf,
 } from './../src/served-image'
 import {storeExists, storeRemove} from './../src/utils'
 
@@ -49,8 +49,9 @@ describe('served image', function() {
         const through = passthroughImage(Buffer.from('original'), 'sharp failed')
         const key = 'Uabc_100x0_fit_match'
         assert.equal(derive(through, Buffer.alloc(0)).kind, 'passthrough')
-        // real freshness: the bytes are the genuine source
-        assert.equal(cacheControlFor(through, 'public,max-age=31536000,immutable'), 'public,max-age=31536000,immutable')
+        // genuine content but a degraded answer: an hour, not the variant's year
+        assert.equal(cacheControlFor(through, 'public,max-age=31536000,immutable'), PASSTHROUGH_CACHE_CONTROL)
+        assert.equal(PASSTHROUGH_CACHE_CONTROL, 'public,max-age=3600')
         // but its own validator, or a client holding it would be told "not modified" by the real variant later
         assert.equal(etagFor(through, key), passthroughEtag(key))
         assert.notEqual(etagFor(through, key), etagFor(real, key))

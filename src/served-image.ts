@@ -33,11 +33,13 @@ export interface FallbackImage<T = Buffer> {
 }
 
 /**
- * The source's own bytes handed through because the render failed (a JPEG Sharp
- * cannot decode but a browser can). Real content, so it keeps the real freshness,
- * but not the rendered variant: it is never stored under the variant key and it
- * carries its own ETag, or a client that cached it would be told "not modified"
- * by the real variant once a later render succeeds.
+ * The source's own bytes handed through because the render, or the conversion
+ * this client needed, failed (a JPEG Sharp cannot decode but a browser can; a
+ * transient encode failure). Real content, but not the rendered variant and
+ * possibly not what this client can display: it is never stored under the
+ * variant key, it carries its own ETag so a client that cached it is not told
+ * "not modified" by the real variant once a later render succeeds, and it is
+ * fresh for an hour rather than a year.
  */
 export interface PassthroughImage<T = Buffer> {
     readonly kind: 'passthrough'
@@ -89,9 +91,21 @@ export function worstOf<T>(image: ServedImage<T>, substituted: FallbackImage<unk
 
 /** The fallback contract: a placeholder is fresh for two minutes, never longer. */
 export const FALLBACK_CACHE_CONTROL = 'public,max-age=120'
+/**
+ * A passthrough is genuine content but a degraded answer: the render or the
+ * conversion this client needed did not happen, often transiently. An hour keeps
+ * a hot source from being re-attempted on every request and still lets a fix
+ * or a recovered encoder reach clients the same day, where the real variant's
+ * year of immutability would pin the degraded bytes.
+ */
+export const PASSTHROUGH_CACHE_CONTROL = 'public,max-age=3600'
 
 export function cacheControlFor(image: {kind: Provenance}, realPolicy: string): string {
-    return image.kind === 'fallback' ? FALLBACK_CACHE_CONTROL : realPolicy
+    switch (image.kind) {
+        case 'fallback': return FALLBACK_CACHE_CONTROL
+        case 'passthrough': return PASSTHROUGH_CACHE_CONTROL
+        default: return realPolicy
+    }
 }
 
 /**
