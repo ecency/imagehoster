@@ -18,7 +18,7 @@ import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
 import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
 import {shouldCacheOriginal} from './../src/proxy'
-import {fallbackEtag, fallbackImage, realImage} from './../src/served-image'
+import {fallbackEtag, fallbackImage, passthroughEtag, realImage} from './../src/served-image'
 import {
     base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, ScalingMode, storeExists, storeRemove, storeWrite,
 } from './../src/utils'
@@ -168,13 +168,16 @@ describe('proxy', function() {
             await new Promise<void>((resolve) => textServer.listen(0, 'localhost', () => resolve()))
             const textPort = (textServer.address() as any).port
             try {
-                const res = await needle('get',
-                    `http://localhost:${ port }/p/${ base58Enc(`http://localhost:${ textPort }/notes.txt`) }?width=100&mode=fit`)
+                const source = `http://localhost:${ textPort }/notes.txt`
+                const res = await needle('get', `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit`)
                 assert.equal(res.statusCode, 200)
                 // the builder always renders the default as JPEG for format=match,
                 // which is how this path is told apart from the fetch-fallback one
                 assert.equal(res.headers['content-type'], 'image/jpeg')
                 assert.equal(res.headers['cache-control'], 'public,max-age=120')
+                const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                    createHash('sha1').update(source).digest(), 'sha1')), {width: 100, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+                assert.equal(res.headers.etag, fallbackEtag(key), 'built placeholder carries the placeholder ETag for the requested key')
             } finally {
                 await new Promise<void>((resolve) => textServer.close(() => resolve()))
             }
@@ -205,6 +208,70 @@ describe('proxy', function() {
             const stale = await needle('get', url, null, { headers: { 'if-none-match': fallbackEtag(key) } })
             assert.equal(stale.statusCode, 200)
             assert.equal((await sharp(stale.body).metadata()).width, 120)
+        })
+
+        it('serves a cached variant under a substituted key with the fallback contract', async function() {
+            this.slow(3000)
+            // A variant of the DEFAULT image can legitimately sit in the store (it is a
+            // real render of a real upload). When a blocked source is substituted with
+            // the default, the cache-hit branch must still answer as a placeholder.
+            const source = `http://127.0.0.1:${ port+1 }/blocked-seeded.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            const defaultUrl = getDefaultUrlAndParams().url
+            const defaultOrigKey = 'U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(defaultUrl.toString()).digest(), 'sha1'))
+            const defaultKey = getImageKey(defaultOrigKey, {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+            const seeded = await sharp(path.resolve(__dirname, 'test.jpg')).resize(120).jpeg().toBuffer()
+            await storeWrite(proxyStore, defaultKey, seeded)
+            initBlacklistService([], [], ['127.0.0.1'])
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                assert.equal(res.body.length, seeded.length, 'the seeded cached variant was served')
+                assert.equal(res.headers['cache-control'], 'public,max-age=120')
+                assert.equal(res.headers.etag, fallbackEtag(defaultKey))
+            } finally {
+                initBlacklistService([], [], [])
+                try { await storeRemove(proxyStore, defaultKey) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('serves the original as a passthrough when the render fails, with its own ETag and no store write', async function() {
+            this.slow(3000)
+            this.timeout(15000)
+            // A HEIC parses (container metadata) but its pixels need libde265, which
+            // the stock development libvips lacks, so the render fails and the
+            // original bytes are handed through. Inside the production image the
+            // decode succeeds and this scenario does not arise; skip there.
+            const heic = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
+            let decodes = true
+            try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
+            if (decodes) { this.skip() }
+
+            const heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
+            await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
+            const heicPort = (heicServer.address() as any).port
+            const source = `http://localhost:${ heicPort }/photo.heic`
+            // blur=1 keeps the request on the Sharp pipeline: this fixture reports two
+            // pages (primary plus auxiliary image) and the handler would otherwise take
+            // the animated-passthrough branch before any decode is attempted
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit&blur=1`
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match, blur: true} as any)
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                assert.equal(res.body.length, heic.length, 'the original bytes are handed through')
+                assert.equal(res.headers['cache-control'], 'public,max-age=31536000,immutable', 'real content keeps the real freshness')
+                assert.equal(res.headers.etag, passthroughEtag(key))
+                assert.notEqual(res.headers.etag, etag(key), 'a passthrough must not wear the variant ETag')
+                assert.equal(await storeExists(proxyStore, key), false, 'a passthrough must not be stored as the variant')
+                // a client holding the passthrough is not told it is current
+                const inm = await needle('get', url, null, { headers: { 'if-none-match': res.headers.etag as string } })
+                assert.equal(inm.statusCode, 200)
+            } finally {
+                await new Promise<void>((resolve) => heicServer.close(() => resolve()))
+            }
         })
 
         it('never answers 304 for a substituted request', async function() {

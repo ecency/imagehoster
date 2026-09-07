@@ -24,8 +24,8 @@ import {
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {
-    cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, Provenance, realImage,
-    ServedImage, storeImage, worstOf,
+    cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, passthroughImage, Provenance,
+    realImage, ServedImage, storeImage, worstOf,
 } from './served-image'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
@@ -561,17 +561,9 @@ export async function proxyHandler(ctx: KoaContext) {
                 read_timeout: FETCH_DEFAULT_READ_MS,
                 signal: AbortSignal.timeout(FETCH_DEFAULT_WALL_MS),
             } as any)
-            const fallbackBuffer = fallbackRes.body
-            return await serveOrBuildFallbackImage(
-                ctx,
-                fallbackBuffer,
-                {
-                    width: options.width,
-                    height: options.height,
-                    mode: options.mode,
-                    format: options.format,
-                }
-            )
+            return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
+                width: options.width, height: options.height, mode: options.mode, format: options.format,
+            }, imageKey, `unsupported content type ${ contentType }, default rendered`)
         }
 
         APIError.assert(Buffer.isBuffer(origin.bytes), APIError.Code.InvalidImage)
@@ -590,13 +582,13 @@ export async function proxyHandler(ctx: KoaContext) {
         }
     }
 
-    let rv: Buffer
-    // Set when Sharp failed and we fall back to serving the original bytes; those
-    // are not a rendered variant and must not be cached as one.
-    let encodeFallback = false
+    // What goes out: a render of the origin (same provenance), or, when Sharp
+    // cannot process the source, the origin's own bytes as a passthrough. The
+    // value decides storage, Cache-Control and ETag below.
+    let rendered: ServedImage
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
-        rv = origin.bytes
+        rendered = origin
     } else {
 
         let metadata: Sharp.Metadata
@@ -644,7 +636,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 } as any)
                 return await serveOrBuildFallbackImage(ctx, fallbackRes.body, {
                     width: options.width, height: options.height, mode: options.mode, format: options.format,
-                })
+                }, imageKey, 'stored original unreadable, default rendered')
             }
             throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { url: urlString, key: imageKey,
                     metadata: 'fallback-failed' } })
@@ -654,7 +646,9 @@ export async function proxyHandler(ctx: KoaContext) {
         // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
         // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
         if (isAnimated && !options.blur) {
-            rv = origin.bytes
+            // deliberate passthrough of the animation, and a real variant for this
+            // key: every request for it gets these same bytes
+            rendered = origin
         } else {
         const image = buildSharpPipeline(origin.bytes, isAnimated)
 
@@ -738,7 +732,7 @@ export async function proxyHandler(ctx: KoaContext) {
         }
 
         try {
-            rv = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
+            rendered = derive(origin, await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx)))
         } catch (err) {
             if (isEncodeAborted(err)) {
                 // The client gave up while we were queued. Nothing failed, and
@@ -750,39 +744,34 @@ export async function proxyHandler(ctx: KoaContext) {
             ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
             captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
             // Every branch below serves the unprocessed original instead of a
-            // rendered variant. Storing those bytes under imageKey would make
-            // later requests skip resizing and format negotiation entirely, so
-            // the variant write is suppressed.
-            encodeFallback = true
+            // rendered variant: Sharp cannot decode or process the source (an
+            // unsupported HEIF bitstream, a truncated JPEG) but browsers are
+            // lenient. As a passthrough it is never stored under imageKey, which
+            // would make later requests skip resizing and format negotiation, and
+            // it carries its own ETag, so a client that cached it is not told
+            // "not modified" by the real variant once a later render succeeds.
+            const reason = 'sharp could not process the source, original bytes served'
             if (origIsUpload) {
-                // Sharp can't decode this image (e.g. unsupported HEIF/AVIF bitstream)
-                // but browsers likely can — serve the original unresized bytes
                 ctx.log.warn({ origKey }, 'serving original upload bytes after toBuffer failure')
-                rv = origin.bytes
-                contentType = await mimeMagic(origin.bytes)
             } else if (origFromCache) {
-                // Sharp can't process this image (e.g. truncated JPEG) but browsers
-                // are lenient and will render it fine — serve the original bytes
                 ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on cached image')
                 try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
-                rv = origin.bytes
-                contentType = await mimeMagic(origin.bytes)
             } else {
-                // Sharp can't process but browsers are lenient — serve original bytes
                 ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on fetched image')
-                rv = origin.bytes
-                contentType = await mimeMagic(origin.bytes)
             }
+            rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, reason)
+            contentType = await mimeMagic(origin.bytes)
         }
         } // end non-animated Sharp pipeline
 
-        // Legacy requests are never persisted (open proxy, see legacy-proxy.ts) and
-        // unprocessed originals are not a variant. A placeholder is refused by
-        // storeImage itself, whichever branch above produced it.
-        if (!isLegacy && !encodeFallback) {
-            ctx.log.debug('storing converted %s', imageKey)
+        // Legacy requests are never persisted (open proxy, see legacy-proxy.ts).
+        // Everything else is decided by the value: storeImage writes a real render
+        // and refuses a placeholder or a passthrough, whichever branch produced it.
+        if (!isLegacy) {
             try {
-                await storeImage(proxyStore, imageKey, derive(origin, rv))
+                if (await storeImage(proxyStore, imageKey, rendered)) {
+                    ctx.log.debug('stored converted %s', imageKey)
+                }
             } catch (err) {
                 ctx.log.error({ err, imageKey }, 'failed to store converted proxy image')
                 // Continue serving - storage failure shouldn't block response
@@ -791,9 +780,7 @@ export async function proxyHandler(ctx: KoaContext) {
 
     }
 
-    // Whatever was rendered inherits the provenance of what it was rendered from,
-    // and the headers are a function of that value, not of a flag beside it
-    const rendered = derive(origin, rv)
+    // The headers are a function of the value, not of a flag beside it
     ctx.set('Content-Type', contentType)
     // Vary on Accept header for proper content negotiation caching
     ctx.set('Vary', 'Accept')

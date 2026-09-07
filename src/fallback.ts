@@ -1,10 +1,16 @@
-import etag from 'etag'
 import Sharp from 'sharp'
 import {KoaContext} from './common'
 import {clientGoneSignal, runEncode} from './encode-limit'
 import { AVIF_EFFORT, MAX_INPUT_PIXELS } from './constants'
-import {getImageKey, OutputFormat, ProxyOptions, ScalingMode} from './utils'
+import {cacheControlFor, etagFor, fallbackImage} from './served-image'
+import {OutputFormat, ScalingMode} from './utils'
 
+/**
+ * Renders the default image in place of a source the pipeline could not use
+ * (unsupported content type, unreadable stored original) and serves it as the
+ * placeholder it is: the fallback Cache-Control and the fallback ETag for the
+ * requested key, derived from the value like every other response.
+ */
 export async function serveOrBuildFallbackImage(
     ctx: KoaContext,
     fallbackBuffer: Buffer,
@@ -14,12 +20,11 @@ export async function serveOrBuildFallbackImage(
         mode: ScalingMode
         format: OutputFormat
     },
-    keyPrefix = 'default-avatar',
+    imageKey: string,
+    reason: string,
 ) {
     ctx.tag({handler: 'fallback'})
-    const fallbackKey = getImageKey(keyPrefix, options as ProxyOptions)
-    ctx.set('ETag', etag(fallbackKey))
-    ctx.log.error({ fallbackKey }, 'serveOrBuildFallbackImage, falling back to default')
+    ctx.log.error({ imageKey, reason }, 'serveOrBuildFallbackImage, falling back to default')
 
     const image = Sharp(fallbackBuffer, { limitInputPixels: MAX_INPUT_PIXELS })
 
@@ -59,10 +64,11 @@ export async function serveOrBuildFallbackImage(
             contentType = 'image/jpeg'
     }
 
-    const rv = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
+    const served = fallbackImage(await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx)), reason)
 
     ctx.set('Content-Type', contentType)
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
-    ctx.body = rv
+    ctx.set('Cache-Control', cacheControlFor(served, 'public,max-age=31536000,immutable'))
+    ctx.set('ETag', etagFor(served, imageKey))
+    ctx.body = served.bytes
 }

@@ -18,7 +18,7 @@ import {storeWrite} from './utils'
  * the store helper refuses anything that is not real, so no call site needs to
  * remember the check.
  */
-export type Provenance = 'real' | 'fallback'
+export type Provenance = 'real' | 'fallback' | 'passthrough'
 
 export interface RealImage<T = Buffer> {
     readonly kind: 'real'
@@ -32,7 +32,20 @@ export interface FallbackImage<T = Buffer> {
     readonly reason: string
 }
 
-export type ServedImage<T = Buffer> = RealImage<T> | FallbackImage<T>
+/**
+ * The source's own bytes handed through because the render failed (a JPEG Sharp
+ * cannot decode but a browser can). Real content, so it keeps the real freshness,
+ * but not the rendered variant: it is never stored under the variant key and it
+ * carries its own ETag, or a client that cached it would be told "not modified"
+ * by the real variant once a later render succeeds.
+ */
+export interface PassthroughImage<T = Buffer> {
+    readonly kind: 'passthrough'
+    readonly bytes: T
+    readonly reason: string
+}
+
+export type ServedImage<T = Buffer> = RealImage<T> | FallbackImage<T> | PassthroughImage<T>
 
 export function realImage<T>(bytes: T): RealImage<T> {
     return {kind: 'real', bytes}
@@ -42,8 +55,16 @@ export function fallbackImage<T>(bytes: T, reason: string): FallbackImage<T> {
     return {kind: 'fallback', bytes, reason}
 }
 
+export function passthroughImage<T>(bytes: T, reason: string): PassthroughImage<T> {
+    return {kind: 'passthrough', bytes, reason}
+}
+
 export function isFallbackImage<T>(image: ServedImage<T>): image is FallbackImage<T> {
     return image.kind === 'fallback'
+}
+
+export function isRealImage<T>(image: ServedImage<T>): image is RealImage<T> {
+    return image.kind === 'real'
 }
 
 /**
@@ -51,7 +72,11 @@ export function isFallbackImage<T>(image: ServedImage<T>): image is FallbackImag
  * render of a real image is real. `reason` may be sharpened on the way.
  */
 export function derive<T, U>(from: ServedImage<T>, bytes: U, reason?: string): ServedImage<U> {
-    return isFallbackImage(from) ? fallbackImage(bytes, reason || from.reason) : realImage(bytes)
+    switch (from.kind) {
+        case 'fallback': return fallbackImage(bytes, reason || from.reason)
+        case 'passthrough': return passthroughImage(bytes, reason || from.reason)
+        default: return realImage(bytes)
+    }
 }
 
 /**
@@ -81,21 +106,31 @@ export function fallbackEtag(imageKey: string): string {
     return etag(imageKey + '|fallback')
 }
 
+export function passthroughEtag(imageKey: string): string {
+    return etag(imageKey + '|passthrough')
+}
+
 export function etagFor(image: {kind: Provenance}, imageKey: string): string {
-    return image.kind === 'fallback' ? fallbackEtag(imageKey) : etag(imageKey)
+    switch (image.kind) {
+        case 'fallback': return fallbackEtag(imageKey)
+        case 'passthrough': return passthroughEtag(imageKey)
+        default: return etag(imageKey)
+    }
 }
 
 /**
- * Persists a rendered variant or an original, and refuses a placeholder.
+ * Persists a rendered variant or an original, and refuses anything else.
  *
  * Stored bytes have no provenance on the way back out: a later request reads
- * them as a real image, serves them at the real freshness and under the real
- * ETag. So the only safe rule is that a placeholder never enters a store under a
- * key that means "the image the client asked for". Returns whether a write
- * happened; the caller still owns error handling for a write that fails.
+ * them as a real variant, serves them at the real freshness and under the real
+ * ETag. So the only safe rule is that only a real image enters a store under a
+ * key that means "the image the client asked for": a placeholder would poison
+ * the key, a passthrough would make later requests skip rendering. Returns
+ * whether a write happened; the caller still owns error handling for a write
+ * that fails.
  */
 export async function storeImage(store: AbstractBlobStore, key: BlobKey, image: ServedImage): Promise<boolean> {
-    if (isFallbackImage(image)) { return false }
+    if (!isRealImage(image)) { return false }
     await storeWrite(store, key, image.bytes)
     return true
 }
