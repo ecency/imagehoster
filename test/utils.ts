@@ -518,9 +518,12 @@ describe('constants', function() {
             assert.equal(EDGE_FIRST_BYTE_TIMEOUT_MS, 20000)
             assert(FETCH_DEADLINE_DEFAULT_MS + FETCH_DEFAULT_WALL_MS + FETCH_RENDER_SLACK_MS <= EDGE_FIRST_BYTE_TIMEOUT_MS,
                 `deadline ${ FETCH_DEADLINE_DEFAULT_MS } + default fetch ${ FETCH_DEFAULT_WALL_MS } + render ${ FETCH_RENDER_SLACK_MS } exceeds ${ EDGE_FIRST_BYTE_TIMEOUT_MS }`)
-            // and it still leaves room for a full slow candidate plus at least the
-            // minimum needed to start another, or the chain degenerates to one try
-            assert(FETCH_DEADLINE_DEFAULT_MS >= FETCH_CANDIDATE_WALL_MS + FETCH_MIN_REMAINING_MS - 1000)
+            // and it still lets one slow candidate run to its own wall, so a
+            // slow-but-alive origin is not cut off by the budget before its
+            // per-candidate timeout has had its say
+            assert(FETCH_DEADLINE_DEFAULT_MS >= FETCH_CANDIDATE_WALL_MS,
+                `deadline ${ FETCH_DEADLINE_DEFAULT_MS } is shorter than one candidate wall ${ FETCH_CANDIDATE_WALL_MS }`)
+            assert(FETCH_MIN_REMAINING_MS > 0)
             // the test config sets no override, so the live value is the default
             assert.equal(FETCH_DEADLINE_MS, FETCH_DEADLINE_DEFAULT_MS)
         })

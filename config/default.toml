@@ -141,7 +141,7 @@ max_custom_image_height = 2000
 # render slack, so an exhausted mirror walk answers with the placeholder before
 # the edge cuts the request off as a 503. An override is taken as given; keep it
 # under that budget or the placeholder path is dead code again.
-#fetch_deadline_ms = 13000
+#fetch_deadline_ms = 12000
 
 # Threads libvips uses per operation. Sharp already clamps this to 1 on glibc,
 # but only while it does not detect jemalloc, so setting it explicitly makes the

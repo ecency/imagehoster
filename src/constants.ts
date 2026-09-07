@@ -200,12 +200,20 @@ export const EDGE_FIRST_BYTE_TIMEOUT_MS = 20000
  * the reserved default-image fetch (its own worst case, FETCH_DEFAULT_WALL_MS)
  * and the render (FETCH_RENDER_SLACK_MS) to complete inside the edge budget.
  *
+ * The render slack is a heuristic, not an enforced limit: metadata, the encode
+ * gate's queue wait and the encode itself are not deadline-aware, so a saturated
+ * worker can still push the first byte past the edge cutoff. It is sized for the
+ * measured shape (a placeholder encode is tens of milliseconds, queue waits are
+ * usually well under a second at the production limit) with headroom, and it
+ * costs nothing in mirror depth: the first slow candidate's 12s wall consumes a
+ * 12s and a 13s budget identically, so the second candidate never ran either way.
+ *
  * Retune without a rebuild by restarting with
  * NODE_CONFIG='{"fetch_deadline_ms":11000}': config/ is baked into the image, so
  * editing a toml on the box does nothing unless it is mounted. An override is
  * taken as given, but the default is the value that is known to fit.
  */
-export const FETCH_RENDER_SLACK_MS = 2000
+export const FETCH_RENDER_SLACK_MS = 3000
 export const FETCH_DEADLINE_DEFAULT_MS =
     EDGE_FIRST_BYTE_TIMEOUT_MS - FETCH_DEFAULT_WALL_MS - FETCH_RENDER_SLACK_MS
 export const FETCH_DEADLINE_MS = (() => {
