@@ -400,17 +400,11 @@ export async function proxyHandler(ctx: KoaContext) {
     }
     // ctx.fresh only consults the conditional headers once the status is
     // 2xx/304, and Koa's default is 404 at this point, so without an explicit
-    // 200 this branch could never fire (and never did). The ETag set above is
-    // the REAL variant's: a placeholder never shares it (see etagFor), so a
-    // match means the client holds the real bytes for this key, and those are
-    // immutable whatever the source is doing today. A substituted request
-    // derives its key from the default image, so a client's copy of a blocked
-    // source can never match it either; the guard is belt and braces.
+    // 200 the revalidation branch inside the cache-hit block could never fire.
+    // The 304 itself is answered only once a stored variant has been inspected
+    // and found healthy, see below: a validator alone does not prove the bytes
+    // behind it are the ones this service would render today.
     ctx.status = 200
-    if (ctx.fresh && !shouldBypassCache && !substitution) {
-        ctx.status = 304
-        return
-    }
     // check if we already have a converted image for a requested key
     if (await storeExists(proxyStore, imageKey) && !options.ignorecache && !options.invalidate) {
         ctx.tag({store: 'resized'})
@@ -441,6 +435,21 @@ export async function proxyHandler(ctx: KoaContext) {
             file.destroy()
             try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
         } else {
+        // A 304 is a promise that the client's copy is what this key renders to,
+        // and it is made only here, with a healthy stored variant in hand. Before
+        // this point a client could present the validator of a raw container the
+        // old animated branch stored (#43) and be told to keep it. Without a
+        // stored variant the request renders and answers 200 instead, so the
+        // client replaces whatever it held. The ETag set earlier is the REAL
+        // variant's: a placeholder never shares it (see etagFor), and a
+        // substituted request derives its key from the default image, so a
+        // client's copy of a blocked source cannot match; the guard is belt and
+        // braces.
+        if (ctx.fresh && !shouldBypassCache && !substitution) {
+            file.destroy()
+            ctx.status = 304
+            return
+        }
         // Match variants are one bucket for every client that negotiated neither
         // AVIF nor WebP, so a stored AVIF/HEIF passthrough can be undecodable for
         // the client asking now. Convert the cached bytes rather than falling

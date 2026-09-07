@@ -336,6 +336,26 @@ describe('proxy', function() {
             }
         })
 
+        it('answers 304 only while the store holds a healthy variant for the key', async function() {
+            this.slow(3000)
+            serveImage = true
+            const source = `http://localhost:${ port+1 }/test.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=130&mode=fit`
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 130, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+            const warm = await needle('get', url)
+            assert.equal(warm.statusCode, 200)
+            const inm = { headers: { 'if-none-match': warm.headers.etag as string } }
+            assert.equal((await needle('get', url, null, inm)).statusCode, 304, 'healthy stored variant: vouch for the copy')
+            // the variant is gone (pruned): nothing to vouch with, so render and answer 200
+            await storeRemove(proxyStore, key)
+            const again = await needle('get', url, null, inm)
+            assert.equal(again.statusCode, 200)
+            assert.equal((await sharp(again.body).metadata()).width, 130)
+            assert.equal(await storeExists(proxyStore, key), true, 'and the variant is stored again')
+            assert.equal((await needle('get', url, null, inm)).statusCode, 304)
+        })
+
         it('never answers 304 for a substituted request', async function() {
             this.slow(3000)
             const source = `http://127.0.0.1:${ port+1 }/blocked-cond.jpg`
@@ -413,6 +433,26 @@ describe('proxy', function() {
                     && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
                 assert.equal(storedRaw, false, 'the raw HEIC container must never be stored under the variant key')
                 if (!decodes) { assert.equal(res.headers.etag, passthroughEtag(key)) }
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('does not honour the validator of a raw container: a conditional request is repaired too', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // A client that cached the raw container holds the real variant's ETag.
+            // Answering 304 to it would tell the client to keep the broken bytes.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=80&mode=fit`
+            const key = keyFor(source, {width: 80, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            await storeWrite(proxyStore, key, heic)
+            try {
+                const res = await needle('get', url, null, {headers: {'if-none-match': etag(key)}})
+                assert.equal(res.statusCode, 200, 'the old validator must not shortcut past the repair')
+                assert.notEqual(res.headers.etag, undefined)
+                const stillRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(stillRaw, false, 'the poisoned variant is removed on the conditional request as well')
             } finally {
                 try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
             }
