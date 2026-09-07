@@ -110,45 +110,35 @@ RUN apt-get update && apt-get install -y python3 && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY package.json yarn.lock ./
-# SHARP_IGNORE_GLOBAL_LIBVIPS: sharp's install script checks for a global libvips
-# FIRST, and this stage inherits PKG_CONFIG_PATH pointing at the custom 8.16.1
-# build. It only skips the source build today because node-addon-api happens to
-# be absent from the tree. If that ever changes transitively, sharp would build
-# from source and load ../src/build/Release ahead of the prebuilt binding,
-# silently bypassing the overwrite below. Pin the prebuilt path.
-RUN SHARP_IGNORE_GLOBAL_LIBVIPS=1 yarn install --frozen-lockfile
-# Replace Sharp's bundled libvips-cpp.so with our custom build (HEIC via libde265,
-# AVIF via libaom, and the wider format set libvips was configured with)
-RUN cp /usr/local/lib/x86_64-linux-gnu/libvips-cpp.so.42 \
-  node_modules/@img/sharp-libvips-linux-x64/lib/libvips-cpp.so.42
+# sharp compiles its own binding against the libvips this image built in stage 1,
+# through pkg-config (PKG_CONFIG_PATH is inherited from vips-builder), instead of
+# installing the prebuilt binding and overwriting the library it bundles. That
+# overwrite was a copy into a filename the binding happened to load; sharp-libvips
+# renamed that file in the 0.34 line, so the copy would have gone on succeeding
+# while nothing loaded it, and sharp.versions could not tell because the prebuilt
+# path reads a static versions file. A binding built here links libvips-cpp.so.42
+# by soname, reports the loaded library's real version, and a future sharp bump
+# whose minimum libvips is newer than ours fails at install instead of passing
+# with the wrong library. sharp does this by itself when it finds a global libvips
+# and node-addon-api + node-gyp (devDependencies); forcing it makes a missing
+# pkg-config path a build failure rather than a silent fall back to the prebuilt.
+# node-addon-api is pinned to 8.1.0 in package.json: sharp 0.33.x compiles its
+# binding as C++11 and node-addon-api 8.3+ requires C++17. Lift the pin with the
+# next sharp major.
+RUN SHARP_FORCE_GLOBAL_LIBVIPS=1 yarn install --frozen-lockfile
 
-# Fail the build if that copy did not land on the library Sharp actually loads.
-#
-# Two ways it can silently become a no-op. sharp-libvips PR #252 renamed the
-# bundled library to libvips-cpp.so.<vips-version> in the sharp 0.34.x line, so
-# after such an upgrade the cp writes a filename nothing loads; and if the cp were
-# dropped entirely the stock self-contained bundle stays in place. Either way the
-# build stays green while HEIC decode disappears, masked by the
-# serve-original-bytes fallback. sharp.versions cannot detect it: it reads a
-# static versions.json, which reports 8.15.3 in production today while the loaded
-# library is 8.16.1.
-#
-# The discriminator is the split build. Our libvips-cpp.so.42 declares NEEDED
-# libvips.so.42 and the codecs hang off that; the stock bundle is self-contained
-# and declares only libc-family entries. Verified against the running production
-# image: libvips-cpp.so.42 -> libvips.so.42 -> libheif.so.1 -> libde265 + libaom.
+# Fail the build unless the compiled binding exists and links the custom chain.
+# The runtime stage repeats the proof by decoding a HEIC through it.
 RUN set -e; \
-  BINDING=node_modules/@img/sharp-linux-x64/lib/sharp-linux-x64.node; \
-  test -f "$BINDING" || { echo "GUARD FAIL: no sharp binding at $BINDING"; exit 1; }; \
-  test ! -e node_modules/sharp/src/build || { \
-    echo "GUARD FAIL: sharp built from source at install, so the prebuilt binding and the overwrite are both bypassed"; exit 1; }; \
-  VLIB_NAME="$(readelf -d "$BINDING" | sed -n 's/.*(NEEDED).*\[\(libvips-cpp\.so[^]]*\)\].*/\1/p' | head -1)"; \
-  test -n "$VLIB_NAME" || { echo "GUARD FAIL: sharp binding declares no libvips-cpp NEEDED entry"; readelf -d "$BINDING" | grep NEEDED; exit 1; }; \
-  VLIB="node_modules/@img/sharp-libvips-linux-x64/lib/$VLIB_NAME"; \
-  test -f "$VLIB" || { echo "GUARD FAIL: binding loads $VLIB_NAME but the cp wrote a different filename"; exit 1; }; \
+  BINDING=node_modules/sharp/src/build/Release/sharp-linux-x64.node; \
+  test -f "$BINDING" || { echo "GUARD FAIL: sharp did not build from source (no $BINDING)"; \
+    ls -la node_modules/sharp/src/build 2>/dev/null; exit 1; }; \
+  readelf -d "$BINDING" | grep -q 'NEEDED.*\[libvips-cpp\.so\.42\]' || { \
+    echo "GUARD FAIL: compiled binding does not link libvips-cpp.so.42"; readelf -d "$BINDING" | grep NEEDED; exit 1; }; \
+  VLIB="$(ldd "$BINDING" | sed -n 's/.*libvips-cpp\.so\.42 => \([^ ]*\).*/\1/p')"; \
+  case "$VLIB" in /usr/local/lib/*) ;; *) echo "GUARD FAIL: binding resolves libvips-cpp.so.42 to '$VLIB', not the custom build"; exit 1;; esac; \
   readelf -d "$VLIB" | grep -q 'NEEDED.*\[libvips\.so\.42\]' || { \
-    echo "GUARD FAIL: $VLIB is the stock self-contained library, the overwrite did not take effect"; \
-    readelf -d "$VLIB" | grep NEEDED; exit 1; }; \
+    echo "GUARD FAIL: $VLIB is not the split custom build"; readelf -d "$VLIB" | grep NEEDED; exit 1; }; \
   VIPS_SO="$(find /usr/local/lib -name libvips.so.42 | head -1)"; \
   HEIF_SO="$(find /usr/local/lib -name 'libheif.so.1' | head -1)"; \
   test -n "$VIPS_SO" || { echo "GUARD FAIL: custom libvips.so.42 not found under /usr/local/lib"; exit 1; }; \
@@ -158,7 +148,17 @@ RUN set -e; \
     readelf -d "$HEIF_SO" | grep -q "NEEDED.*\[$dep" || { \
       echo "GUARD FAIL: libheif.so.1 lacks NEEDED $dep"; readelf -d "$HEIF_SO" | grep NEEDED; exit 1; }; \
   done; \
-  echo "GUARD OK: custom libvips chain verified ($VLIB_NAME -> libvips.so.42 -> libheif.so.1 -> libde265 + libaom)"
+  echo "GUARD OK: compiled sharp binding -> $VLIB -> libvips.so.42 -> libheif.so.1 -> libde265 + libaom"; \
+  pkg-config --modversion vips-cpp > /app/.vips-version; \
+  echo "libvips $(cat /app/.vips-version) recorded for the runtime smoke test"
+
+# With the binding compiled, the prebuilt bindings and their bundled libvips are
+# dead weight and a silent fallback: sharp tries src/build first and the prebuilt
+# second, so if the compiled binding ever went missing the service would come up
+# on the stock library with HEIC decode gone. yarn 1 also ignores the libc field
+# and installs the musl variants alongside the glibc ones. Remove the whole
+# namespace so that failure is loud and the image carries nothing it cannot load.
+RUN rm -rf node_modules/@img && test ! -e node_modules/@img
 
 COPY . .
 RUN make lib
@@ -190,14 +190,17 @@ COPY --from=build /app/config config
 COPY --from=build /app/node_modules node_modules
 COPY --from=build /app/scripts/smoke-decode.js scripts/smoke-decode.js
 COPY --from=build /app/test/test.heic test/test.heic
+COPY --from=build /app/.vips-version .vips-version
 
 # Prove the custom libvips is the one actually loaded, on the exact filesystem
-# that ships, by decoding rather than by reading a version string. The build-stage
-# guard checks the ELF wiring; this checks that the wiring works, and that the
-# NAPI binding loads under this Node major. Reading metadata is not enough: the
-# stock library parses the HEIF container fine and only a pixel decode reaches
-# libde265.
-RUN node /app/scripts/smoke-decode.js
+# that ships, by decoding. The build-stage guard checks the ELF wiring; this
+# checks that the wiring works, and that the NAPI binding loads under this Node
+# major. Reading metadata is not enough: the stock library parses the HEIF
+# container fine and only a pixel decode reaches libde265. Because the binding
+# is built against a global libvips, sharp.versions.vips now comes from the
+# loaded library, so the smoke test also asserts it is the version pkg-config
+# saw when the binding was compiled.
+RUN SMOKE_VIPS_VERSION="$(cat /app/.vips-version)" node /app/scripts/smoke-decode.js
 
 EXPOSE 8800
 ENV PORT=8800
