@@ -211,6 +211,13 @@ export async function storeExistsBounded(
  * Reads the first `bytes` of a stream (for sniffing) under a budget. On abort the
  * stream is destroyed and the caller gets an AbortError, so a stalled store cannot
  * hold a cache hit open past the request's budget.
+ *
+ * stream-head listens for errors only on its own internal stream, never on the
+ * input, so an input that fails (an object-store GET that errors after the stream
+ * was handed out) would emit an unhandled 'error' and take the process down. The
+ * input's errors are owned here: before the head is read they reject this
+ * promise; after it, they are forwarded to the output stream the caller holds,
+ * where Koa's body handling or readStream() will see them.
  */
 export async function streamHeadBounded(
     stream: NodeJS.ReadableStream, bytes: number, signal: AbortSignal,
@@ -218,16 +225,25 @@ export async function streamHeadBounded(
     const streamHead = (await import('stream-head')).default
     return new Promise((resolve, reject) => {
         let settled = false
+        let output: NodeJS.ReadableStream | undefined
+        const destroyInput = (err?: Error) => { if ((stream as any).destroy) { (stream as any).destroy(err) } }
         const finish = (fn: () => void) => { if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); fn() } }
         const onAbort = () => finish(() => {
-            if ((stream as any).destroy) { (stream as any).destroy() }
+            destroyInput()
             reject(storeAbortError(signal))
         })
+        const onInputError = (err: Error) => {
+            if (!settled) { finish(() => reject(err)); return }
+            // the caller now owns the output; hand the failure to it rather than
+            // letting an unlistened input emit
+            if (output && (output as any).destroy) { (output as any).destroy(err) }
+        }
+        stream.on('error', onInputError)
         if (signal.aborted) { onAbort(); return }
         signal.addEventListener('abort', onAbort, {once: true})
         streamHead(stream as any, {bytes}).then(
-            (r: any) => finish(() => resolve(r)),
-            (err: any) => finish(() => reject(err)),
+            (r: any) => finish(() => { output = r.stream; resolve(r) }),
+            (err: any) => finish(() => { destroyInput(); reject(err) }),
         )
     })
 }

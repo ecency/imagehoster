@@ -23,6 +23,13 @@ export class S3BlobStore {
             Bucket: this.bucket,
             Key: key,
         }), abortSignal ? { abortSignal } : undefined).then((res) => {
+            if (passthrough.destroyed) {
+                // the consumer gave up (budget abort) before the GET answered:
+                // release the body instead of piping into a destroyed stream
+                const body = res.Body as any
+                if (body && typeof body.destroy === 'function') { body.destroy() }
+                return
+            }
             if (!res.Body || typeof (res.Body as any).pipe !== 'function') {
                 passthrough.destroy(new Error('S3 response body is not a readable stream'))
                 return

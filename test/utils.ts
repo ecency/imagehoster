@@ -39,6 +39,7 @@ import {
     redactUrlForLog,
     storeRemoveByPrefix,
     storeWrite,
+    streamHeadBounded,
     expandPurgeUrls,
 } from './../src/utils'
 
@@ -392,6 +393,45 @@ describe('utils', function() {
             assert.equal(await storeExistsBounded(failing, 'k', AbortSignal.timeout(1000), quiet, 'test'), false)
             const present: any = { exists: (_o: any, done: any) => done(null, true) }
             assert.equal(await storeExistsBounded(present, 'k', AbortSignal.timeout(1000), quiet, 'test'), true)
+        })
+
+        it('streamHeadBounded rejects on an input error instead of letting it escape', async function() {
+            // stream-head listens for errors only on its internal stream; an input that
+            // fails during the head read used to emit an unhandled error and kill the
+            // process (a simulated S3 GET failure exited Node with code 1)
+            const input = new PassThrough()
+            let escaped: any
+            const onUncaught = (err: any) => { escaped = err }
+            process.on('uncaughtException', onUncaught)
+            try {
+                const p = streamHeadBounded(input, 16384, AbortSignal.timeout(5000))
+                setTimeout(() => input.destroy(new Error('simulated S3 GET failure')), 10)
+                await assert.rejects(p, /simulated S3 GET failure/)
+                await new Promise((r) => setTimeout(r, 30))
+                assert.equal(escaped, undefined, 'the input error must be handled, not escape as uncaught')
+            } finally {
+                process.removeListener('uncaughtException', onUncaught)
+            }
+        })
+
+        it('streamHeadBounded forwards a later input error to the output stream it handed out', async function() {
+            const input = new PassThrough()
+            const p = streamHeadBounded(input, 4, AbortSignal.timeout(5000))
+            input.write(Buffer.from('12345678'))
+            const {head, stream} = await p
+            assert(head.toString().startsWith('1234'), 'stream-head returns whole chunks, at least the requested bytes')
+            const seen = new Promise<Error>((resolve) => stream.on('error', resolve))
+            input.destroy(new Error('late failure'))
+            assert.equal((await seen).message, 'late failure')
+        })
+
+        it('streamHeadBounded still resolves the head and passes the rest through', async function() {
+            const input = new PassThrough()
+            const p = streamHeadBounded(input, 3, AbortSignal.timeout(5000))
+            input.end(Buffer.from('abcdef'))
+            const {head, stream} = await p
+            assert(head.toString().startsWith('abc'))
+            assert.equal((await readStream(stream)).toString(), 'abcdef', 'the output carries the whole body, head included')
         })
 
         it('storeWrite rejects with AbortError when the store never finishes and the signal fires', async function() {

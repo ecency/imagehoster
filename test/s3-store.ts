@@ -176,6 +176,27 @@ describe('S3BlobStore', function() {
         })
     })
 
+    describe('read stream after the consumer gave up', function() {
+        it('does not pipe a late GET body into a destroyed stream', async function() {
+            let bodyDestroyed = false
+            let release: (v: any) => void = () => undefined
+            const client: any = { send: () => new Promise((resolve) => { release = resolve }) }
+            const store = new S3BlobStore({ client, bucket: 'b' })
+            const rs = store.createReadStream({key: 'k'})
+            let erred: any
+            rs.on('error', (e) => { erred = e })
+            rs.destroy() // consumer aborted (budget)
+            const {Readable} = require('stream')
+            const body = Readable.from([Buffer.from('late')])
+            const origDestroy = body.destroy.bind(body)
+            body.destroy = (...a: any[]) => { bodyDestroyed = true; return origDestroy(...a) }
+            release({Body: body})
+            await new Promise((r) => setTimeout(r, 20))
+            assert.equal(bodyDestroyed, true, 'the late body must be released')
+            assert.equal(erred, undefined, 'and nothing must be written into the destroyed stream')
+        })
+    })
+
     describe('abort signals', function() {
         it('forwards the signal to the SDK for exists, createReadStream and putBuffer', async function() {
             const calls: any[] = []
