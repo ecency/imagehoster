@@ -177,7 +177,7 @@ describe('S3BlobStore', function() {
     })
 
     describe('abort signals', function() {
-        it('forwards the signal to the SDK for exists and createReadStream', async function() {
+        it('forwards the signal to the SDK for exists, createReadStream and putBuffer', async function() {
             const calls: any[] = []
             const client: any = {
                 send: async (command: any, options: any) => {
@@ -196,11 +196,12 @@ describe('S3BlobStore', function() {
                 const rs = store.createReadStream({key: 'k', signal})
                 rs.on('error', reject); rs.on('end', () => resolve()); rs.resume()
             })
-            assert.equal(calls.length, 2)
+            await store.putBuffer('k', Buffer.from('x'), signal)
+            assert.equal(calls.length, 3)
             for (const c of calls) { assert.equal(c.options && c.options.abortSignal, signal, `${ c.name } must carry the abortSignal`) }
             // and nothing is passed when there is no signal
             await new Promise<void>((resolve, reject) => store.exists('plain', (err) => err ? reject(err) : resolve()))
-            assert.equal(calls[2].options, undefined)
+            assert.equal(calls[3].options, undefined)
         })
     })
 

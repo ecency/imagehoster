@@ -233,25 +233,38 @@ export async function streamHeadBounded(
 }
 
 interface PutBufferStore {
-    putBuffer(key: string, buf: Buffer): Promise<void>
+    putBuffer(key: string, buf: Buffer, signal?: AbortSignal): Promise<void>
 }
 
 function hasPutBuffer(store: any): store is PutBufferStore {
     return typeof store.putBuffer === 'function'
 }
 
-export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+/**
+ * Writes a blob. With a signal the S3 upload is aborted when it fires and the
+ * caller gets an AbortError; a write on a request path is awaited before the
+ * response goes out, so a stalled object store must not hold it either.
+ */
+export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string, signal?: AbortSignal) {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
     // Use direct buffer upload for S3 stores (avoids stream double-buffering)
     if (hasPutBuffer(store)) {
         const k = typeof key === 'string' ? key : (key as any).key
-        await store.putBuffer(k, buf)
+        if (signal && signal.aborted) { throw storeAbortError(signal) }
+        await store.putBuffer(k, buf, signal)
         return { key: k }
     }
     return new Promise((resolve, reject) => {
-        const stream = store.createWriteStream(key, (error, metadata) => {
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => reject(storeAbortError(signal)))
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
+        const stream = store.createWriteStream(key, (error, metadata) => finish(() => {
             if (error) { reject(error) } else { resolve(metadata) }
-        })
+        }))
         stream.write(buf)
         stream.end()
     })

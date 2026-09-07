@@ -37,12 +37,12 @@ export class S3BlobStore {
     }
 
     /** Direct buffer upload — no streaming overhead. */
-    async putBuffer(key: string, data: Buffer): Promise<void> {
+    async putBuffer(key: string, data: Buffer, signal?: AbortSignal): Promise<void> {
         await this.s3.send(new PutObjectCommand({
             Bucket: this.bucket,
             Key: key,
             Body: data,
-        }))
+        }), signal ? { abortSignal: signal } : undefined)
     }
 
     createWriteStream(opts: any, done?: (error: any, metadata?: any) => void): PassThrough {

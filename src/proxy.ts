@@ -580,7 +580,7 @@ export async function proxyHandler(ctx: KoaContext) {
             if (shouldCacheOriginal(res.bytes, {image: origin, usesUploadStore, isLegacy})) {
                 ctx.log.debug('storing original readStream catch %s', origKey)
                 try {
-                    await storeImage(origStore, origKey, origin)
+                    await storeImage(origStore, origKey, origin, storeSignal())
                 } catch (err) {
                     ctx.log.error({ err, origKey }, 'failed to store original proxy image (readStream catch)')
                     // Continue serving - storage failure shouldn't block response
@@ -640,7 +640,7 @@ export async function proxyHandler(ctx: KoaContext) {
         if (shouldCacheOriginal(res.bytes, {image: origin, usesUploadStore, isLegacy})) {
             ctx.log.debug('storing original image %s', origKey)
             try {
-                await storeImage(origStore, origKey, origin)
+                await storeImage(origStore, origKey, origin, storeSignal())
             } catch (err) {
                 ctx.log.error({ err, origKey }, 'failed to store original proxy image')
                 // Continue serving - storage failure shouldn't block response
@@ -833,7 +833,7 @@ export async function proxyHandler(ctx: KoaContext) {
         // and refuses a placeholder or a passthrough, whichever branch produced it.
         if (!isLegacy) {
             try {
-                if (await storeImage(proxyStore, imageKey, rendered)) {
+                if (await storeImage(proxyStore, imageKey, rendered, storeSignal())) {
                     ctx.log.debug('stored converted %s', imageKey)
                 }
             } catch (err) {

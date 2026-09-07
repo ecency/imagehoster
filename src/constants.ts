@@ -231,11 +231,21 @@ export const FETCH_DEADLINE_MS = (() => {
  * budget it silently consumed (a 503'd walk was seen logging `attempted: 0`).
  * The upload and retention stores live in the same data centre as the service:
  * a healthy call is tens of milliseconds, the measured p99 on the serve route was
- * 3.2 s, so these are floors for a stall, not budgets for normal work.
+ * 3.2 s, so these are floors for a stall, not budgets for normal work. Calls on
+ * a request path additionally carry a signal from `budgetSignal`, reads and the
+ * writes awaited before the response alike, so the floors only decide calls
+ * made without one.
  */
-export const S3_CONNECT_TIMEOUT_MS = 3000
-export const S3_REQUEST_TIMEOUT_MS = 10000
+export const S3_CONNECT_TIMEOUT_MS = 2000
+export const S3_REQUEST_TIMEOUT_MS = 5000
 export const S3_MAX_ATTEMPTS = 2
+/**
+ * Worst case for one unsignalled call: every attempt connects and then stalls
+ * for the full request timeout. Pinned by a test to stay under the edge's 20 s
+ * with room for backoff, because these floors are the only bound on calls made
+ * without a request signal (writes off the request path, purges, removals).
+ */
+export const S3_WORST_CASE_MS = S3_MAX_ATTEMPTS * (S3_CONNECT_TIMEOUT_MS + S3_REQUEST_TIMEOUT_MS)
 
 /**
  * The SDK's NodeHttpHandler options. `requestTimeout` alone only LOGS when it

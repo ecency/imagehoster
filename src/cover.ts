@@ -263,7 +263,7 @@ async function handleCover(ctx: KoaContext) {
       if (res.bytes <= Number.parseInt(config.get('max_image_size')) && !isFallbackImage(origin)) {
         ctx.log.debug('storing original %s', origKey)
         try {
-          await storeImage(origStore, origKey, origin)
+          await storeImage(origStore, origKey, origin, storeSignal())
           // Purge Cloudflare cache for this user's cover endpoint since we fetched a new image
           const serviceUrl = new URL(config.get('service_url'))
           purgeCache(`${serviceUrl.origin}/u/${username}/cover`)
@@ -306,7 +306,7 @@ async function handleCover(ctx: KoaContext) {
   // enforces that; a profile-lookup fallback is unaffected because it derives
   // both keys from the default image's own URL and never occupies a user's key.
   try {
-    if (await storeImage(proxyStore, imageKey, rendered)) {
+    if (await storeImage(proxyStore, imageKey, rendered, storeSignal())) {
       ctx.log.debug('stored converted %s', imageKey)
     } else {
       ctx.log.debug('not-storing fallback variant %s (%s)', imageKey, (rendered as FallbackImage).reason)

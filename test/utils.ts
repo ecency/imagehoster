@@ -44,7 +44,7 @@ import {
 
 import {PassThrough} from 'stream'
 
-import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
+import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, S3_CONNECT_TIMEOUT_MS, S3_MAX_ATTEMPTS, S3_REQUEST_TIMEOUT_MS, S3_WORST_CASE_MS, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -392,6 +392,22 @@ describe('utils', function() {
             assert.equal(await storeExistsBounded(failing, 'k', AbortSignal.timeout(1000), quiet, 'test'), false)
             const present: any = { exists: (_o: any, done: any) => done(null, true) }
             assert.equal(await storeExistsBounded(present, 'k', AbortSignal.timeout(1000), quiet, 'test'), true)
+        })
+
+        it('storeWrite rejects with AbortError when the store never finishes and the signal fires', async function() {
+            const hangingWriter: any = { createWriteStream: () => new PassThrough() } // done never called
+            const t0 = Date.now()
+            await assert.rejects(storeWrite(hangingWriter, 'k', Buffer.from('x'), AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            assert(Date.now() - t0 < 1000)
+            const hangingPut: any = { putBuffer: () => new Promise(() => undefined) }
+            const c = new AbortController(); c.abort()
+            await assert.rejects(storeWrite(hangingPut, 'k', Buffer.from('x'), c.signal), (err: any) => err.name === 'AbortError')
+        })
+
+        it('keeps the client floors comfortably under the edge timeout', function() {
+            // every attempt connects and then stalls for the full request timeout
+            assert(S3_WORST_CASE_MS <= 16000, `worst case ${ S3_WORST_CASE_MS }ms must leave room for backoff under the 20s edge cut`)
+            assert.equal(S3_WORST_CASE_MS, S3_MAX_ATTEMPTS * (S3_CONNECT_TIMEOUT_MS + S3_REQUEST_TIMEOUT_MS))
         })
 
         it('budgetSignal clamps to the remaining deadline, and to the cap, and never disables the timer', async function() {
