@@ -308,6 +308,7 @@ export async function getRatelimit(account: string, max: number, duration: numbe
 /** Blob storage — only initialized in worker processes. */
 
 import { S3Client } from '@aws-sdk/client-s3'
+import { S3_MAX_ATTEMPTS, s3RequestHandlerOptions } from './constants'
 import { S3BlobStore } from './s3-store'
 import { ShardedFsStore } from './sharded-fs-store'
 
@@ -342,6 +343,10 @@ function loadStore(key: string): AbstractBlobStore {
                 endpoint,
                 region: config.get('S3_REGION') as string,
                 forcePathStyle: true,
+                // Floors for a stalled object store; see s3RequestHandlerOptions in
+                // constants.ts. The SDK builds its NodeHttpHandler from this object.
+                requestHandler: s3RequestHandlerOptions(),
+                maxAttempts: S3_MAX_ATTEMPTS,
             })
         }
         return new S3BlobStore({

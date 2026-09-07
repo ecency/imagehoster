@@ -1,9 +1,9 @@
 /** Serve files from upload store. */
 
-import {isBlacklistedUrl, readStream} from './utils'
+import {isBlacklistedUrl, isStoreAbort, readStream} from './utils'
 import {KoaContext, uploadStore} from './common'
 import {APIError} from './error'
-import {DEFAULT_AVATAR_HASH, MAX_INPUT_PIXELS, SERVICE_BASE_URL} from './constants'
+import {budgetSignal, DEFAULT_AVATAR_HASH, MAX_INPUT_PIXELS, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL} from './constants'
 import Sharp from 'sharp'
 
 function detectMimeType(metadata: Sharp.Metadata): string {
@@ -42,9 +42,18 @@ export async function serveHandler(ctx: KoaContext) {
     }
 
     let buffer: Buffer
+    // This route has no fetch path to fall through to, so a stalled object store
+    // is answered as such: a 504 that the error middleware marks no-store, rather
+    // than a wait until the edge cuts the request off at its own timeout, and
+    // rather than a 404, which caches and would tell the client the upload is gone
+    const signal = budgetSignal(undefined, SERVE_READ_TIMEOUT_MS)
     try {
-        buffer = await readStream(uploadStore.createReadStream(_hash))
+        buffer = await readStream(uploadStore.createReadStream({ key: _hash, signal } as any), signal)
     } catch (error) {
+        if (isStoreAbort(error)) {
+            ctx.log.warn({hash: _hash, timeoutMs: SERVE_READ_TIMEOUT_MS}, 'upload store read timed out')
+            throw new APIError({ cause: error as Error, code: APIError.Code.StoreTimeout, info: { hash: _hash } })
+        }
         // File not found in uploadStore — return 404 to let the client
         // retry via the proxy path (/p/) which has a full fallback chain.
         // Do NOT fetch from external proxies and write to uploadStore here —

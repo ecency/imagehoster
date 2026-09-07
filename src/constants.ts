@@ -221,3 +221,63 @@ export const FETCH_DEADLINE_MS = (() => {
     const v = Number(config.get('fetch_deadline_ms'))
     return Number.isSafeInteger(v) && v > 0 ? v : FETCH_DEADLINE_DEFAULT_MS
 })()
+
+/**
+ * Object-store (S3) request floors, set on the shared client.
+ *
+ * The SDK's defaults leave connection and socket timeouts unbounded and retry
+ * three times, so a stalled HEAD or GET against object storage blocked a request
+ * until the edge cut it off at 20 s, and it did so BEFORE the mirror walk, whose
+ * budget it silently consumed (a 503'd walk was seen logging `attempted: 0`).
+ * The upload and retention stores live in the same data centre as the service:
+ * a healthy call is tens of milliseconds, the measured p99 on the serve route was
+ * 3.2 s, so these are floors for a stall, not budgets for normal work.
+ */
+export const S3_CONNECT_TIMEOUT_MS = 3000
+export const S3_REQUEST_TIMEOUT_MS = 10000
+export const S3_MAX_ATTEMPTS = 2
+
+/**
+ * The SDK's NodeHttpHandler options. `requestTimeout` alone only LOGS when it
+ * elapses; it aborts the request only with `throwOnRequestTimeout`, and the idle
+ * socket guard is the separate `socketTimeout`. Kept in one place so the client
+ * and the test that proves a stalled endpoint is actually cut off share it.
+ */
+export function s3RequestHandlerOptions(overrides: Partial<{connectionTimeout: number, requestTimeout: number}> = {}) {
+    const requestTimeout = overrides.requestTimeout ?? S3_REQUEST_TIMEOUT_MS
+    return {
+        connectionTimeout: overrides.connectionTimeout ?? S3_CONNECT_TIMEOUT_MS,
+        requestTimeout,
+        throwOnRequestTimeout: true,
+        socketTimeout: requestTimeout,
+    }
+}
+
+/**
+ * Per-lookup budget for a store HEAD or GET on a request path, in ms.
+ *
+ * Every store call a read handler makes before its upstream fetch (upload-store
+ * and retention HEADs, the read of a stored original) carries an AbortSignal of
+ * at most this long, further clamped to what is left of the request's fetch
+ * deadline, so a stall costs the request one bounded wait and then falls
+ * through to the fetch path or the placeholder instead of eating the whole
+ * budget. The serve route, which has no fetch to fall through to, allows three
+ * times this for an original of up to max_image_size and answers 504 past it.
+ * Configurable as `store_op_timeout_ms` (tests set it low).
+ */
+export const STORE_OP_TIMEOUT_MS = (() => {
+    if (!config.has('store_op_timeout_ms')) { return 5000 }
+    const v = Number(config.get('store_op_timeout_ms'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 5000
+})()
+export const SERVE_READ_TIMEOUT_MS = STORE_OP_TIMEOUT_MS * 3
+
+/**
+ * An AbortSignal for one store call: `capMs`, or what is left until `deadlineAt`
+ * if that is sooner, never less than 1 ms so a blown budget aborts immediately
+ * rather than disabling the timer.
+ */
+export function budgetSignal(deadlineAt: number | undefined, capMs: number): AbortSignal {
+    const remaining = deadlineAt === undefined ? capMs : deadlineAt - Date.now()
+    return AbortSignal.timeout(Math.max(1, Math.min(capMs, remaining)))
+}

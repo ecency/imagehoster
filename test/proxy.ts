@@ -530,6 +530,58 @@ describe('proxy', function() {
         })
     })
 
+    it('falls through to the fetch when a store lookup stalls, inside the request budget', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        // The rescued-original check is a HEAD against the upload store, made before
+        // the mirror walk. A stall there used to consume the whole fetch budget, so
+        // the walk started with nothing left and the placeholder was served too late.
+        serveImage = true
+        const source = `http://localhost:${ port+1 }/stalled-store-${ Date.now() }.jpg`
+        const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit`
+        const realExists = uploadStore.exists
+        let hung = 0
+        ;(uploadStore as any).exists = () => { hung++ } // never calls back
+        const t0 = Date.now()
+        try {
+            const res = await needle('get', url)
+            const elapsed = Date.now() - t0
+            assert.equal(res.statusCode, 200)
+            assert.equal((await sharp(res.body).metadata()).width, 100, 'the fetch path served the real image')
+            assert.equal(res.headers['cache-control'], 'public,max-age=31536000,immutable')
+            assert(hung >= 1, 'the stalled lookup was attempted')
+            // store_op_timeout_ms is 300 in the test config: one bounded wait, then the fetch
+            assert(elapsed < 3000, `request took ${ elapsed }ms; the stalled lookup must cost at most one store budget`)
+        } finally {
+            ;(uploadStore as any).exists = realExists
+        }
+    })
+
+    it('bounds the first variant lookup too, so a stalled proxy store still reaches the fetch', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        // The variant HEAD is the very first store call. It used to be unbounded, so a
+        // stall there never reached any of the bounded lookups that follow it.
+        serveImage = true
+        const source = `http://localhost:${ port+1 }/stalled-variant-${ Date.now() }.jpg`
+        const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+        const realExists = proxyStore.exists
+        const pending: any[] = []
+        ;(proxyStore as any).exists = (_key: any, done: any) => { pending.push(done) } // never answers
+        const t0 = Date.now()
+        try {
+            const res = await needle('get', url)
+            const elapsed = Date.now() - t0
+            assert.equal(res.statusCode, 200)
+            assert.equal((await sharp(res.body).metadata()).width, 120)
+            // variant HEAD and original HEAD each cost one 300ms budget, then the fetch
+            assert(elapsed < 1500, `took ${ elapsed }ms; two stalled lookups must cost at most two store budgets`)
+        } finally {
+            ;(proxyStore as any).exists = realExists
+            for (const done of pending) { try { done(null, false) } catch (_e) { /* settled */ } }
+        }
+    })
+
     it('should proxy stored image when source is gone', async function() {
         // First, store via /p/ route (legacy routes no longer store)
         const imageUrl = base58Enc(`http://localhost:${ port+1 }/test.jpg`)

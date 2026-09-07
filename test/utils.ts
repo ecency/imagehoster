@@ -24,6 +24,9 @@ import {
     isAnimatedSource,
     parseProxiedUrl,
     primaryPageOf,
+    readStream,
+    storeExists,
+    storeExistsBounded,
     parsePlainUrl,
     getOrigKeyFromUrl,
     sanitizeIgnoreInvalidateParams,
@@ -39,7 +42,9 @@ import {
     expandPurgeUrls,
 } from './../src/utils'
 
-import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
+import {PassThrough} from 'stream'
+
+import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -332,6 +337,78 @@ describe('utils', function() {
             const buf = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
             assert.equal((buildSharpPipeline(buf, false, 1) as any).options.input.page, 1)
             assert.equal((buildSharpPipeline(buf, false) as any).options.input.page, undefined)
+        })
+    })
+
+    describe('bounded store operations', function() {
+        const hangingStore: any = {
+            exists: () => undefined,           // never calls back
+            createReadStream: () => new PassThrough(), // never ends
+        }
+        const quiet = {warn: () => undefined, debug: () => undefined, info: () => undefined, error: () => undefined}
+
+        it('storeExists rejects with AbortError when the store never answers and the signal fires', async function() {
+            const t0 = Date.now()
+            await assert.rejects(storeExists(hangingStore, 'k', AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            assert(Date.now() - t0 < 1000, 'must not wait for the store')
+        })
+
+        it('storeExists rejects at once on an already-aborted signal', async function() {
+            const c = new AbortController(); c.abort()
+            await assert.rejects(storeExists(hangingStore, 'k', c.signal), (err: any) => err.name === 'AbortError')
+        })
+
+        it('storeExists hands the key and the signal to the store', async function() {
+            let seen: any
+            const store: any = { exists: (opts: any, done: any) => { seen = opts; done(null, true) } }
+            const signal = AbortSignal.timeout(1000)
+            assert.equal(await storeExists(store, 'thekey', signal), true)
+            assert.equal(seen.key, 'thekey')
+            assert.equal(seen.signal, signal)
+            // and a plain string key when there is no signal, as every store already accepts
+            assert.equal(await storeExists(store, 'plain'), true)
+            assert.equal(seen, 'plain')
+        })
+
+        it('readStream rejects and destroys the stream when the signal fires', async function() {
+            const stream = new PassThrough()
+            let destroyed = false
+            stream.on('close', () => { destroyed = true })
+            await assert.rejects(readStream(stream, AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            await new Promise((r) => setTimeout(r, 20))
+            assert.equal(destroyed, true, 'the stalled stream must be destroyed, not leaked')
+        })
+
+        it('readStream still resolves normally with a signal that never fires', async function() {
+            const stream = new PassThrough()
+            const p = readStream(stream, AbortSignal.timeout(5000))
+            stream.end(Buffer.from('bytes'))
+            assert.equal((await p).toString(), 'bytes')
+        })
+
+        it('storeExistsBounded treats a timeout and an error as absent', async function() {
+            assert.equal(await storeExistsBounded(hangingStore, 'k', AbortSignal.timeout(50), quiet, 'test'), false)
+            const failing: any = { exists: (_o: any, done: any) => done(new Error('boom')) }
+            assert.equal(await storeExistsBounded(failing, 'k', AbortSignal.timeout(1000), quiet, 'test'), false)
+            const present: any = { exists: (_o: any, done: any) => done(null, true) }
+            assert.equal(await storeExistsBounded(present, 'k', AbortSignal.timeout(1000), quiet, 'test'), true)
+        })
+
+        it('budgetSignal clamps to the remaining deadline, and to the cap, and never disables the timer', async function() {
+            const fired = (sig: AbortSignal) => new Promise<number>((resolve) => {
+                const t0 = Date.now(); sig.addEventListener('abort', () => resolve(Date.now() - t0), {once: true})
+            })
+            // deadline sooner than the cap
+            const a = await fired(budgetSignal(Date.now() + 80, 5000))
+            assert(a >= 60 && a < 600, `expected ~80ms, got ${ a }`)
+            // deadline already gone: aborts immediately rather than never
+            const b = await fired(budgetSignal(Date.now() - 1000, 5000))
+            assert(b < 200, `expected immediate abort, got ${ b }`)
+            // no deadline: the cap rules
+            const c = await fired(budgetSignal(undefined, 60))
+            assert(c >= 40 && c < 600, `expected ~60ms, got ${ c }`)
+            assert.equal(STORE_OP_TIMEOUT_MS, 300, 'test config sets the knob low')
+            assert.equal(SERVE_READ_TIMEOUT_MS, 900)
         })
     })
 

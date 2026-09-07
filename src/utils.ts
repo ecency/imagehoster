@@ -89,15 +89,41 @@ export function camelToSnake(value: string) {
     return value.replace(/([A-Z])/g, (_, m) => `_${m.toLowerCase()}`).replace(/^_/, '')
 }
 
-export function readStream(stream: NodeJS.ReadableStream) {
+/** The error a store call rejects with when its AbortSignal fires. */
+export function storeAbortError(signal?: AbortSignal): Error {
+    const err = new Error('store operation aborted: ' + ((signal && (signal.reason as any)?.message) || 'timeout'))
+    err.name = 'AbortError'
+    return err
+}
+
+export function isStoreAbort(err: any): boolean {
+    return !!err && (err.name === 'AbortError' || err.name === 'TimeoutError')
+}
+
+/**
+ * Collects a stream into a Buffer. With a signal, aborts the read and destroys the
+ * stream when it fires, so a stalled object-store body cannot hold a request past
+ * its budget whatever the store implementation does with the signal itself.
+ */
+export function readStream(stream: NodeJS.ReadableStream, signal?: AbortSignal) {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => {
+            if ((stream as any).destroy) { (stream as any).destroy() }
+            reject(storeAbortError(signal))
+        })
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
         stream.on('data', (chunk) => chunks.push(chunk))
-        stream.on('error', (err) => {
+        stream.on('error', (err) => finish(() => {
             if ((stream as any).destroy) { (stream as any).destroy() }
             reject(err)
-        })
-        stream.on('end', () => resolve(Buffer.concat(chunks)))
+        }))
+        stream.on('end', () => finish(() => resolve(Buffer.concat(chunks))))
     })
 }
 
@@ -115,24 +141,94 @@ export async function mimeMagic(data: Buffer): Promise<string> {
 }
 
 /**
+/**
  * Existence check that also reports the stored size when the store knows it
  * (every store here does: fs and memory from the object, S3 from HEAD). The
  * size is part of a real variant's validator, so the cache-hit path needs it
- * before it can answer a conditional request.
+ * before it can answer a conditional request. With a signal, the budget is
+ * handed to the store (the S3 store aborts the HEAD) and raced here as well, so
+ * a store that ignores it still cannot hold the caller past the budget.
  */
-export function storeStat(store: AbstractBlobStore, key: BlobKey): Promise<{exists: boolean, size?: number}> {
+export function storeStat(store: AbstractBlobStore, key: BlobKey, signal?: AbortSignal): Promise<{exists: boolean, size?: number}> {
     return new Promise((resolve, reject) => {
-        (store as any).exists(key, (error: any, exists?: boolean, size?: number) => {
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => reject(storeAbortError(signal)))
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
+        const opts: any = signal ? {key: typeof key === 'string' ? key : (key as any).key, signal} : key
+        ;(store as any).exists(opts, (error: any, exists?: boolean, size?: number) => finish(() => {
             if (error) { reject(error) } else { resolve({exists: !!exists, size}) }
-        })
+        }))
     })
 }
 
-export function storeExists(store: AbstractBlobStore, key: BlobKey) {
-    return new Promise<boolean>((resolve, reject) => {
-        store.exists(key, (error, exists) => {
-            if (error) { reject(error) } else { resolve(exists) }
+/** Existence check with an optional budget; see storeStat. */
+export function storeExists(store: AbstractBlobStore, key: BlobKey, signal?: AbortSignal): Promise<boolean> {
+    return storeStat(store, key, signal).then((r) => r.exists)
+}
+
+/**
+ * storeExistsBounded with the size: a stall or an error reads as absent.
+ */
+export async function storeStatBounded(
+    store: AbstractBlobStore, key: string, signal: AbortSignal, log: any, what: string,
+): Promise<{exists: boolean, size?: number}> {
+    try {
+        return await storeStat(store, key, signal)
+    } catch (err) {
+        log.warn({ err: (err as Error).message, key, what }, isStoreAbort(err)
+            ? 'store lookup timed out, treating as absent'
+            : 'store lookup failed, treating as absent')
+        return {exists: false}
+    }
+}
+
+/**
+ * A store existence check that treats a stall as "absent". Every read handler
+ * consults its stores before it fetches upstream, so a HEAD that hangs used to
+ * consume the fetch budget before the first candidate was tried; with a budget
+ * from `budgetSignal` the request loses one bounded wait and carries on to the
+ * fetch path or the placeholder. A genuine error is logged and treated the same
+ * way: the fetch path is the fallback for a store that cannot answer.
+ */
+export async function storeExistsBounded(
+    store: AbstractBlobStore, key: string, signal: AbortSignal, log: any, what: string,
+): Promise<boolean> {
+    try {
+        return await storeExists(store, key, signal)
+    } catch (err) {
+        log.warn({ err: (err as Error).message, key, what }, isStoreAbort(err)
+            ? 'store lookup timed out, treating as absent'
+            : 'store lookup failed, treating as absent')
+        return false
+    }
+}
+
+/**
+ * Reads the first `bytes` of a stream (for sniffing) under a budget. On abort the
+ * stream is destroyed and the caller gets an AbortError, so a stalled store cannot
+ * hold a cache hit open past the request's budget.
+ */
+export async function streamHeadBounded(
+    stream: NodeJS.ReadableStream, bytes: number, signal: AbortSignal,
+): Promise<{head: Buffer, stream: NodeJS.ReadableStream}> {
+    const streamHead = (await import('stream-head')).default
+    return new Promise((resolve, reject) => {
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); fn() } }
+        const onAbort = () => finish(() => {
+            if ((stream as any).destroy) { (stream as any).destroy() }
+            reject(storeAbortError(signal))
         })
+        if (signal.aborted) { onAbort(); return }
+        signal.addEventListener('abort', onAbort, {once: true})
+        streamHead(stream as any, {bytes}).then(
+            (r: any) => finish(() => resolve(r)),
+            (err: any) => finish(() => reject(err)),
+        )
     })
 }
 

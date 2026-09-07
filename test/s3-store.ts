@@ -1,5 +1,8 @@
 import 'mocha'
 import assert from 'assert'
+import {s3RequestHandlerOptions} from './../src/constants'
+import {HeadObjectCommand, S3Client} from '@aws-sdk/client-s3'
+import * as http from 'http'
 import { Readable } from 'stream'
 
 import { S3BlobStore } from './../src/s3-store'
@@ -144,6 +147,60 @@ describe('S3BlobStore', function() {
             } catch (err: any) {
                 assert.equal(err.message, 'S3 connection reset')
             }
+        })
+    })
+
+    describe('client floors', function() {
+        it('cuts off an accepted but stalled request with the configured handler options', async function() {
+            this.timeout(5000)
+            // An endpoint that accepts the connection and never answers. requestTimeout
+            // alone only logs when it elapses; the options must make it throw.
+            const endpoint = http.createServer((_req, _res) => undefined)
+            await new Promise<void>((resolve) => endpoint.listen(0, '127.0.0.1', () => resolve()))
+            const client = new S3Client({
+                endpoint: `http://127.0.0.1:${ (endpoint.address() as any).port }`,
+                region: 'us-east-1', credentials: {accessKeyId: 'test', secretAccessKey: 'test'},
+                forcePathStyle: true, maxAttempts: 1,
+                requestHandler: s3RequestHandlerOptions({connectionTimeout: 500, requestTimeout: 100}),
+            })
+            const t0 = Date.now()
+            try {
+                await assert.rejects(client.send(new HeadObjectCommand({Bucket: 'b', Key: 'k'})),
+                    (err: any) => err.name === 'TimeoutError' || /timeout/i.test(err.message))
+                assert(Date.now() - t0 < 3000, 'the stalled request must be cut off by the handler, not by anything outside it')
+            } finally {
+                client.destroy()
+                endpoint.closeAllConnections()
+                await new Promise<void>((resolve) => endpoint.close(() => resolve()))
+            }
+        })
+    })
+
+    describe('abort signals', function() {
+        it('forwards the signal to the SDK for exists and createReadStream', async function() {
+            const calls: any[] = []
+            const client: any = {
+                send: async (command: any, options: any) => {
+                    calls.push({name: command.constructor.name, options})
+                    if (command.constructor.name === 'GetObjectCommand') {
+                        const {Readable} = require('stream')
+                        return {Body: Readable.from([Buffer.from('x')])}
+                    }
+                    return {}
+                }
+            }
+            const store = new S3BlobStore({ client, bucket: 'b' })
+            const signal = AbortSignal.timeout(5000)
+            await new Promise<void>((resolve, reject) => store.exists({key: 'k', signal}, (err) => err ? reject(err) : resolve()))
+            await new Promise<void>((resolve, reject) => {
+                const rs = store.createReadStream({key: 'k', signal})
+                rs.on('error', reject); rs.on('end', () => resolve()); rs.resume()
+            })
+            assert.equal(calls.length, 2)
+            for (const c of calls) { assert.equal(c.options && c.options.abortSignal, signal, `${ c.name } must carry the abortSignal`) }
+            // and nothing is passed when there is no signal
+            await new Promise<void>((resolve, reject) => store.exists('plain', (err) => err ? reject(err) : resolve()))
+            assert.equal(calls[2].options, undefined)
         })
     })
 

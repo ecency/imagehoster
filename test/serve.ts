@@ -36,6 +36,27 @@ describe('serve', function() {
         assert(crypto.timingSafeEqual(res.body, data), 'served data should match uploaded')
     })
 
+    it('answers 504 with no-store when the upload store stalls, instead of waiting or saying 404', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        const {uploadStore} = require('./../src/common')
+        const {PassThrough} = require('stream')
+        const realCreate = uploadStore.createReadStream
+        uploadStore.createReadStream = () => new PassThrough() // never ends
+        const t0 = Date.now()
+        try {
+            const res = await needle('get', `http://localhost:${port}/DQmStalledStoreHash/photo.jpg`)
+            const elapsed = Date.now() - t0
+            assert.equal(res.statusCode, 504)
+            assert.equal(res.headers['cache-control'], 'no-store, no-cache', 'a stall must not be cached like a 404 would be')
+            assert.equal(res.headers['etag'], undefined)
+            // serve allows three store budgets (900ms in the test config)
+            assert(elapsed >= 800 && elapsed < 4000, `expected ~900ms, got ${ elapsed }ms`)
+        } finally {
+            uploadStore.createReadStream = realCreate
+        }
+    })
+
     it('should detect correct MIME type', async function() {
         this.slow(1000)
         const file = path.resolve(__dirname, 'test.jpg')

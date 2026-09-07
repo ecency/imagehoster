@@ -8,7 +8,7 @@ import {clientGoneSignal} from './encode-limit'
 import {resizeImageWithOptions} from './image-resizer'
 
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
-import { FETCH_DEADLINE_MS } from './constants'
+import { budgetSignal, FETCH_DEADLINE_MS, STORE_OP_TIMEOUT_MS } from './constants'
 import { APIError } from './error'
 import {
   cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
@@ -28,7 +28,10 @@ import {
   safeParseInt,
   ScalingMode,
   storeExists,
+  storeExistsBounded,
   storeStat,
+  storeStatBounded,
+  streamHeadBounded,
   storeRemove,
   supportsAvif,
   supportsWebP,
@@ -148,11 +151,25 @@ async function handleAvatar(ctx: KoaContext) {
   // client keep a copy of whatever it holds.
   ctx.status = 200
 
-  const variantStat = shouldBypassCache ? {exists: false} : await storeStat(proxyStore, imageKey)
+  // Every store call before the upstream fetch, this first variant lookup
+  // included, is bounded and charged to the request budget; a stall reads as a
+  // miss and the handler carries on to the original and the fetch (see #44)
+  const storeSignal = () => budgetSignal(fetchDeadlineAt, STORE_OP_TIMEOUT_MS)
+  let cachedVariant: {head: Buffer, stream: NodeJS.ReadableStream} | undefined
+  const variantStat = shouldBypassCache ? {exists: false}
+    : await storeStatBounded(proxyStore, imageKey, storeSignal(), ctx.log, 'variant')
   if (variantStat.exists) {
+    const headSignal = storeSignal()
+    try {
+      cachedVariant = await streamHeadBounded(
+        proxyStore.createReadStream({ key: imageKey, signal: headSignal } as any), 16384, headSignal)
+    } catch (err) {
+      ctx.log.warn({ err: (err as Error).message, imageKey }, 'cached variant read failed or timed out, treating as a miss')
+    }
+  }
+  if (cachedVariant) {
     ctx.tag({ store: 'resized' })
-    const file = proxyStore.createReadStream(imageKey)
-    const { head, stream } = await import('stream-head').then((mod) => mod.default(file, { bytes: 16384 }))
+    const { head, stream } = cachedVariant
     // The store only holds real variants (storeImage refuses the rest), so a hit
     // is real unless the whole request was substituted for a missing or blocked
     // profile; the response then carries the fallback contract and its own ETag
@@ -198,24 +215,37 @@ async function handleAvatar(ctx: KoaContext) {
   let origin: ServedImage
   let contentType: string
 
-  const haveLocalOriginal = await storeExists(origStore, origKey) && !shouldBypassCache
+  const haveLocalOriginal = await storeExistsBounded(origStore, origKey, storeSignal(), ctx.log, 'original') && !shouldBypassCache
   // Archive of originals whose upstream is gone. An origin, not a cache, so
   // cache-bypass flags deliberately do not skip it. An object-store outage must
   // not fail the request, so any error falls through to the normal fetch path.
   let retentionData: Buffer | undefined
   if (!haveLocalOriginal && retentionStore) {
     try {
-      if (await storeExists(retentionStore, origKey)) {
-        retentionData = await readStream(retentionStore.createReadStream(origKey))
+      if (await storeExistsBounded(retentionStore, origKey, storeSignal(), ctx.log, 'retention original')) {
+        const readSignal = storeSignal()
+        retentionData = await readStream(retentionStore.createReadStream({ key: origKey, signal: readSignal } as any), readSignal)
       }
     } catch (err) {
-      ctx.log.warn({ err, origKey }, 'retention store lookup failed, falling through to fetch')
+      ctx.log.warn({ err: (err as Error).message, origKey }, 'retention store read failed, falling through to fetch')
     }
   }
 
+  let localOriginal: Buffer | undefined
   if (haveLocalOriginal) {
+    try {
+      const readSignal = storeSignal()
+      localOriginal = await readStream(origStore.createReadStream({ key: origKey, signal: readSignal } as any), readSignal)
+    } catch (err) {
+      // A stored original that cannot be read in time is treated like one that is
+      // not there: the fetch path below is the fallback
+      ctx.log.warn({ err: (err as Error).message, origKey }, 'stored original read failed, falling through to fetch')
+    }
+  }
+
+  if (localOriginal) {
     ctx.tag({ store: 'original' })
-    origin = realImage(await readStream(origStore.createReadStream(origKey)))
+    origin = realImage(localOriginal)
     contentType = await mimeMagic(origin.bytes)
   } else if (retentionData) {
     ctx.tag({ store: 'retention' })

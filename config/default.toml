@@ -143,6 +143,14 @@ max_custom_image_height = 2000
 # under that budget or the placeholder path is dead code again.
 #fetch_deadline_ms = 12000
 
+# Per-lookup budget for object-store HEAD/GET calls on a request path, in ms.
+# Read handlers charge every store call made before their upstream fetch to the
+# request's fetch deadline, capped by this, so a stalled store costs one bounded
+# wait and the request falls through to the fetch path or the placeholder. The
+# raw upload route allows three times this and answers 504 past it. The S3
+# client also carries connection/socket floors (S3_* in src/constants.ts).
+#store_op_timeout_ms = 5000
+
 # Threads libvips uses per operation. Sharp already clamps this to 1 on glibc,
 # but only while it does not detect jemalloc, so setting it explicitly makes the
 # invariant independent of allocator detection. Note libvips ignores the

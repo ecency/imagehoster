@@ -5,7 +5,6 @@ import config from 'config'
 import {createHash} from 'crypto'
 import * as multihash from 'multihashes'
 import Sharp from 'sharp'
-import streamHead from 'stream-head/dist-es6'
 import {URL} from 'url'
 import {isArchiveStore, KoaContext, proxyStore, retentionStore, uploadStore} from './common'
 import {
@@ -19,6 +18,7 @@ import {
     FETCH_DEFAULT_WALL_MS,
     MAX_CACHED_ORIGINAL_SIZE,
     MAX_INPUT_PIXELS,
+    budgetSignal, STORE_OP_TIMEOUT_MS,
 } from './constants'
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
@@ -53,11 +53,15 @@ import {
     readStream,
     safeParseInt,
     ScalingMode,
+    isStoreAbort,
     storeExists,
+    storeExistsBounded,
     storeRemove,
     storeStat,
+    storeStatBounded,
     isAnimatedSource,
     primaryPageOf,
+    streamHeadBounded,
     supportsAvif,
     supportsWebP
 } from './utils'
@@ -406,13 +410,38 @@ export async function proxyHandler(ctx: KoaContext) {
     // and found healthy, see below: a validator alone does not prove the bytes
     // behind it are the ones this service would render today.
     ctx.status = 200
+    // Every store call before the upstream fetch, this first variant lookup
+    // included, is bounded and charged to the same request budget the fetch
+    // uses: a stalled store used to eat the whole budget here, so the walk
+    // started with nothing left (see #44). A stall reads as a miss.
+    const storeSignal = () => budgetSignal(fetchDeadlineAt, STORE_OP_TIMEOUT_MS)
     // check if we already have a converted image for a requested key
+    let cachedVariant: {head: Buffer, stream: NodeJS.ReadableStream} | undefined
+    // the store's own stream, kept so a branch that abandons the hit (304, repair)
+    // can release the file handle rather than leave an unconsumed pipe behind
+    let cachedInput: NodeJS.ReadableStream | undefined
     const variantStat = (!options.ignorecache && !options.invalidate)
-        ? await storeStat(proxyStore, imageKey) : {exists: false}
+        ? await storeStatBounded(proxyStore, imageKey, storeSignal(), ctx.log, 'variant') : {exists: false}
     if (variantStat.exists) {
+        const headSignal = storeSignal()
+        cachedInput = proxyStore.createReadStream({ key: imageKey, signal: headSignal } as any)
+        try {
+            cachedVariant = await streamHeadBounded(cachedInput, 16384, headSignal)
+        } catch (err) {
+            ctx.log.warn({ err: (err as Error).message, imageKey }, isStoreAbort(err)
+                ? 'cached variant read timed out, treating as a miss'
+                : 'cached variant read failed, treating as a miss')
+        }
+    }
+    if (cachedVariant) {
         ctx.tag({store: 'resized'})
         ctx.log.debug('streaming %s from store', imageKey)
-        const file = proxyStore.createReadStream(imageKey)
+        const {head, stream} = cachedVariant
+        const file = stream as NodeJS.ReadableStream & {destroy: () => void}
+        const abandonHit = () => {
+            file.destroy()
+            if (cachedInput && (cachedInput as any).destroy) { (cachedInput as any).destroy() }
+        }
         file.on('error', async (err) => {
             ctx.log.error({ err, imageKey }, 'unable to read')
             try {
@@ -425,7 +454,6 @@ export async function proxyHandler(ctx: KoaContext) {
             ctx.res.writeHead(500, 'Internal Error')
             ctx.res.end()
         })
-        const {head, stream} = await streamHead(file, {bytes: 16384})
         const mimeType = await mimeMagic(head)
         if (isPoisonedVariant(mimeType)) {
             // The service never renders to HEIF, so a stored HEIF under a variant
@@ -435,7 +463,7 @@ export async function proxyHandler(ctx: KoaContext) {
             // the original or refetches; the repaired variant is stored on the way.
             ctx.tag({repaired_variant: true})
             ctx.log.warn({ imageKey, mimeType }, 'stored variant is a raw HEIF container, discarding and re-rendering')
-            file.destroy()
+            abandonHit()
             try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
         } else {
         // A 304 is a promise that the client's copy is what this key renders to,
@@ -452,7 +480,7 @@ export async function proxyHandler(ctx: KoaContext) {
         // repair replaced presents a different one and is not told to keep it
         ctx.set('ETag', etagFor(realImage(head), imageKey, head, variantStat.size))
         if (ctx.fresh && !shouldBypassCache && !substitution) {
-            file.destroy()
+            abandonHit()
             ctx.status = 304
             return
         }
@@ -500,8 +528,9 @@ export async function proxyHandler(ctx: KoaContext) {
     // whenever the proxy-store original is absent or bypassed, and cache-bypass
     // flags never skip it (there is no live origin to refetch from).
     let servingStore = origStore
-    let haveOriginal = await storeExists(origStore, origKey) && !bypassStoredOriginal
-    if (!haveOriginal && !usesUploadStore && await storeExists(uploadStore, origKey)) {
+    let haveOriginal = await storeExistsBounded(origStore, origKey, storeSignal(), ctx.log, 'original') && !bypassStoredOriginal
+    if (!haveOriginal && !usesUploadStore
+        && await storeExistsBounded(uploadStore, origKey, storeSignal(), ctx.log, 'rescued original')) {
         servingStore = uploadStore
         haveOriginal = true
         ctx.tag({rescued_original: true})
@@ -509,23 +538,20 @@ export async function proxyHandler(ctx: KoaContext) {
     // Retention archive: same contract as the upload store above — an origin,
     // not a cache — for originals migrated off local disk. A backend outage here
     // must not fail the request: fall through to the normal fetch path.
-    if (!haveOriginal && retentionStore) {
-        try {
-            if (await storeExists(retentionStore, origKey)) {
-                servingStore = retentionStore
-                haveOriginal = true
-                ctx.tag({retention_original: true})
-            }
-        } catch (err) {
-            ctx.log.warn({ err, origKey }, 'retention store lookup failed, falling through')
-        }
+    if (!haveOriginal && retentionStore
+        && await storeExistsBounded(retentionStore, origKey, storeSignal(), ctx.log, 'retention original')) {
+        servingStore = retentionStore
+        haveOriginal = true
+        ctx.tag({retention_original: true})
     }
     if (haveOriginal) {
         origFromCache = true
         ctx.tag({store: 'original'})
         let res: NeedleResponse
         try {
-            origin = worstOf(realImage(await readStream(servingStore.createReadStream(origKey))), substitution)
+            const readSignal = storeSignal()
+            origin = worstOf(realImage(await readStream(
+                servingStore.createReadStream({ key: origKey, signal: readSignal } as any), readSignal)), substitution)
             contentType = await mimeMagic(origin.bytes)
             // Validate stored data is actually an image — stale error pages or
             // truncated responses may have been cached by a previous request
