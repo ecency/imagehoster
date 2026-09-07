@@ -1,6 +1,7 @@
 import 'mocha'
 import assert from 'assert'
 import * as http from 'http'
+import etag from 'etag'
 import needle from 'needle'
 import sharp from 'sharp'
 
@@ -11,7 +12,7 @@ import {app} from './../src/app'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore} from './../src/common'
 import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
-import {BROKEN_COVER_URL, mockProfiles} from './index'
+import {BROKEN_COVER_URL, mockProfiles, pointHealthyProfileAt} from './index'
 
 describe('cover', function() {
     let port: number
@@ -24,6 +25,19 @@ describe('cover', function() {
         })
     })
     after((done) => { server.close(done) })
+
+    // A source that genuinely loads, for the tests that need a real image rather
+    // than a placeholder: every fixture URL in mockProfiles points nowhere
+    const imageServer = http.createServer((_req, res) => {
+        fs.createReadStream(path.resolve(__dirname, 'test.jpg')).pipe(res)
+    })
+    before((done) => {
+        imageServer.listen(0, 'localhost', () => {
+            pointHealthyProfileAt(`http://localhost:${ (imageServer.address() as any).port }`)
+            done()
+        })
+    })
+    after((done) => { imageServer.close(done) })
 
     it('should serve cover for known user', async function() {
         this.slow(5000)
@@ -121,14 +135,35 @@ describe('cover', function() {
     it('answers 304 for conditional revalidation of a healthy cover', async function() {
         this.slow(3000)
         this.timeout(15000)
-        const warm = await needle('get', `http://localhost:${port}/u/foo/cover`)
+        const warm = await needle('get', `http://localhost:${port}/u/healthy/cover`)
         assert.equal(warm.statusCode, 200)
-        const inm = await needle('get', `http://localhost:${port}/u/foo/cover`,
+        assert.equal(warm.headers['cache-control'], 'public,max-age=3600', 'a real cover carries the real freshness')
+        const inm = await needle('get', `http://localhost:${port}/u/healthy/cover`,
             null, { headers: { 'if-none-match': warm.headers.etag as string } })
         assert.equal(inm.statusCode, 304)
-        const ims = await needle('get', `http://localhost:${port}/u/foo/cover`,
+        const ims = await needle('get', `http://localhost:${port}/u/healthy/cover`,
             null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
         assert.equal(ims.statusCode, 304)
+    })
+
+    it('gives a placeholder its own ETag, so it never revalidates as the real cover', async function() {
+        this.slow(5000)
+        this.timeout(30000)
+        // foo's cover points at a host that does not exist: the response is the
+        // default standing in for it, and used to carry the real image's ETag
+        const warm = await needle('get', `http://localhost:${port}/u/foo/cover`)
+        assert.equal(warm.statusCode, 200)
+        assert.equal(warm.headers['cache-control'], 'public,max-age=120')
+        const realUrl = mockProfiles.foo.metadata.profile.cover_image
+        const realEtags = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
+            etag(getImageKey(getUrlHashKey(realUrl), { width: 1344, height: 240, mode: ScalingMode.Fit, format } as any)))
+        assert(!realEtags.includes(warm.headers.etag as string),
+            'placeholder must not wear the ETag the real cover would have')
+        // and a client presenting the placeholder ETag is not told it is current
+        const inm = await needle('get', `http://localhost:${port}/u/foo/cover`,
+            null, { headers: { 'if-none-match': warm.headers.etag as string } })
+        assert.equal(inm.statusCode, 200)
+        assert.equal(inm.headers.etag, warm.headers.etag, 'placeholder ETag is deterministic')
     })
 
     it('stops serving cached variants once the source domain is blacklisted', async function() {

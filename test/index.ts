@@ -182,10 +182,37 @@ export const mockAccounts: any = {
  * Deterministic without depending on a remote host 404ing, and with no port to
  * collide with a listener that happens to exist on the machine running the tests.
  */
+/**
+ * A profile whose images genuinely load. Tests point it at a local image server
+ * once they know its port; the RPC mock reads mockProfiles at call time.
+ */
+export function pointHealthyProfileAt(baseUrl: string) {
+    mockProfiles.healthy.metadata.profile.profile_image = `${ baseUrl }/healthy-avatar.jpg`
+    mockProfiles.healthy.metadata.profile.cover_image = `${ baseUrl }/healthy-cover.jpg`
+}
+
 export const BROKEN_AVATAR_URL = 'http://no-such-host.invalid/missing-avatar.jpg'
 export const BROKEN_COVER_URL = 'http://no-such-host.invalid/missing-cover.jpg'
 
 export const mockProfiles: any = {
+    healthy: {
+        name: 'healthy',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 42,
+        post_count: 10,
+        reputation: 60,
+        blacklists: [],
+        stats: { followers: 1, following: 1, rank: 0 },
+        metadata: {
+            profile: {
+                name: 'Healthy User',
+                // overwritten by pointHealthyProfileAt() before use
+                profile_image: 'http://127.0.0.1:1/healthy-avatar.jpg',
+                cover_image: 'http://127.0.0.1:1/healthy-cover.jpg',
+            }
+        }
+    },
     foo: {
         name: 'foo',
         active: '2024-01-01T00:00:00',
