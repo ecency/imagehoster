@@ -3,11 +3,16 @@
  * Proves the custom libvips is the one actually loaded, by decoding rather than
  * by inspecting version strings.
  *
- * The Dockerfile overwrites Sharp's bundled libvips-cpp.so with a build linked
- * against libde265 and libaom. If that overwrite ever silently becomes a no-op
- * (see the guard in the build stage) the service still starts, still serves, and
- * still passes its healthcheck: HEIC sources just quietly stop transcoding and
- * fall back to original bytes.
+ * The Dockerfile compiles Sharp's binding against the libvips built in the image,
+ * linked against libde265 and libaom. If the service ever came up on a stock
+ * libvips instead (see the guard in the build stage) it would still start, still
+ * serve, and still pass its healthcheck: HEIC sources would just quietly stop
+ * transcoding and fall back to original bytes.
+ *
+ * With a binding built against a global libvips, sharp.versions.vips is read from
+ * the loaded library rather than from a static file, so when SMOKE_VIPS_VERSION is
+ * set (the Dockerfile passes the version it built) this also asserts that the
+ * library sharp actually loaded is that build.
  *
  * Reading metadata is NOT a sufficient check. The stock library parses the HEIF
  * container happily and reports dimensions and compression. Only a pixel decode
@@ -30,6 +35,12 @@ async function main() {
     process.exit(1)
   }
   const buf = fs.readFileSync(fixture)
+
+  const expectedVips = process.env.SMOKE_VIPS_VERSION
+  if (expectedVips && sharp.versions.vips !== expectedVips) {
+    console.error(`smoke FAIL: sharp loaded libvips ${sharp.versions.vips}, the image built ${expectedVips}`)
+    process.exit(1)
+  }
 
   const meta = await sharp(buf).metadata()
   if (meta.compression !== 'hevc') {

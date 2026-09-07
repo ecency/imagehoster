@@ -46,6 +46,8 @@
     "lodash": "^4.17.21",
     "mocha": "^10.8.0",
     "mocha-junit-reporter": "^2.2.1",
+    "node-addon-api": "8.1.0",
+    "node-gyp": "^11.0.0",
     "nyc": "^17.1.0",
     "onchange": "^7.1.0",
     "ts-node": "^10.9.2",
