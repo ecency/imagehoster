@@ -1,6 +1,8 @@
 import 'mocha'
 import blobStore from 'abstract-blob-store'
 import assert from 'assert'
+import * as path from 'path'
+import * as fs from 'fs'
 import { createHash } from 'crypto'
 import { URL } from 'url'
 
@@ -18,8 +20,10 @@ import {
     stripWebpOrPng,
     getImageKey,
     getUrlHashKey,
+    buildSharpPipeline,
     isAnimatedSource,
     parseProxiedUrl,
+    primaryPageOf,
     parsePlainUrl,
     getOrigKeyFromUrl,
     sanitizeIgnoreInvalidateParams,
@@ -313,6 +317,21 @@ describe('utils', function() {
             assert.equal(isAnimatedSource({format: 'png'}, 'image/apng'), true)
             assert.equal(isAnimatedSource({format: 'heif'}, 'image/heic'), false)
             assert.equal(isAnimatedSource({format: 'jpeg'}, 'image/jpeg'), false)
+        })
+    })
+
+    describe('primaryPageOf and buildSharpPipeline', function() {
+        it('selects the HEIF primary image when it is not the first top-level image', function() {
+            assert.equal(primaryPageOf({format: 'heif', pagePrimary: 1}), 1)
+            assert.equal(primaryPageOf({format: 'heif', pagePrimary: 0}), undefined, 'first image is Sharp default')
+            assert.equal(primaryPageOf({format: 'heif'}), undefined)
+            assert.equal(primaryPageOf({format: 'gif', pagePrimary: 1}), undefined, 'only HEIF has a primary image')
+        })
+
+        it('pins the requested page on the Sharp input and leaves it alone otherwise', function() {
+            const buf = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
+            assert.equal((buildSharpPipeline(buf, false, 1) as any).options.input.page, 1)
+            assert.equal((buildSharpPipeline(buf, false) as any).options.input.page, undefined)
         })
     })
 

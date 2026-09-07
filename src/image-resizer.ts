@@ -5,7 +5,7 @@ import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
     buildSharpPipeline, getProxyImageLimits, isAnimatedSource, mimeMagic,
-    OutputFormat, ProxyOptions, safeParseInt, ScalingMode,
+    OutputFormat, primaryPageOf, ProxyOptions, safeParseInt, ScalingMode,
 } from './utils'
 
 export async function resizeImageWithOptions(
@@ -61,7 +61,7 @@ export async function resizeImageWithOptions(
 
     // First frame only. Reaching here with isAnimated true implies forceStill, so
     // we never decode every frame — that is the memory-heavy path we are avoiding.
-    const image = buildSharpPipeline(origData, false)
+    const image = buildSharpPipeline(origData, false, primaryPageOf(meta))
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width = safeParseInt(options.width)

@@ -57,6 +57,7 @@ import {
     storeExists,
     storeRemove,
     isAnimatedSource,
+    primaryPageOf,
     supportsAvif,
     supportsWebP
 } from './utils'
@@ -94,6 +95,17 @@ export function shouldCacheOriginal(
 const SERVICE_URL = new URL(config.get('service_url'))
 /** A rendered variant is addressed by a key that encodes its inputs, so it never changes. */
 const IMMUTABLE_CACHE_CONTROL = 'public,max-age=31536000,immutable'
+
+/**
+ * A stored variant the service could never have produced. Output formats are
+ * JPEG, PNG, WebP, AVIF or the source's own bytes for `match`, and `match` never
+ * keeps HEIF because no browser renders it (see needsMatchFallback); so HEIF under
+ * a variant key can only be a raw container stored by the old animated branch.
+ */
+export function isPoisonedVariant(mimeType: string): boolean {
+    const t = mimeType.toLowerCase()
+    return t === 'image/heif' || t === 'image/heic'
+}
 
 const fromFetch = (result: {res: NeedleResponse, isFallback: boolean}): ServedImage =>
     result.isFallback
@@ -179,7 +191,7 @@ async function convertCachedMatchVariant(
         if (isAnimatedSource(metadata, mimeType)) {
             return {image: realImage(cached), contentType: mimeType}
         }
-        const image = buildSharpPipeline(cached, false)
+        const image = buildSharpPipeline(cached, false, primaryPageOf(metadata))
         const contentType = applyMatchFallbackFormat(image, mimeType, acceptHeader, metadata.hasAlpha)
         const buffer = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
         ctx.log.debug({ mimeType, contentType }, 'converted cached match variant for client')
@@ -418,6 +430,17 @@ export async function proxyHandler(ctx: KoaContext) {
         })
         const {head, stream} = await streamHead(file, {bytes: 16384})
         const mimeType = await mimeMagic(head)
+        if (isPoisonedVariant(mimeType)) {
+            // The service never renders to HEIF, so a stored HEIF under a variant
+            // key is a raw container written back when a multi-image HEIC was
+            // mistaken for an animation (#43): unresized, and for most clients
+            // undisplayable. Drop it and take the miss path, which re-renders from
+            // the original or refetches; the repaired variant is stored on the way.
+            ctx.tag({repaired_variant: true})
+            ctx.log.warn({ imageKey, mimeType }, 'stored variant is a raw HEIF container, discarding and re-rendering')
+            file.destroy()
+            try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
+        } else {
         // Match variants are one bucket for every client that negotiated neither
         // AVIF nor WebP, so a stored AVIF/HEIF passthrough can be undecodable for
         // the client asking now. Convert the cached bytes rather than falling
@@ -448,6 +471,7 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.set('ETag', etagFor(served, imageKey))
         ctx.body = served.bytes
         return
+        } // end healthy cached variant
     }
 
     // check if we have the original
@@ -649,7 +673,7 @@ export async function proxyHandler(ctx: KoaContext) {
             // key: every request for it gets these same bytes
             rendered = origin
         } else {
-        const image = buildSharpPipeline(origin.bytes, isAnimated)
+        const image = buildSharpPipeline(origin.bytes, isAnimated, isAnimated ? undefined : primaryPageOf(metadata))
 
         const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
         let width: number | undefined = safeParseInt(options.width)

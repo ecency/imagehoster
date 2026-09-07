@@ -735,8 +735,22 @@ export function isAnimatedSource(metadata: {format?: string, pages?: number}, co
     return metadata.pages > 1
 }
 
-export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
-    return Sharp(buffer, { failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS })
+/**
+ * The page to render for a still multi-image container, or undefined for Sharp's
+ * default. Sharp always pins `page` (default 0) on formats that support pages,
+ * which overrides libvips's own choice of the HEIF primary image, so a HEIC whose
+ * primary is not the first top-level image would render an auxiliary image.
+ */
+export function primaryPageOf(metadata: {format?: string, pagePrimary?: number}): number | undefined {
+    if (metadata.format !== 'heif') { return undefined }
+    return typeof metadata.pagePrimary === 'number' && metadata.pagePrimary > 0 ? metadata.pagePrimary : undefined
+}
+
+export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
+    return Sharp(buffer, {
+        failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS,
+        ...(page !== undefined ? { page } : {}),
+    })
 }
 
 function isPrivateIPv4(host: string): boolean {

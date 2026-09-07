@@ -20,7 +20,7 @@ import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} 
 import {shouldCacheOriginal} from './../src/proxy'
 import {fallbackEtag, fallbackImage, passthroughEtag, realImage} from './../src/served-image'
 import {
-    base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, ScalingMode, storeExists, storeRemove, storeWrite,
+    base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, readStream, ScalingMode, storeExists, storeRemove, storeWrite,
 } from './../src/utils'
 
 import {uploadImage} from './upload'
@@ -360,46 +360,89 @@ describe('proxy', function() {
         })
     })
 
-    it('renders a HEIC with more than one top-level image instead of passing the container through', async function() {
-        this.slow(4000)
-        this.timeout(15000)
-        // The fixture reports pages: 2 (primary plus an auxiliary image). Until #43
-        // that made it "animated": the raw HEIC was served unresized, immutable, and
-        // stored as the variant. It must now go through the render, whatever the
-        // outcome of that render is in this environment.
+    describe('multi-image HEIC (#43)', function() {
         const heic = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
-        assert((await sharp(heic).metadata()).pages! > 1, 'fixture must still be multi-page for this test to mean anything')
         let decodes = true
-        try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
+        let heicServer: http.Server
+        let source: string
+        before(async function() {
+            assert((await sharp(heic).metadata()).pages! > 1, 'fixture must be multi-page for these tests to mean anything')
+            try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
+            heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
+            await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
+            source = `http://localhost:${ (heicServer.address() as any).port }/multi-page.heic`
+        })
+        after(async function() { await new Promise<void>((resolve) => heicServer.close(() => resolve())) })
+        const keyFor = (src: string, opts: any) => getImageKey('U' + multihash.toB58String(multihash.encode(
+            createHash('sha1').update(src).digest(), 'sha1')), opts)
 
-        const heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
-        await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
-        const source = `http://localhost:${ (heicServer.address() as any).port }/multi-page.heic`
-        const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
-        const key = getImageKey('U' + multihash.toB58String(multihash.encode(
-            createHash('sha1').update(source).digest(), 'sha1')), {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
-        try {
-            const res = await needle('get', url)
-            assert.equal(res.statusCode, 200)
-            // Either way the animated branch is gone: that branch served the raw
-            // container as a REAL variant (real ETag, stored). A passthrough also
-            // hands the raw bytes back, but with its own ETag and no store write.
-            if (decodes) {
-                // production libvips: a real resized still, stored as the variant
+        it('renders a resized still from the primary image', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // needs a libvips that decodes HEVC (the production build); the stock
+            // development library parses the container but cannot decode its pixels
+            if (!decodes) { this.skip() }
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            const key = keyFor(source, {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
                 assert.notEqual(res.body.length, heic.length, 'the raw container must not be handed through')
                 assert.equal((await sharp(res.body).metadata()).width, 120)
+                assert.notEqual(res.headers['content-type'], 'image/heif', 'match negotiates away from HEIF')
                 assert.equal(res.headers.etag, etag(key))
                 assert.equal(await storeExists(proxyStore, key), true)
-            } else {
-                // development libvips cannot decode HEVC pixels: the render fails and
-                // the original is handed through as a passthrough, never stored
-                assert.equal(res.headers.etag, passthroughEtag(key))
-                assert.equal(await storeExists(proxyStore, key), false)
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
             }
-        } finally {
-            await new Promise<void>((resolve) => heicServer.close(() => resolve()))
-            try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
-        }
+        })
+
+        it('never takes the animated branch: a two-page HEIC is not stored raw as the variant', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // Runs everywhere. The animated branch served the raw container as a REAL
+            // variant (real ETag, stored). Whatever the render does here, that must
+            // not happen: where the render fails, the original is a passthrough with
+            // its own ETag and no store write.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit`
+            const key = keyFor(source, {width: 100, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                const storedRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(storedRaw, false, 'the raw HEIC container must never be stored under the variant key')
+                if (!decodes) { assert.equal(res.headers.etag, passthroughEtag(key)) }
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('repairs a variant key that already holds a raw HEIC container', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // Before #43 the container was stored as the variant. Those entries stay
+            // in the store; a hit on one must be discarded and re-rendered, not served.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=90&mode=fit`
+            const key = keyFor(source, {width: 90, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            await storeWrite(proxyStore, key, heic)
+            try {
+                // no Accept preference: the request lands on the Match key that was seeded
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                const stillRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(stillRaw, false, 'the poisoned variant must be removed on read')
+                if (decodes) {
+                    assert.equal((await sharp(res.body).metadata()).width, 90, 'and the repaired render is served')
+                    assert.equal(await storeExists(proxyStore, key), true, 'and stored in its place')
+                } else {
+                    assert.equal(res.headers.etag, passthroughEtag(key), 'without a decoder the original is a passthrough')
+                }
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
     })
 
     it('should proxy stored image when source is gone', async function() {
