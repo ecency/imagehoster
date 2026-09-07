@@ -4,7 +4,7 @@ import { runEncode } from './encode-limit'
 import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
-    buildSharpPipeline, getProxyImageLimits, mimeMagic,
+    buildSharpPipeline, getProxyImageLimits, isAnimatedSource, mimeMagic,
     OutputFormat, ProxyOptions, safeParseInt, ScalingMode,
 } from './utils'
 
@@ -42,14 +42,9 @@ export async function resizeImageWithOptions(
         isFallback = fallbackUsed
         origData = buffer
         contentType = await mimeMagic(origData)
-        // Use metadata.pages when available; if null, fall back to content-type detection
-        // (conservative: assume GIF/APNG are animated when pages can't be determined)
-        const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
-        if (metadata.pages != null) {
-            isAnimated = metadata.pages > 1
-        } else {
-            isAnimated = isGifOrApng
-        }
+        // Only formats that can animate may say so through their page count;
+        // a HEIF with an auxiliary image is a still, see isAnimatedSource
+        isAnimated = isAnimatedSource(metadata, contentType)
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }

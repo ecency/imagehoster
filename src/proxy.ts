@@ -56,6 +56,7 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
+    isAnimatedSource,
     supportsAvif,
     supportsWebP
 } from './utils'
@@ -175,7 +176,7 @@ async function convertCachedMatchVariant(
 ): Promise<{image: ServedImage, contentType: string}> {
     try {
         const metadata = await Sharp(cached, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
-        if (metadata.pages != null && metadata.pages > 1) {
+        if (isAnimatedSource(metadata, mimeType)) {
             return {image: realImage(cached), contentType: mimeType}
         }
         const image = buildSharpPipeline(cached, false)
@@ -612,14 +613,9 @@ export async function proxyHandler(ctx: KoaContext) {
                 ? fallbackImage(metaResult.buffer, 'source unreadable, default substituted')
                 : derive(origin, metaResult.buffer)
             contentType = await mimeMagic(origin.bytes)
-            // Use metadata.pages when available; if null, fall back to content-type detection
-            // (conservative: assume GIF/APNG are animated when pages can't be determined)
-            const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
-            if (metadata.pages != null) {
-                isAnimated = metadata.pages > 1
-            } else {
-                isAnimated = isGifOrApng
-            }
+            // Only formats that can animate may say so through their page count;
+            // a HEIF with an auxiliary image is a still, see isAnimatedSource
+            isAnimated = isAnimatedSource(metadata, contentType)
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey }, 'getSharpMetadataWithRetry failed')
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })

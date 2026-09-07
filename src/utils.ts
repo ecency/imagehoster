@@ -715,6 +715,26 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     const urlHash = createHash('sha1').update(url.toString()).digest()
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
+/**
+ * Whether a source should be treated as an animation, from Sharp metadata and
+ * the sniffed content type.
+ *
+ * libvips reports `pages` for every multi-image container, not only for
+ * animations: for HEIF it is the number of top-level images, and an iPhone photo
+ * with an auxiliary image (gain map, depth) reports two. Only formats that can
+ * actually animate get to say so through their page count. Anything else is a
+ * still, whatever its page count, and is rendered from its primary image.
+ * When the page count is unknown, GIF and APNG are assumed animated, the
+ * conservative choice for the two formats where a flattened render loses frames.
+ */
+const ANIMATABLE_FORMATS = new Set(['gif', 'webp', 'png'])
+export function isAnimatedSource(metadata: {format?: string, pages?: number}, contentType: string): boolean {
+    const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
+    if (metadata.pages == null) { return isGifOrApng }
+    if (!ANIMATABLE_FORMATS.has(metadata.format || '')) { return false }
+    return metadata.pages > 1
+}
+
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
     return Sharp(buffer, { failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS })
 }

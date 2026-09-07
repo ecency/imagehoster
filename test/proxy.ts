@@ -360,6 +360,48 @@ describe('proxy', function() {
         })
     })
 
+    it('renders a HEIC with more than one top-level image instead of passing the container through', async function() {
+        this.slow(4000)
+        this.timeout(15000)
+        // The fixture reports pages: 2 (primary plus an auxiliary image). Until #43
+        // that made it "animated": the raw HEIC was served unresized, immutable, and
+        // stored as the variant. It must now go through the render, whatever the
+        // outcome of that render is in this environment.
+        const heic = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
+        assert((await sharp(heic).metadata()).pages! > 1, 'fixture must still be multi-page for this test to mean anything')
+        let decodes = true
+        try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
+
+        const heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
+        await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
+        const source = `http://localhost:${ (heicServer.address() as any).port }/multi-page.heic`
+        const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+        const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+            createHash('sha1').update(source).digest(), 'sha1')), {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+        try {
+            const res = await needle('get', url)
+            assert.equal(res.statusCode, 200)
+            // Either way the animated branch is gone: that branch served the raw
+            // container as a REAL variant (real ETag, stored). A passthrough also
+            // hands the raw bytes back, but with its own ETag and no store write.
+            if (decodes) {
+                // production libvips: a real resized still, stored as the variant
+                assert.notEqual(res.body.length, heic.length, 'the raw container must not be handed through')
+                assert.equal((await sharp(res.body).metadata()).width, 120)
+                assert.equal(res.headers.etag, etag(key))
+                assert.equal(await storeExists(proxyStore, key), true)
+            } else {
+                // development libvips cannot decode HEVC pixels: the render fails and
+                // the original is handed through as a passthrough, never stored
+                assert.equal(res.headers.etag, passthroughEtag(key))
+                assert.equal(await storeExists(proxyStore, key), false)
+            }
+        } finally {
+            await new Promise<void>((resolve) => heicServer.close(() => resolve()))
+            try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+        }
+    })
+
     it('should proxy stored image when source is gone', async function() {
         // First, store via /p/ route (legacy routes no longer store)
         const imageUrl = base58Enc(`http://localhost:${ port+1 }/test.jpg`)

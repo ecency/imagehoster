@@ -18,6 +18,7 @@ import {
     stripWebpOrPng,
     getImageKey,
     getUrlHashKey,
+    isAnimatedSource,
     parseProxiedUrl,
     parsePlainUrl,
     getOrigKeyFromUrl,
@@ -281,6 +282,37 @@ describe('utils', function() {
             const url = 'https://example.com/test.jpg'
             const expected = 'U' + createHash('sha1').update(url).digest('hex')
             assert.equal(getUrlHashKey(url), expected)
+        })
+    })
+
+    describe('isAnimatedSource', function() {
+        it('treats a multi-page GIF, WebP or APNG as animated', function() {
+            assert.equal(isAnimatedSource({format: 'gif', pages: 12}, 'image/gif'), true)
+            assert.equal(isAnimatedSource({format: 'webp', pages: 3}, 'image/webp'), true)
+            assert.equal(isAnimatedSource({format: 'png', pages: 4}, 'image/apng'), true)
+        })
+
+        it('treats a single-page animatable format as a still', function() {
+            assert.equal(isAnimatedSource({format: 'gif', pages: 1}, 'image/gif'), false)
+            assert.equal(isAnimatedSource({format: 'webp', pages: 1}, 'image/webp'), false)
+        })
+
+        it('never treats a HEIF or any non-animating container as animated by its page count', function() {
+            // libvips counts top-level images: an iPhone photo with a gain map or
+            // depth image reports two, and passing it through unrendered served the
+            // raw container to browsers that cannot display it (#43)
+            assert.equal(isAnimatedSource({format: 'heif', pages: 2}, 'image/heic'), false)
+            assert.equal(isAnimatedSource({format: 'heif', pages: 5}, 'image/heif'), false)
+            assert.equal(isAnimatedSource({format: 'tiff', pages: 3}, 'image/tiff'), false)
+            assert.equal(isAnimatedSource({format: 'pdf', pages: 9}, 'application/pdf'), false)
+            assert.equal(isAnimatedSource({format: 'jpeg', pages: 2}, 'image/jpeg'), false)
+        })
+
+        it('falls back to the content type only when the page count is unknown', function() {
+            assert.equal(isAnimatedSource({format: 'gif'}, 'image/gif'), true)
+            assert.equal(isAnimatedSource({format: 'png'}, 'image/apng'), true)
+            assert.equal(isAnimatedSource({format: 'heif'}, 'image/heic'), false)
+            assert.equal(isAnimatedSource({format: 'jpeg'}, 'image/jpeg'), false)
         })
     })
 
