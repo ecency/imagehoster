@@ -12,6 +12,7 @@ import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
 import {logger, loggerMiddleware} from './logger'
 import {routes} from './routes'
+import {encodeBudget, RESERVED_POOL_SLOTS} from './encode-limit'
 import {getSharpConcurrency, parseBool} from './utils'
 
 export const app = new Koa()
@@ -115,8 +116,24 @@ async function main() {
         try {
             allocator = fs.readFileSync('/proc/self/maps', 'utf8').includes('jemalloc') ? 'jemalloc' : 'glibc'
         } catch (cause) { allocator = 'unknown' }
-        logger.warn({sharpConcurrency: getSharpConcurrency(), allocator, node: process.versions.node},
-            'image pipeline configured')
+        const budget = encodeBudget()
+        logger.warn({
+            sharpConcurrency: getSharpConcurrency(), allocator, node: process.versions.node,
+            libuvPool: budget.poolSize, encodeLimit: budget.limit, encodeRequested: budget.requested,
+            freePoolSlots: budget.freeSlots,
+        }, 'image pipeline configured')
+        if (budget.cappedByPool || budget.freeSlots < RESERVED_POOL_SLOTS) {
+            // Either the CPU rule wanted more encodes than the pool can carry while
+            // still leaving room for file reads, or the pool is so small that even
+            // one encode leaves fewer than the reserved slots free (a one-thread pool
+            // from a mistyped UV_THREADPOOL_SIZE does this without capping anything).
+            // Raise UV_THREADPOOL_SIZE rather than lowering num_workers; see
+            // encode-limit.ts.
+            logger.warn({
+                libuvPool: budget.poolSize, encodeRequested: budget.requested, encodeLimit: budget.limit,
+                freePoolSlots: budget.freeSlots, reservedPoolSlots: RESERVED_POOL_SLOTS, cappedByPool: budget.cappedByPool,
+            }, 'libuv threadpool too small for the encode limit plus the reserved slots')
+        }
     }
 
     const exit = async () => {

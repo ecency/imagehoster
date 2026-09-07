@@ -2,7 +2,9 @@ import 'mocha'
 import assert from 'assert'
 
 import {
-    clientGoneSignal, encodeLimitStats, encodeNeedsSlot, isEncodeAborted, runEncode, withEncodeSlot,
+    clientGoneSignal, encodeBudget, encodeLimitStats, encodeNeedsSlot, isEncodeAborted,
+    LIBUV_DEFAULT_THREADPOOL_SIZE, LIBUV_MAX_THREADPOOL_SIZE, libuvThreadpoolSize, RESERVED_POOL_SLOTS,
+    resolveEncodeBudget, runEncode, withEncodeSlot,
 } from './../src/encode-limit'
 import {errorMiddleware} from './../src/error'
 
@@ -18,6 +20,65 @@ describe('encode concurrency limit', function() {
 
     it('resolves to a positive limit', function() {
         assert(limit >= 1, `limit should be at least 1, got ${ limit }`)
+    })
+
+    describe('libuv threadpool size', function() {
+        it('is 4 when UV_THREADPOOL_SIZE is unset', function() {
+            assert.equal(libuvThreadpoolSize({}), LIBUV_DEFAULT_THREADPOOL_SIZE)
+        })
+
+        it('reads a numeric UV_THREADPOOL_SIZE', function() {
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: '16'}), 16)
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: '16abc'}), 16, 'atoi stops at the first non-digit')
+        })
+
+        it('models the libuv edges: garbage is ONE thread, negative wraps to the ceiling', function() {
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: 'sixteen'}), 1)
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: '0'}), 1)
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: '-3'}), LIBUV_MAX_THREADPOOL_SIZE)
+            assert.equal(libuvThreadpoolSize({UV_THREADPOOL_SIZE: '99999'}), LIBUV_MAX_THREADPOOL_SIZE)
+        })
+    })
+
+    describe('encode budget', function() {
+        it('follows the CPU rule when the pool has room', function() {
+            // configured: 0 is the config's own 'auto', so the CPU rule decides
+            const b = resolveEncodeBudget({cpus: 12, numWorkers: 6, configured: 0, poolSize: 16})
+            assert.equal(b.requested, 2)
+            assert.equal(b.limit, 2)
+            assert.equal(b.freeSlots, 14)
+            assert.equal(b.cappedByPool, false)
+        })
+
+        it('never lets encodes take the reserved pool slots', function() {
+            // the documented trap: fewer workers raise the per-worker limit until it
+            // would consume the whole default pool of 4
+            const b = resolveEncodeBudget({cpus: 12, numWorkers: 3, configured: 0, poolSize: 4})
+            assert.equal(b.requested, 4)
+            assert.equal(b.limit, 4 - RESERVED_POOL_SLOTS)
+            assert.equal(b.freeSlots, RESERVED_POOL_SLOTS)
+            assert.equal(b.cappedByPool, true)
+        })
+
+        it('caps an explicit max_concurrent_encodes the same way', function() {
+            const b = resolveEncodeBudget({cpus: 12, numWorkers: 6, configured: 10, poolSize: 4})
+            assert.equal(b.requested, 10)
+            assert.equal(b.limit, 2)
+            assert.equal(b.cappedByPool, true)
+        })
+
+        it('still allows one encode on a one-thread pool', function() {
+            const b = resolveEncodeBudget({cpus: 12, numWorkers: 6, configured: 0, poolSize: 1})
+            assert.equal(b.limit, 1)
+            assert.equal(b.freeSlots, 0)
+        })
+
+        it('is what the running gate enforces', function() {
+            const b = encodeBudget()
+            assert.equal(b.limit, encodeLimitStats().limit)
+            assert(b.freeSlots >= 0)
+            assert.equal(b.poolSize, libuvThreadpoolSize())
+        })
     })
 
     it('never runs more than the limit at once', async function() {

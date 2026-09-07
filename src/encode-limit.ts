@@ -5,18 +5,27 @@ import os from 'os'
  * Bounds how many Sharp encodes run concurrently in this worker.
  *
  * Sharp's async work runs on the libuv threadpool — the SAME pool Node uses for
- * `fs` reads. That pool defaults to 4 slots per process. An AVIF encode occupies
- * a slot for seconds, so with encodes unbounded two things go wrong:
+ * `fs` reads, `dns.lookup` and zlib. libuv sizes that pool from UV_THREADPOOL_SIZE
+ * once per process and defaults to 4. An AVIF encode occupies a slot for seconds,
+ * so with encodes unbounded two things go wrong:
  *
  *   1. Cheap work starves. Serving an already-converted variant is just a file
  *      read, but it queues behind multi-second encodes. Measured on a loaded
  *      box: a 32KB cached variant took 0.46-8.08s to serve while the pure-JS
  *      healthcheck answered in 2ms — the event loop was fine, the pool was full.
+ *      A DNS lookup for a dead mirror holds a slot for the resolver timeout too.
  *   2. The CPU oversubscribes. More simultaneous encodes than cores does not
  *      increase throughput, it just makes every encode slower.
  *
  * Capping concurrency keeps slots free for the cheap reads that make up most
- * requests, and lets each encode finish sooner.
+ * requests, and lets each encode finish sooner. The two purposes have different
+ * inputs: the CPU bound comes from cores per worker, the starvation bound from
+ * the pool size. The limit honours both: it is the CPU figure, capped so that
+ * RESERVED_POOL_SLOTS of the pool can never be taken by encodes. Without the cap,
+ * lowering num_workers raised the per-worker limit until it consumed the whole
+ * default pool, recreating the starvation the file exists to prevent. The image
+ * sets UV_THREADPOOL_SIZE well above the default so the cap does not normally
+ * engage; app.ts logs the resulting budget at boot and warns when it does.
  *
  * NOTE: this limit is per worker process. Service-wide concurrency is
  * `max_concurrent_encodes * num_workers`.
@@ -24,20 +33,89 @@ import os from 'os'
 
 const CONFIG_KEY = 'max_concurrent_encodes'
 
-function resolveLimit(): number {
-    if (config.has(CONFIG_KEY)) {
-        const configured = Number.parseInt(config.get(CONFIG_KEY) as string, 10)
-        if (Number.isFinite(configured) && configured > 0) { return configured }
-    }
-    // Default: divide the machine across the workers that will compete for it,
-    // so the service-wide total lands near the core count rather than a multiple
-    // of it. Workers are what app.ts will actually fork (0 = autodetect).
-    let numWorkers = Number.parseInt(config.get('num_workers') as string, 10)
-    if (!Number.isFinite(numWorkers) || numWorkers <= 0) { numWorkers = os.cpus().length }
-    return Math.max(1, Math.floor(os.cpus().length / numWorkers))
+/** libuv's compiled-in default and ceiling for the threadpool. */
+export const LIBUV_DEFAULT_THREADPOOL_SIZE = 4
+export const LIBUV_MAX_THREADPOOL_SIZE = 1024
+/** Pool slots encodes may never take, kept for file reads, DNS and zlib. */
+export const RESERVED_POOL_SLOTS = 2
+
+/**
+ * The libuv threadpool size this process runs with, derived the way libuv does
+ * it (src/threadpool.c): `atoi()` of UV_THREADPOOL_SIZE when set, so a value
+ * that is not a number reads as 0 and becomes ONE thread, and a negative value
+ * wraps to the 1024 ceiling. Modelling those edges here is what lets the boot
+ * log say what the process actually got rather than what was intended.
+ */
+export function libuvThreadpoolSize(env: NodeJS.ProcessEnv = process.env): number {
+    const raw = env.UV_THREADPOOL_SIZE
+    if (raw === undefined) { return LIBUV_DEFAULT_THREADPOOL_SIZE }
+    const parsed = Number.parseInt(raw, 10)
+    const asAtoi = Number.isFinite(parsed) ? parsed : 0
+    if (asAtoi < 0) { return LIBUV_MAX_THREADPOOL_SIZE }
+    if (asAtoi === 0) { return 1 }
+    return Math.min(asAtoi, LIBUV_MAX_THREADPOOL_SIZE)
 }
 
-const LIMIT = resolveLimit()
+/**
+ * The pool arithmetic for one worker. `freeSlots` is what GATED encodes can never
+ * occupy. Encodes below ENCODE_GATE_MIN_PIXELS and blur placeholders bypass the
+ * gate by design (they take 10-20ms and would otherwise queue behind full-size
+ * encodes, see runEncode), so a burst of them can briefly borrow from the free
+ * slots; that is bounded by their duration, not by this accounting, and is one
+ * of the reasons the image sizes the pool well above the default.
+ */
+export interface EncodeBudget {
+    /** libuv threadpool slots in this process */
+    poolSize: number
+    /** what the CPU rule (or explicit config) asked for */
+    requested: number
+    /** the limit actually enforced */
+    limit: number
+    /** pool slots gated encodes can never occupy */
+    freeSlots: number
+    /** true when the pool, not the CPU rule, decided the limit */
+    cappedByPool: boolean
+}
+
+export function resolveEncodeBudget(input: {
+    cpus?: number
+    numWorkers?: number
+    configured?: number
+    poolSize?: number
+} = {}): EncodeBudget {
+    const cpus = input.cpus !== undefined ? input.cpus : os.cpus().length
+    const poolSize = input.poolSize !== undefined ? input.poolSize : libuvThreadpoolSize()
+
+    let requested: number | undefined
+    const configured = input.configured !== undefined
+        ? input.configured
+        : (config.has(CONFIG_KEY) ? Number.parseInt(config.get(CONFIG_KEY) as string, 10) : undefined)
+    if (configured !== undefined && Number.isFinite(configured) && configured > 0) {
+        requested = configured
+    } else {
+        // Default: divide the machine across the workers that will compete for it,
+        // so the service-wide total lands near the core count rather than a multiple
+        // of it. Workers are what app.ts will actually fork (0 = autodetect).
+        let numWorkers = input.numWorkers !== undefined
+            ? input.numWorkers
+            : Number.parseInt(config.get('num_workers') as string, 10)
+        if (!Number.isFinite(numWorkers) || numWorkers <= 0) { numWorkers = cpus }
+        requested = Math.max(1, Math.floor(cpus / numWorkers))
+    }
+
+    const poolCap = Math.max(1, poolSize - RESERVED_POOL_SLOTS)
+    const limit = Math.min(requested, poolCap)
+    return {
+        poolSize,
+        requested,
+        limit,
+        freeSlots: poolSize - limit,
+        cappedByPool: limit < requested,
+    }
+}
+
+const BUDGET = resolveEncodeBudget()
+const LIMIT = BUDGET.limit
 
 export const ENCODE_ABORTED = 'EncodeAborted'
 
@@ -184,4 +262,9 @@ export function clientGoneSignal(ctx: any): AbortSignal | undefined {
 /** Exposed for tests and diagnostics. */
 export function encodeLimitStats() {
     return { limit: LIMIT, active, queued: waiting.length }
+}
+
+/** The budget this worker booted with, for the startup log. */
+export function encodeBudget(): EncodeBudget {
+    return BUDGET
 }
