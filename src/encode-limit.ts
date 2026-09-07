@@ -56,6 +56,14 @@ export function libuvThreadpoolSize(env: NodeJS.ProcessEnv = process.env): numbe
     return Math.min(asAtoi, LIBUV_MAX_THREADPOOL_SIZE)
 }
 
+/**
+ * The pool arithmetic for one worker. `freeSlots` is what GATED encodes can never
+ * occupy. Encodes below ENCODE_GATE_MIN_PIXELS and blur placeholders bypass the
+ * gate by design (they take 10-20ms and would otherwise queue behind full-size
+ * encodes, see runEncode), so a burst of them can briefly borrow from the free
+ * slots; that is bounded by their duration, not by this accounting, and is one
+ * of the reasons the image sizes the pool well above the default.
+ */
 export interface EncodeBudget {
     /** libuv threadpool slots in this process */
     poolSize: number
@@ -63,7 +71,7 @@ export interface EncodeBudget {
     requested: number
     /** the limit actually enforced */
     limit: number
-    /** pool slots encodes can never occupy */
+    /** pool slots gated encodes can never occupy */
     freeSlots: number
     /** true when the pool, not the CPU rule, decided the limit */
     cappedByPool: boolean
