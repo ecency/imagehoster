@@ -63,6 +63,6 @@ export async function serveOrBuildFallbackImage(
 
     ctx.set('Content-Type', contentType)
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', 'public,max-age=600')
+    ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
     ctx.body = rv
 }

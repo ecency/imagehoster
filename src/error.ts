@@ -126,7 +126,17 @@ export async function errorMiddleware(ctx: KoaContext, next: () => Promise<any>)
         }
         const error = err instanceof APIError ? err : new APIError({cause: err})
         ctx.status = error.statusCode
-        ctx.set('Cache-Control', 'no-cache')
+        // An error body must not be cached anywhere and must not be revalidatable.
+        // Handlers set the image's ETag before they do any work, so a failure that
+        // happens after that point would otherwise leave here wearing the ETag of
+        // the image it failed to produce. With `no-cache` the edge kept such a body
+        // and revalidated it conditionally; the origin then rendered the real image
+        // under the same ETag, the cache in between turned that into a 304, and the
+        // edge kept serving the stale error as a hit. no-store forbids storing it
+        // at all, and without validators there is nothing to revalidate against.
+        ctx.set('Cache-Control', 'no-store, no-cache')
+        ctx.remove('ETag')
+        ctx.remove('Last-Modified')
         ctx['api_error'] = error
         ctx.body = {error}
         ctx.app.emit('error', error, ctx)

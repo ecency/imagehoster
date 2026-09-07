@@ -13,7 +13,7 @@ import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { domainBlacklist, imageBlacklist } from './blacklist'
-import { DEFAULT_FALLBACK_IMAGE_URL, INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
+import { INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
@@ -269,14 +269,29 @@ export function safeParseInt(value: any): number | undefined {
     return isNaN(basicNumber) ? undefined : basicNumber
 }
 
+/**
+ * Decodes a /p/<key> path segment back into the source URL.
+ *
+ * A key that does not decode, or decodes to something that is not a URL, is a
+ * client error and is rejected as one. It used to be substituted with the 1x1
+ * placeholder upload instead, without being marked as a fallback, so the request
+ * went on through the normal pipeline: the pixel was rendered, stored under the
+ * placeholder's own key and served with the immutable 1y header, and a transient
+ * failure on that path was cached at the edge under the image's ETag. A malformed
+ * key can never become valid, so there is nothing to stand in for.
+ * Raw URLs are deliberately not accepted here either.
+ */
 export function parseProxiedUrl(value: string): URL {
+    let decoded: string
     try {
-        const decoded = base58Dec(value).replace(/\/+$/, '')
+        decoded = base58Dec(value).replace(/\/+$/, '')
+    } catch (cause) {
+        throw new APIError({cause, code: APIError.Code.InvalidProxyUrl, info: {reason: 'key is not base58'}})
+    }
+    try {
         return new URL(decoded)
     } catch (cause) {
-        // Fail fast on decode errors - do not accept raw URLs as this is a security risk
-        // Return default fallback image instead
-        return new URL(DEFAULT_FALLBACK_IMAGE_URL)
+        throw new APIError({cause, code: APIError.Code.InvalidProxyUrl, info: {reason: 'key does not decode to a URL'}})
     }
 }
 

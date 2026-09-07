@@ -143,30 +143,6 @@ export function applyUrlReplacements(urlString: string): string {
 }
 
 /**
- * Wall-clock budget for the whole upstream fetch chain of one request.
- *
- * A proxy miss can walk up to eight mirror candidates, and each candidate used to
- * get the full 10s for every phase, so a request against a dead-but-listening
- * origin could spend well over a minute upstream. Varnish gives the backend 60s
- * (the VCL sets no first_byte_timeout, so its default applies) and Cloudflare 100s,
- * so the origin's own budget exceeded the one its caller was willing to wait: the
- * request was cut off as a 503 rather than finishing as a placeholder. That
- * inversion is the likeliest source of the standing 1.0% 503 rate.
- *
- * 25s leaves room for the reserved default-image fetch, a metadata re-walk and a
- * worst-case encode while staying comfortably under 60s.
- *
- * Retune without a rebuild by restarting with
- * NODE_CONFIG='{"fetch_deadline_ms":40000}': config/ is baked into the image, so
- * editing a toml on the box does nothing unless it is mounted.
- */
-export const FETCH_DEADLINE_MS = (() => {
-    if (!config.has('fetch_deadline_ms')) { return 25000 }
-    const v = Number(config.get('fetch_deadline_ms'))
-    return Number.isSafeInteger(v) && v > 0 ? v : 25000
-})()
-
-/**
  * Per-candidate phase timeouts.
  *
  * needle arms these as separate serial phases and re-arms them per redirect leg,
@@ -198,3 +174,50 @@ export const FETCH_DEFAULT_OPEN_MS = 2000
 export const FETCH_DEFAULT_RESPONSE_MS = 3000
 export const FETCH_DEFAULT_READ_MS = 3000
 export const FETCH_DEFAULT_WALL_MS = 5000
+
+/**
+ * First-byte timeout the cache in front of this service grants the image
+ * backend. This is Varnish's `.first_byte_timeout` for the proxy backend in the
+ * deployed VCL, not Varnish's 60s default: a request the origin has not started
+ * answering by then is cut off and the client gets a 503. Every budget below is
+ * derived from it, so that a change here is the one place to retune.
+ */
+export const EDGE_FIRST_BYTE_TIMEOUT_MS = 20000
+
+/**
+ * Wall-clock budget for the whole upstream fetch chain of one request.
+ *
+ * A proxy miss can walk up to eight mirror candidates, and each candidate used to
+ * get the full 10s for every phase, so a request against a dead-but-listening
+ * origin could spend well over a minute upstream. The origin's own budget then
+ * exceeded the one its caller was willing to wait, so the request was cut off as
+ * a 503 rather than finishing as a placeholder.
+ *
+ * The first attempt at this budget assumed the 60s Varnish default and picked
+ * 25s. The deployed VCL sets 20s, so every walk that pressed against the 25s
+ * budget was still a 503 at exactly 20s, and the placeholder path could never
+ * win the race. The default is now derived: the walk must end early enough for
+ * the reserved default-image fetch (its own worst case, FETCH_DEFAULT_WALL_MS)
+ * and the render (FETCH_RENDER_SLACK_MS) to complete inside the edge budget.
+ *
+ * The render slack is a heuristic, not an enforced limit: metadata, the encode
+ * gate's queue wait and the encode itself are not deadline-aware, so a saturated
+ * worker can still push the first byte past the edge cutoff. It is sized for the
+ * measured shape (a placeholder encode is tens of milliseconds, queue waits are
+ * usually well under a second at the production limit) with headroom, and it
+ * costs nothing in mirror depth: the first slow candidate's 12s wall consumes a
+ * 12s and a 13s budget identically, so the second candidate never ran either way.
+ *
+ * Retune without a rebuild by restarting with
+ * NODE_CONFIG='{"fetch_deadline_ms":11000}': config/ is baked into the image, so
+ * editing a toml on the box does nothing unless it is mounted. An override is
+ * taken as given, but the default is the value that is known to fit.
+ */
+export const FETCH_RENDER_SLACK_MS = 3000
+export const FETCH_DEADLINE_DEFAULT_MS =
+    EDGE_FIRST_BYTE_TIMEOUT_MS - FETCH_DEFAULT_WALL_MS - FETCH_RENDER_SLACK_MS
+export const FETCH_DEADLINE_MS = (() => {
+    if (!config.has('fetch_deadline_ms')) { return FETCH_DEADLINE_DEFAULT_MS }
+    const v = Number(config.get('fetch_deadline_ms'))
+    return Number.isSafeInteger(v) && v > 0 ? v : FETCH_DEADLINE_DEFAULT_MS
+})()

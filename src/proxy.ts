@@ -85,6 +85,21 @@ export function shouldCacheOriginal(
     if (cap <= 0) { return false }
     return bytes <= MAX_IMAGE_SIZE && bytes <= cap
 }
+
+/**
+ * ETag for a placeholder served in place of `imageKey`.
+ *
+ * The real variant's ETag is derived from the key alone, so a placeholder that
+ * shared it would be validated by the real image and vice versa: a cache holding
+ * the placeholder asks "still the same?", the origin answers with the recovered
+ * image under the same ETag, the cache in front of us collapses that into a 304,
+ * and the placeholder outlives its 120s contract by as long as anyone keeps
+ * asking. Deterministic, so a placeholder still revalidates as a placeholder.
+ */
+export function fallbackEtag(imageKey: string): string {
+    return etag(imageKey + '|fallback')
+}
+
 const SERVICE_URL = new URL(config.get('service_url'))
 
 // Public proxy hosts that old post bodies wrapped around img.esteem.ws URLs
@@ -179,9 +194,11 @@ async function convertCachedMatchVariant(
 export async function proxyHandler(ctx: KoaContext) {
     ctx.tag({handler: 'proxy'})
     // One budget for every upstream fetch this request makes, including the
-    // metadata re-walk. Keeps the origin's own worst case comfortably under the
-    // 60s Varnish allows the backend, so an exhausted chain gets the chance to
-    // answer with a placeholder instead of being cut off as a 503.
+    // metadata re-walk. It is sized so that the walk, the reserved default-image
+    // fetch and the render all fit inside the first-byte timeout the cache in
+    // front of this service gives the backend (see FETCH_DEADLINE_MS), so an
+    // exhausted chain gets the chance to answer with a placeholder instead of
+    // being cut off as a 503.
     const fetchDeadlineAt = Date.now() + FETCH_DEADLINE_MS
 
     APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
@@ -400,6 +417,7 @@ export async function proxyHandler(ctx: KoaContext) {
         const variantCacheControl = isDefaultImage
             ? 'public,max-age=120' // fallback contract: 2 minutes
             : 'public,max-age=31536000,immutable'
+        if (isDefaultImage) { ctx.set('ETag', fallbackEtag(imageKey)) }
         if (options.format === OutputFormat.Match && needsMatchFallback(mimeType, acceptHeader)) {
             ctx.tag({match_fallback: true})
             const cached = await readStream(stream)
@@ -770,6 +788,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (isDefaultImage) {
         ctx.log.error({ finalUrl: urlString }, 'Responding with default image')
         ctx.set('Cache-Control', 'public,max-age=120') // fallback contract: 2 minutes
+        ctx.set('ETag', fallbackEtag(imageKey))
     } else {
         ctx.set('Cache-Control', 'public,max-age=31536000,immutable') // 1 year
     }

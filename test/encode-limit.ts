@@ -129,6 +129,7 @@ describe('encode concurrency limit', function() {
                 body: undefined as any,
                 emitted,
                 log: {debug: () => undefined},
+                remove: () => undefined,
                 set: () => undefined,
                 status: 0,
                 url: '/p/test',
