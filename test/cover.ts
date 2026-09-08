@@ -130,7 +130,8 @@ describe('cover', function() {
         const first = await needle('get', `http://localhost:${port}/u/foo/cover`)
         assert.equal(first.statusCode, 200)
         assert(first.headers['etag'], 'response should have etag')
-        assert(first.headers['last-modified'], 'response should have last-modified')
+        assert.equal(first.headers['last-modified'], undefined,
+            'no Last-Modified: it carried the profile timestamp, which says nothing about the stored bytes')
     })
 
     it('answers 304 for conditional revalidation of a healthy cover', async function() {
@@ -142,9 +143,11 @@ describe('cover', function() {
         const inm = await needle('get', `http://localhost:${port}/u/healthy/cover`,
             null, { headers: { 'if-none-match': warm.headers.etag as string } })
         assert.equal(inm.statusCode, 304)
+        // an If-Modified-Since-only revalidation is not honoured: the content
+        // validator is the only thing that can vouch for the stored bytes
         const ims = await needle('get', `http://localhost:${port}/u/healthy/cover`,
-            null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
-        assert.equal(ims.statusCode, 304)
+            null, { headers: { 'if-modified-since': new Date().toUTCString() } })
+        assert.equal(ims.statusCode, 200)
     })
 
     it('gives a placeholder its own ETag, so it never revalidates as the real cover', async function() {
@@ -158,7 +161,7 @@ describe('cover', function() {
         const realUrl = mockProfiles.foo.metadata.profile.cover_image
         const keys = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
             getImageKey(getUrlHashKey(realUrl), { width: 1344, height: 240, mode: ScalingMode.Fit, format } as any))
-        const realEtags = keys.flatMap((k) => [etag(k), realEtag(k, warm.body)])
+        const realEtags = keys.flatMap((k) => [etag(k), realEtag(k, warm.body, warm.body.length)])
         assert(!realEtags.includes(warm.headers.etag as string),
             'placeholder must not wear the ETag the real cover would have')
         // and a client presenting the placeholder ETag is not told it is current
@@ -206,10 +209,9 @@ describe('cover', function() {
                     'cached source bytes must not be served')
                 assert.equal(srcHits, hitsBefore, 'blocked source must not be re-fetched')
 
-                // a date-only revalidation must not shortcut either: Last-Modified
-                // still carries the profile timestamp the client already has
+                // a date-only revalidation must not shortcut either
                 const ims = await needle('get', `http://localhost:${port}/u/blockycover/cover`,
-                    null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
+                    null, { headers: { 'if-modified-since': new Date().toUTCString() } })
                 assert.equal(ims.statusCode, 200, 'must not answer 304 for If-Modified-Since revalidation')
                 assert.equal(ims.headers['cache-control'], 'public,max-age=120')
             } finally {

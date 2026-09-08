@@ -114,6 +114,20 @@ export async function mimeMagic(data: Buffer): Promise<string> {
     return 'application/octet-stream'
 }
 
+/**
+ * Existence check that also reports the stored size when the store knows it
+ * (every store here does: fs and memory from the object, S3 from HEAD). The
+ * size is part of a real variant's validator, so the cache-hit path needs it
+ * before it can answer a conditional request.
+ */
+export function storeStat(store: AbstractBlobStore, key: BlobKey): Promise<{exists: boolean, size?: number}> {
+    return new Promise((resolve, reject) => {
+        (store as any).exists(key, (error: any, exists?: boolean, size?: number) => {
+            if (error) { reject(error) } else { resolve({exists: !!exists, size}) }
+        })
+    })
+}
+
 export function storeExists(store: AbstractBlobStore, key: BlobKey) {
     return new Promise<boolean>((resolve, reject) => {
         store.exists(key, (error, exists) => {

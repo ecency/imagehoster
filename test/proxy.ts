@@ -204,7 +204,7 @@ describe('proxy', function() {
             const opts = {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any
             const key = getImageKey('U' + multihash.toB58String(multihash.encode(
                 createHash('sha1').update(source).digest(), 'sha1')), opts)
-            assert.equal(warm.headers.etag, realEtag(key, warm.body), 'real ETag is derived from the key and the stored bytes')
+            assert.equal(warm.headers.etag, realEtag(key, warm.body, warm.body.length), 'real ETag is derived from the key and the stored bytes')
             const stale = await needle('get', url, null, { headers: { 'if-none-match': fallbackEtag(key) } })
             assert.equal(stale.statusCode, 200)
             assert.equal((await sharp(stale.body).metadata()).width, 120)
@@ -264,7 +264,7 @@ describe('proxy', function() {
                 assert.equal(res.body.length, heic.length, 'the original bytes are handed through')
                 assert.equal(res.headers['cache-control'], 'public,max-age=3600', 'a passthrough is fresh for an hour, not a year')
                 assert.equal(res.headers.etag, passthroughEtag(key))
-                assert.notEqual(res.headers.etag, realEtag(key, res.body), 'a passthrough must not wear the variant ETag')
+                assert.notEqual(res.headers.etag, realEtag(key, res.body, res.body.length), 'a passthrough must not wear the variant ETag')
                 assert.equal(await storeExists(proxyStore, key), false, 'a passthrough must not be stored as the variant')
                 // a client holding the passthrough is not told it is current
                 const inm = await needle('get', url, null, { headers: { 'if-none-match': res.headers.etag as string } })
@@ -300,7 +300,7 @@ describe('proxy', function() {
                     {headers: {accept: 'image/jpeg', 'if-none-match': first.headers.etag as string}})
                 assert.equal(recovered.statusCode, 200, 'incompatible AVIF must not validate as the recovered JPEG')
                 assert.equal(recovered.headers['content-type'], 'image/jpeg')
-                assert.equal(recovered.headers.etag, realEtag(key, await readStream(proxyStore.createReadStream(key))), 'the converted variant is real again')
+                assert.equal(recovered.headers.etag, ((b) => realEtag(key, b, b.length))(await readStream(proxyStore.createReadStream(key))), 'the converted variant is real again')
                 assert.equal(recovered.headers['cache-control'], 'public,max-age=31536000,immutable')
             } finally {
                 gate.runEncode = realRunEncode
@@ -329,7 +329,7 @@ describe('proxy', function() {
                 const recovered = await needle('get', url, null, {headers: {'if-none-match': first.headers.etag as string}})
                 assert.equal(recovered.statusCode, 200, 'unresized bytes must not validate as the recovered 800px variant')
                 assert.equal((await sharp(recovered.body).metadata()).width, 800)
-                assert.equal(recovered.headers.etag, realEtag(key, recovered.body))
+                assert.equal(recovered.headers.etag, realEtag(key, recovered.body, recovered.body.length))
             } finally {
                 gate.runEncode = realRunEncode
                 try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
@@ -410,7 +410,7 @@ describe('proxy', function() {
                 assert.notEqual(res.body.length, heic.length, 'the raw container must not be handed through')
                 assert.equal((await sharp(res.body).metadata()).width, 120)
                 assert.notEqual(res.headers['content-type'], 'image/heif', 'match negotiates away from HEIF')
-                assert.equal(res.headers.etag, realEtag(key, res.body))
+                assert.equal(res.headers.etag, realEtag(key, res.body, res.body.length))
                 assert.equal(await storeExists(proxyStore, key), true)
             } finally {
                 try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
@@ -449,7 +449,7 @@ describe('proxy', function() {
             try {
                 // the validators a pre-repair client can hold: the key-only ETag the
                 // old code sent, and the raw container's own content validator
-                for (const stale of [etag(key), realEtag(key, heic)]) {
+                for (const stale of [etag(key), realEtag(key, heic, heic.length)]) {
                     const res = await needle('get', url, null, {headers: {'if-none-match': stale}})
                     assert.equal(res.statusCode, 200, `the old validator ${ stale } must not shortcut past the repair`)
                     assert.notEqual(res.headers.etag, stale, 'the repaired representation carries a new validator')
@@ -462,7 +462,7 @@ describe('proxy', function() {
                 // so the validator did too
                 const second = await needle('get', url, null, {headers: {'if-none-match': etag(key)}})
                 assert.equal(second.statusCode, 200, 'a later client with the pre-repair validator must get the repaired bytes')
-                const third = await needle('get', url, null, {headers: {'if-none-match': realEtag(key, heic)}})
+                const third = await needle('get', url, null, {headers: {'if-none-match': realEtag(key, heic, heic.length)}})
                 assert.equal(third.statusCode, 200)
             } finally {
                 try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
@@ -482,7 +482,7 @@ describe('proxy', function() {
             const key = keyFor(jpegSource, {width: 70, mode: ScalingMode.Fit, format: OutputFormat.Match})
             await storeWrite(proxyStore, key, heic)
             try {
-                const preRepair = [etag(key), realEtag(key, heic)]
+                const preRepair = [etag(key), realEtag(key, heic, heic.length)]
                 // first client: repairs
                 const first = await needle('get', url, null, {headers: {'if-none-match': preRepair[0]}})
                 assert.equal(first.statusCode, 200)

@@ -114,16 +114,17 @@ export class ShardedFsStore {
         await fs.promises.writeFile(sPath, data)
     }
 
-    exists(opts: any, done: (error: any, exists?: boolean) => void) {
+    /** Reports the size as a third argument: the validator of a stored variant includes it. */
+    exists(opts: any, done: (error: any, exists?: boolean, size?: number) => void) {
         const key = typeof opts === 'string' ? opts : opts.key
         const sPath = shardedPath(this.path, key)
 
         fs.stat(sPath, (err, stat) => {
-            if (!err && stat) return done(null, true)
+            if (!err && stat) return done(null, true, stat.size)
             // Check flat path
             fs.stat(flatPath(this.path, key), (err2, stat2) => {
                 if (err2 && err2.code !== 'ENOENT') return done(err2)
-                done(null, !!stat2)
+                done(null, !!stat2, stat2 ? stat2.size : undefined)
             })
         })
     }

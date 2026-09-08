@@ -55,6 +55,7 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
+    storeStat,
     isAnimatedSource,
     primaryPageOf,
     supportsAvif,
@@ -406,7 +407,9 @@ export async function proxyHandler(ctx: KoaContext) {
     // behind it are the ones this service would render today.
     ctx.status = 200
     // check if we already have a converted image for a requested key
-    if (await storeExists(proxyStore, imageKey) && !options.ignorecache && !options.invalidate) {
+    const variantStat = (!options.ignorecache && !options.invalidate)
+        ? await storeStat(proxyStore, imageKey) : {exists: false}
+    if (variantStat.exists) {
         ctx.tag({store: 'resized'})
         ctx.log.debug('streaming %s from store', imageKey)
         const file = proxyStore.createReadStream(imageKey)
@@ -447,7 +450,7 @@ export async function proxyHandler(ctx: KoaContext) {
         // braces.
         // The validator names the stored bytes, so a client holding a copy the
         // repair replaced presents a different one and is not told to keep it
-        ctx.set('ETag', etagFor(realImage(head), imageKey, head))
+        ctx.set('ETag', etagFor(realImage(head), imageKey, head, variantStat.size))
         if (ctx.fresh && !shouldBypassCache && !substitution) {
             file.destroy()
             ctx.status = 304
@@ -480,7 +483,7 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.set('Content-Type', servedType)
         ctx.set('Vary', 'Accept')
         ctx.set('Cache-Control', cacheControlFor(served, IMMUTABLE_CACHE_CONTROL))
-        ctx.set('ETag', etagFor(served, imageKey, head))
+        ctx.set('ETag', etagFor(served, imageKey, head, variantStat.size))
         ctx.body = served.bytes
         return
         } // end healthy cached variant
@@ -823,6 +826,6 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
     ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
-    ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes))
+    ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes, rendered.bytes.length))
     ctx.body = rendered.bytes
 }

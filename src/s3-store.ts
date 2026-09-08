@@ -68,13 +68,14 @@ export class S3BlobStore {
         return passthrough
     }
 
-    exists(opts: any, done: (error: any, exists?: boolean) => void) {
+    /** Reports the size as a third argument: the validator of a stored variant includes it. */
+    exists(opts: any, done: (error: any, exists?: boolean, size?: number) => void) {
         const key = typeof opts === 'string' ? opts : opts.key
         this.s3.send(new HeadObjectCommand({
             Bucket: this.bucket,
             Key: key,
-        })).then(() => {
-            done(null, true)
+        })).then((res) => {
+            done(null, true, typeof res.ContentLength === 'number' ? res.ContentLength : undefined)
         }).catch((err) => {
             if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
                 done(null, false)
