@@ -12,6 +12,7 @@ import {app} from './../src/app'
 import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore} from './../src/common'
 import {getImageKey, getUrlHashKey, OutputFormat, ScalingMode, storeExists} from './../src/utils'
+import {realEtag} from './../src/served-image'
 import {BROKEN_AVATAR_URL, mockProfiles, pointHealthyProfileAt} from './index'
 
 describe('avatar', function() {
@@ -144,7 +145,8 @@ describe('avatar', function() {
         const first = await needle('get', `http://localhost:${port}/u/foo/avatar`)
         assert.equal(first.statusCode, 200)
         assert(first.headers['etag'], 'response should have etag')
-        assert(first.headers['last-modified'], 'response should have last-modified')
+        assert.equal(first.headers['last-modified'], undefined,
+            'no Last-Modified: it carried the profile timestamp, which says nothing about the stored bytes')
     })
 
     it('answers 304 for conditional revalidation of a healthy avatar', async function() {
@@ -156,9 +158,11 @@ describe('avatar', function() {
         const inm = await needle('get', `http://localhost:${port}/u/healthy/avatar`,
             null, { headers: { 'if-none-match': warm.headers.etag as string } })
         assert.equal(inm.statusCode, 304)
+        // an If-Modified-Since-only revalidation is not honoured: the content
+        // validator is the only thing that can vouch for the stored bytes
         const ims = await needle('get', `http://localhost:${port}/u/healthy/avatar`,
-            null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
-        assert.equal(ims.statusCode, 304)
+            null, { headers: { 'if-modified-since': new Date().toUTCString() } })
+        assert.equal(ims.statusCode, 200)
     })
 
     it('gives a placeholder its own ETag, so it never revalidates as the real avatar', async function() {
@@ -170,8 +174,9 @@ describe('avatar', function() {
         assert.equal(warm.statusCode, 200)
         assert.equal(warm.headers['cache-control'], 'public,max-age=120')
         const realUrl = mockProfiles.foo.metadata.profile.profile_image
-        const realEtags = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
-            etag(getImageKey(getUrlHashKey(realUrl), { width: 256, height: 256, mode: ScalingMode.Cover, format } as any)))
+        const keys = [OutputFormat.Match, OutputFormat.WEBP, OutputFormat.AVIF].map((format) =>
+            getImageKey(getUrlHashKey(realUrl), { width: 256, height: 256, mode: ScalingMode.Cover, format } as any))
+        const realEtags = keys.flatMap((k) => [etag(k), realEtag(k, warm.body, warm.body.length)])
         assert(!realEtags.includes(warm.headers.etag as string),
             'placeholder must not wear the ETag the real avatar would have')
         // and a client presenting the placeholder ETag is not told it is current
@@ -219,10 +224,9 @@ describe('avatar', function() {
                     'cached source bytes must not be served')
                 assert.equal(srcHits, hitsBefore, 'blocked source must not be re-fetched')
 
-                // a date-only revalidation must not shortcut either: Last-Modified
-                // still carries the profile timestamp the client already has
+                // a date-only revalidation must not shortcut either
                 const ims = await needle('get', `http://localhost:${port}/u/blockyavatar/avatar`,
-                    null, { headers: { 'if-modified-since': warm.headers['last-modified'] as string } })
+                    null, { headers: { 'if-modified-since': new Date().toUTCString() } })
                 assert.equal(ims.statusCode, 200, 'must not answer 304 for If-Modified-Since revalidation')
                 assert.equal(ims.headers['cache-control'], 'public,max-age=120')
             } finally {

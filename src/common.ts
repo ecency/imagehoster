@@ -321,7 +321,15 @@ function loadStore(key: string): AbstractBlobStore {
         return new ShardedFsStore(fsPath) as any
     } else if (conf.type === 'memory') {
         logger.warn('using memory store for %s', key)
-        return require('abstract-blob-store')()
+        const mem = require('abstract-blob-store')()
+        // report the size like the fs and S3 stores do: the validator of a stored
+        // variant includes it, and hit and miss must agree
+        mem.exists = function(opts: any, cb: (err: any, exists?: boolean, size?: number) => void) {
+            const k = typeof opts === 'string' ? opts : opts.key
+            const data = this.data[k]
+            cb(null, !!data, data ? data.length : undefined)
+        }
+        return mem
     } else if (conf.type === 's3') {
         if (!s3Client) {
             const rawEndpoint = config.get('S3_ENDPOINT') as string

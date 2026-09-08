@@ -5,6 +5,7 @@ import etag from 'etag'
 import {proxyStore} from './../src/common'
 import {
     cacheControlFor, derive, etagFor, FALLBACK_CACHE_CONTROL, fallbackEtag, fallbackImage, isFallbackImage,
+    REAL_ETAG_HEAD_BYTES, realEtag,
     PASSTHROUGH_CACHE_CONTROL, passthroughEtag, passthroughImage, realImage, storeImage, worstOf,
 } from './../src/served-image'
 import {storeExists, storeRemove} from './../src/utils'
@@ -36,11 +37,28 @@ describe('served image', function() {
         assert.equal(FALLBACK_CACHE_CONTROL, 'public,max-age=120')
     })
 
+    it('derives the real validator from the key and the stored bytes', function() {
+        const key = 'Uabc_100x0_fit_match'
+        const bytes = Buffer.from('rendered-bytes')
+        assert.equal(etagFor(real, key, bytes, bytes.length), realEtag(key, bytes, bytes.length))
+        assert.notEqual(realEtag(key, bytes, bytes.length), etag(key), 'no longer the key alone')
+        assert.notEqual(realEtag(key, bytes, bytes.length), realEtag(key, Buffer.from('other-bytes!'), bytes.length), 'different bytes, different validator')
+        assert.notEqual(realEtag(key, bytes, bytes.length), realEtag('Uother_100x0_fit_match', bytes, bytes.length), 'same bytes under another key, different validator')
+        // only the leading REAL_ETAG_HEAD_BYTES take part in the digest, so a hit (sniffed
+        // head plus the store's size) and a miss (the whole body) agree
+        const big = Buffer.alloc(REAL_ETAG_HEAD_BYTES + 5000, 7)
+        assert.equal(realEtag(key, big, big.length), realEtag(key, big.subarray(0, REAL_ETAG_HEAD_BYTES), big.length))
+        // and the size tells apart bodies that share a prefix: a truncated copy does not validate
+        assert.notEqual(realEtag(key, big, big.length), realEtag(key, big, big.length - 1))
+        assert.throws(() => etagFor(real, key), /leading bytes/)
+        assert.throws(() => etagFor(real, key, bytes), /size/)
+    })
+
     it('never gives a placeholder the real ETag', function() {
         const key = 'Uabc_100x0_fit_match'
-        assert.equal(etagFor(real, key), etag(key))
+        const bytes = Buffer.from('rendered-bytes')
         assert.equal(etagFor(placeholder, key), fallbackEtag(key))
-        assert.notEqual(etagFor(placeholder, key), etagFor(real, key))
+        assert.notEqual(etagFor(placeholder, key), etagFor(real, key, bytes, bytes.length))
         assert.equal(etagFor(placeholder, key), etagFor(fallbackImage(Buffer.alloc(0), 'other reason'), key),
             'deterministic across reasons, so a placeholder revalidates as a placeholder')
     })
@@ -54,7 +72,7 @@ describe('served image', function() {
         assert.equal(PASSTHROUGH_CACHE_CONTROL, 'public,max-age=3600')
         // but its own validator, or a client holding it would be told "not modified" by the real variant later
         assert.equal(etagFor(through, key), passthroughEtag(key))
-        assert.notEqual(etagFor(through, key), etagFor(real, key))
+        assert.notEqual(etagFor(through, key), etagFor(real, key, Buffer.from('x'), 1))
         assert.notEqual(etagFor(through, key), etagFor(placeholder, key))
     })
 

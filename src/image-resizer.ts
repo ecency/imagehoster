@@ -4,8 +4,8 @@ import { runEncode } from './encode-limit'
 import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
-    buildSharpPipeline, getProxyImageLimits, mimeMagic,
-    OutputFormat, ProxyOptions, safeParseInt, ScalingMode,
+    buildSharpPipeline, getProxyImageLimits, isAnimatedSource, mimeMagic,
+    OutputFormat, primaryPageOf, ProxyOptions, safeParseInt, ScalingMode,
 } from './utils'
 
 export async function resizeImageWithOptions(
@@ -42,14 +42,9 @@ export async function resizeImageWithOptions(
         isFallback = fallbackUsed
         origData = buffer
         contentType = await mimeMagic(origData)
-        // Use metadata.pages when available; if null, fall back to content-type detection
-        // (conservative: assume GIF/APNG are animated when pages can't be determined)
-        const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
-        if (metadata.pages != null) {
-            isAnimated = metadata.pages > 1
-        } else {
-            isAnimated = isGifOrApng
-        }
+        // Only formats that can animate may say so through their page count;
+        // a HEIF with an auxiliary image is a still, see isAnimatedSource
+        isAnimated = isAnimatedSource(metadata, contentType)
     } catch (err) {
         throw new APIError({ cause: err, code: APIError.Code.InvalidImage, info: { metadata: 'read' } })
     }
@@ -66,7 +61,7 @@ export async function resizeImageWithOptions(
 
     // First frame only. Reaching here with isAnimated true implies forceStill, so
     // we never decode every frame — that is the memory-heavy path we are avoiding.
-    const image = buildSharpPipeline(origData, false)
+    const image = buildSharpPipeline(origData, false, primaryPageOf(meta))
 
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width = safeParseInt(options.width)

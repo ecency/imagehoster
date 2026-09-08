@@ -1,6 +1,8 @@
 import 'mocha'
 import blobStore from 'abstract-blob-store'
 import assert from 'assert'
+import * as path from 'path'
+import * as fs from 'fs'
 import { createHash } from 'crypto'
 import { URL } from 'url'
 
@@ -18,7 +20,10 @@ import {
     stripWebpOrPng,
     getImageKey,
     getUrlHashKey,
+    buildSharpPipeline,
+    isAnimatedSource,
     parseProxiedUrl,
+    primaryPageOf,
     parsePlainUrl,
     getOrigKeyFromUrl,
     sanitizeIgnoreInvalidateParams,
@@ -281,6 +286,52 @@ describe('utils', function() {
             const url = 'https://example.com/test.jpg'
             const expected = 'U' + createHash('sha1').update(url).digest('hex')
             assert.equal(getUrlHashKey(url), expected)
+        })
+    })
+
+    describe('isAnimatedSource', function() {
+        it('treats a multi-page GIF, WebP or APNG as animated', function() {
+            assert.equal(isAnimatedSource({format: 'gif', pages: 12}, 'image/gif'), true)
+            assert.equal(isAnimatedSource({format: 'webp', pages: 3}, 'image/webp'), true)
+            assert.equal(isAnimatedSource({format: 'png', pages: 4}, 'image/apng'), true)
+        })
+
+        it('treats a single-page animatable format as a still', function() {
+            assert.equal(isAnimatedSource({format: 'gif', pages: 1}, 'image/gif'), false)
+            assert.equal(isAnimatedSource({format: 'webp', pages: 1}, 'image/webp'), false)
+        })
+
+        it('never treats a HEIF or any non-animating container as animated by its page count', function() {
+            // libvips counts top-level images: an iPhone photo with a gain map or
+            // depth image reports two, and passing it through unrendered served the
+            // raw container to browsers that cannot display it (#43)
+            assert.equal(isAnimatedSource({format: 'heif', pages: 2}, 'image/heic'), false)
+            assert.equal(isAnimatedSource({format: 'heif', pages: 5}, 'image/heif'), false)
+            assert.equal(isAnimatedSource({format: 'tiff', pages: 3}, 'image/tiff'), false)
+            assert.equal(isAnimatedSource({format: 'pdf', pages: 9}, 'application/pdf'), false)
+            assert.equal(isAnimatedSource({format: 'jpeg', pages: 2}, 'image/jpeg'), false)
+        })
+
+        it('falls back to the content type only when the page count is unknown', function() {
+            assert.equal(isAnimatedSource({format: 'gif'}, 'image/gif'), true)
+            assert.equal(isAnimatedSource({format: 'png'}, 'image/apng'), true)
+            assert.equal(isAnimatedSource({format: 'heif'}, 'image/heic'), false)
+            assert.equal(isAnimatedSource({format: 'jpeg'}, 'image/jpeg'), false)
+        })
+    })
+
+    describe('primaryPageOf and buildSharpPipeline', function() {
+        it('selects the HEIF primary image when it is not the first top-level image', function() {
+            assert.equal(primaryPageOf({format: 'heif', pagePrimary: 1}), 1)
+            assert.equal(primaryPageOf({format: 'heif', pagePrimary: 0}), undefined, 'first image is Sharp default')
+            assert.equal(primaryPageOf({format: 'heif'}), undefined)
+            assert.equal(primaryPageOf({format: 'gif', pagePrimary: 1}), undefined, 'only HEIF has a primary image')
+        })
+
+        it('pins the requested page on the Sharp input and leaves it alone otherwise', function() {
+            const buf = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
+            assert.equal((buildSharpPipeline(buf, false, 1) as any).options.input.page, 1)
+            assert.equal((buildSharpPipeline(buf, false) as any).options.input.page, undefined)
         })
     })
 

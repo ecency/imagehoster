@@ -18,9 +18,9 @@ import {initBlacklistService} from './../src/blacklist-service'
 import {proxyStore, uploadStore} from './../src/common'
 import {DEFAULT_FALLBACK_IMAGE_URL, MAX_CACHED_ORIGINAL_SIZE, SERVICE_BASE_URL} from './../src/constants'
 import {shouldCacheOriginal} from './../src/proxy'
-import {fallbackEtag, fallbackImage, passthroughEtag, realImage} from './../src/served-image'
+import {fallbackEtag, fallbackImage, passthroughEtag, realEtag, realImage} from './../src/served-image'
 import {
-    base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, ScalingMode, storeExists, storeRemove, storeWrite,
+    base58Enc, getDefaultUrlAndParams, getImageKey, OutputFormat, readStream, ScalingMode, storeExists, storeRemove, storeWrite,
 } from './../src/utils'
 
 import {uploadImage} from './upload'
@@ -204,7 +204,7 @@ describe('proxy', function() {
             const opts = {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any
             const key = getImageKey('U' + multihash.toB58String(multihash.encode(
                 createHash('sha1').update(source).digest(), 'sha1')), opts)
-            assert.equal(warm.headers.etag, etag(key), 'real ETag is derived from the key')
+            assert.equal(warm.headers.etag, realEtag(key, warm.body, warm.body.length), 'real ETag is derived from the key and the stored bytes')
             const stale = await needle('get', url, null, { headers: { 'if-none-match': fallbackEtag(key) } })
             assert.equal(stale.statusCode, 200)
             assert.equal((await sharp(stale.body).metadata()).width, 120)
@@ -264,7 +264,7 @@ describe('proxy', function() {
                 assert.equal(res.body.length, heic.length, 'the original bytes are handed through')
                 assert.equal(res.headers['cache-control'], 'public,max-age=3600', 'a passthrough is fresh for an hour, not a year')
                 assert.equal(res.headers.etag, passthroughEtag(key))
-                assert.notEqual(res.headers.etag, etag(key), 'a passthrough must not wear the variant ETag')
+                assert.notEqual(res.headers.etag, realEtag(key, res.body, res.body.length), 'a passthrough must not wear the variant ETag')
                 assert.equal(await storeExists(proxyStore, key), false, 'a passthrough must not be stored as the variant')
                 // a client holding the passthrough is not told it is current
                 const inm = await needle('get', url, null, { headers: { 'if-none-match': res.headers.etag as string } })
@@ -300,7 +300,7 @@ describe('proxy', function() {
                     {headers: {accept: 'image/jpeg', 'if-none-match': first.headers.etag as string}})
                 assert.equal(recovered.statusCode, 200, 'incompatible AVIF must not validate as the recovered JPEG')
                 assert.equal(recovered.headers['content-type'], 'image/jpeg')
-                assert.equal(recovered.headers.etag, etag(key), 'the converted variant is real again')
+                assert.equal(recovered.headers.etag, ((b) => realEtag(key, b, b.length))(await readStream(proxyStore.createReadStream(key))), 'the converted variant is real again')
                 assert.equal(recovered.headers['cache-control'], 'public,max-age=31536000,immutable')
             } finally {
                 gate.runEncode = realRunEncode
@@ -329,11 +329,31 @@ describe('proxy', function() {
                 const recovered = await needle('get', url, null, {headers: {'if-none-match': first.headers.etag as string}})
                 assert.equal(recovered.statusCode, 200, 'unresized bytes must not validate as the recovered 800px variant')
                 assert.equal((await sharp(recovered.body).metadata()).width, 800)
-                assert.equal(recovered.headers.etag, etag(key))
+                assert.equal(recovered.headers.etag, realEtag(key, recovered.body, recovered.body.length))
             } finally {
                 gate.runEncode = realRunEncode
                 try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
             }
+        })
+
+        it('answers 304 only while the store holds a healthy variant for the key', async function() {
+            this.slow(3000)
+            serveImage = true
+            const source = `http://localhost:${ port+1 }/test.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=130&mode=fit`
+            const key = getImageKey('U' + multihash.toB58String(multihash.encode(
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 130, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
+            const warm = await needle('get', url)
+            assert.equal(warm.statusCode, 200)
+            const inm = { headers: { 'if-none-match': warm.headers.etag as string } }
+            assert.equal((await needle('get', url, null, inm)).statusCode, 304, 'healthy stored variant: vouch for the copy')
+            // the variant is gone (pruned): nothing to vouch with, so render and answer 200
+            await storeRemove(proxyStore, key)
+            const again = await needle('get', url, null, inm)
+            assert.equal(again.statusCode, 200)
+            assert.equal((await sharp(again.body).metadata()).width, 130)
+            assert.equal(await storeExists(proxyStore, key), true, 'and the variant is stored again')
+            assert.equal((await needle('get', url, null, inm)).statusCode, 304)
         })
 
         it('never answers 304 for a substituted request', async function() {
@@ -356,6 +376,156 @@ describe('proxy', function() {
                 }
             } finally {
                 initBlacklistService([], [], [])
+            }
+        })
+    })
+
+    describe('multi-image HEIC (#43)', function() {
+        const heic = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
+        let decodes = true
+        let heicServer: http.Server
+        let source: string
+        before(async function() {
+            assert((await sharp(heic).metadata()).pages! > 1, 'fixture must be multi-page for these tests to mean anything')
+            try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
+            heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
+            await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
+            source = `http://localhost:${ (heicServer.address() as any).port }/multi-page.heic`
+        })
+        after(async function() { await new Promise<void>((resolve) => heicServer.close(() => resolve())) })
+        const keyFor = (src: string, opts: any) => getImageKey('U' + multihash.toB58String(multihash.encode(
+            createHash('sha1').update(src).digest(), 'sha1')), opts)
+
+        it('renders a resized still from the primary image', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // needs a libvips that decodes HEVC (the production build); the stock
+            // development library parses the container but cannot decode its pixels
+            if (!decodes) { this.skip() }
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            const key = keyFor(source, {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                assert.notEqual(res.body.length, heic.length, 'the raw container must not be handed through')
+                assert.equal((await sharp(res.body).metadata()).width, 120)
+                assert.notEqual(res.headers['content-type'], 'image/heif', 'match negotiates away from HEIF')
+                assert.equal(res.headers.etag, realEtag(key, res.body, res.body.length))
+                assert.equal(await storeExists(proxyStore, key), true)
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('never takes the animated branch: a two-page HEIC is not stored raw as the variant', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // Runs everywhere. The animated branch served the raw container as a REAL
+            // variant (real ETag, stored). Whatever the render does here, that must
+            // not happen: where the render fails, the original is a passthrough with
+            // its own ETag and no store write.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=100&mode=fit`
+            const key = keyFor(source, {width: 100, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            try {
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                const storedRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(storedRaw, false, 'the raw HEIC container must never be stored under the variant key')
+                if (!decodes) { assert.equal(res.headers.etag, passthroughEtag(key)) }
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('does not honour the validator of a raw container: a conditional request is repaired too', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // A client that cached the raw container holds the real variant's ETag.
+            // Answering 304 to it would tell the client to keep the broken bytes.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=80&mode=fit`
+            const key = keyFor(source, {width: 80, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            await storeWrite(proxyStore, key, heic)
+            try {
+                // the validators a pre-repair client can hold: the key-only ETag the
+                // old code sent, and the raw container's own content validator
+                for (const stale of [etag(key), realEtag(key, heic, heic.length)]) {
+                    const res = await needle('get', url, null, {headers: {'if-none-match': stale}})
+                    assert.equal(res.statusCode, 200, `the old validator ${ stale } must not shortcut past the repair`)
+                    assert.notEqual(res.headers.etag, stale, 'the repaired representation carries a new validator')
+                }
+                const stillRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(stillRaw, false, 'the poisoned variant is removed on the conditional request as well')
+                // and a SECOND client, arriving after the repair with the old validator,
+                // is not told to keep its broken copy either: the stored bytes changed,
+                // so the validator did too
+                const second = await needle('get', url, null, {headers: {'if-none-match': etag(key)}})
+                assert.equal(second.statusCode, 200, 'a later client with the pre-repair validator must get the repaired bytes')
+                const third = await needle('get', url, null, {headers: {'if-none-match': realEtag(key, heic, heic.length)}})
+                assert.equal(third.statusCode, 200)
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('gives a repaired variant a new validator, so a second client with the old one is not told to keep its copy', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // Decoupled from HEVC decoding: the raw container is seeded under the key
+            // of a JPEG source, so the repair renders and stores a real variant in
+            // every environment. Then a client holding the pre-repair validator must
+            // get a 200 with the repaired bytes, not a 304 for its broken copy.
+            serveImage = true
+            const jpegSource = `http://localhost:${ port+1 }/repaired-${ Date.now() }.jpg`
+            const url = `http://localhost:${ port }/p/${ base58Enc(jpegSource) }?width=70&mode=fit`
+            const key = keyFor(jpegSource, {width: 70, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            await storeWrite(proxyStore, key, heic)
+            try {
+                const preRepair = [etag(key), realEtag(key, heic, heic.length)]
+                // first client: repairs
+                const first = await needle('get', url, null, {headers: {'if-none-match': preRepair[0]}})
+                assert.equal(first.statusCode, 200)
+                assert.equal((await sharp(first.body).metadata()).width, 70, 'repaired render served')
+                assert.equal(await storeExists(proxyStore, key), true, 'and stored')
+                assert(!preRepair.includes(first.headers.etag as string), 'the repaired representation carries a new validator')
+                // second client: arrives after the repair with the old validator
+                for (const stale of preRepair) {
+                    const second = await needle('get', url, null, {headers: {'if-none-match': stale}})
+                    assert.equal(second.statusCode, 200, `a later client presenting ${ stale } must receive the repaired bytes`)
+                    assert.equal((await sharp(second.body).metadata()).width, 70)
+                }
+                // and the new validator does revalidate
+                const fresh = await needle('get', url, null, {headers: {'if-none-match': first.headers.etag as string}})
+                assert.equal(fresh.statusCode, 304)
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
+            }
+        })
+
+        it('repairs a variant key that already holds a raw HEIC container', async function() {
+            this.slow(4000)
+            this.timeout(15000)
+            // Before #43 the container was stored as the variant. Those entries stay
+            // in the store; a hit on one must be discarded and re-rendered, not served.
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=90&mode=fit`
+            const key = keyFor(source, {width: 90, mode: ScalingMode.Fit, format: OutputFormat.Match})
+            await storeWrite(proxyStore, key, heic)
+            try {
+                // no Accept preference: the request lands on the Match key that was seeded
+                const res = await needle('get', url)
+                assert.equal(res.statusCode, 200)
+                const stillRaw = await storeExists(proxyStore, key)
+                    && (await sharp(await readStream(proxyStore.createReadStream(key))).metadata()).format === 'heif'
+                assert.equal(stillRaw, false, 'the poisoned variant must be removed on read')
+                if (decodes) {
+                    assert.equal((await sharp(res.body).metadata()).width, 90, 'and the repaired render is served')
+                    assert.equal(await storeExists(proxyStore, key), true, 'and stored in its place')
+                } else {
+                    assert.equal(res.headers.etag, passthroughEtag(key), 'without a decoder the original is a passthrough')
+                }
+            } finally {
+                try { await storeRemove(proxyStore, key) } catch (_e) { /* best effort */ }
             }
         })
     })

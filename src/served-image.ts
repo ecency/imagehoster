@@ -124,11 +124,48 @@ export function passthroughEtag(imageKey: string): string {
     return etag(imageKey + '|passthrough')
 }
 
-export function etagFor(image: {kind: Provenance}, imageKey: string): string {
+/**
+ * How many leading bytes of a real variant take part in its validator. Every
+ * encoder writes its identity into the first few hundred bytes (container
+ * boxes, headers, quantisation tables), so a prefix distinguishes a repaired
+ * render from the bytes it replaced, a re-encode from the render before it, and
+ * a raw container from a variant, while staying cheap on the cache-hit path,
+ * which already reads this much to sniff the type.
+ */
+export const REAL_ETAG_HEAD_BYTES = 16384
+
+/**
+ * Validator of a real variant: the key, the size of the stored representation
+ * and its leading bytes.
+ *
+ * A validator derived from the key alone said "same key, same bytes", which was
+ * false whenever the bytes under a key changed: a repaired variant, a fixed
+ * encoder, a raw container written by a bug and later replaced. Clients holding
+ * the old copy were told it was current forever. Tying the validator to the
+ * representation makes any change of it change the validator, so revalidation
+ * replaces the copy. The prefix catches a different encoder, format or source
+ * (every codec writes its identity into its first bytes); the size catches a
+ * truncated or extended body behind an identical prefix. Neither costs a full
+ * read on the cache-hit path, which already reads the prefix to sniff the type
+ * and already stats the file to know it exists. The key is mixed in so two keys
+ * whose renders happen to coincide never validate each other.
+ */
+export function realEtag(imageKey: string, head: Buffer, size: number): string {
+    return etag(Buffer.concat([Buffer.from(`${ imageKey }|${ size }|`), head.subarray(0, REAL_ETAG_HEAD_BYTES)]))
+}
+
+/**
+ * The validator for a value. For a real variant the leading bytes and the size
+ * are required: on a miss they come from the rendered bytes, on a hit from the
+ * sniffed head and the store's stat of the same file.
+ */
+export function etagFor(image: {kind: Provenance}, imageKey: string, head?: Buffer, size?: number): string {
     switch (image.kind) {
         case 'fallback': return fallbackEtag(imageKey)
         case 'passthrough': return passthroughEtag(imageKey)
-        default: return etag(imageKey)
+        default:
+            if (!head || size === undefined) { throw new Error('a real variant needs its leading bytes and size for a validator') }
+            return realEtag(imageKey, head, size)
     }
 }
 

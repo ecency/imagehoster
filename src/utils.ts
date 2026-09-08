@@ -114,6 +114,20 @@ export async function mimeMagic(data: Buffer): Promise<string> {
     return 'application/octet-stream'
 }
 
+/**
+ * Existence check that also reports the stored size when the store knows it
+ * (every store here does: fs and memory from the object, S3 from HEAD). The
+ * size is part of a real variant's validator, so the cache-hit path needs it
+ * before it can answer a conditional request.
+ */
+export function storeStat(store: AbstractBlobStore, key: BlobKey): Promise<{exists: boolean, size?: number}> {
+    return new Promise((resolve, reject) => {
+        (store as any).exists(key, (error: any, exists?: boolean, size?: number) => {
+            if (error) { reject(error) } else { resolve({exists: !!exists, size}) }
+        })
+    })
+}
+
 export function storeExists(store: AbstractBlobStore, key: BlobKey) {
     return new Promise<boolean>((resolve, reject) => {
         store.exists(key, (error, exists) => {
@@ -715,8 +729,42 @@ export function getOrigKeyFromUrl(url: URL, isUpload: boolean): string {
     const urlHash = createHash('sha1').update(url.toString()).digest()
     return 'U' + multihash.toB58String(multihash.encode(urlHash, 'sha1'))
 }
-export function buildSharpPipeline(buffer: Buffer, animated: boolean = false) {
-    return Sharp(buffer, { failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS })
+/**
+ * Whether a source should be treated as an animation, from Sharp metadata and
+ * the sniffed content type.
+ *
+ * libvips reports `pages` for every multi-image container, not only for
+ * animations: for HEIF it is the number of top-level images, and an iPhone photo
+ * with an auxiliary image (gain map, depth) reports two. Only formats that can
+ * actually animate get to say so through their page count. Anything else is a
+ * still, whatever its page count, and is rendered from its primary image.
+ * When the page count is unknown, GIF and APNG are assumed animated, the
+ * conservative choice for the two formats where a flattened render loses frames.
+ */
+const ANIMATABLE_FORMATS = new Set(['gif', 'webp', 'png'])
+export function isAnimatedSource(metadata: {format?: string, pages?: number}, contentType: string): boolean {
+    const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
+    if (metadata.pages == null) { return isGifOrApng }
+    if (!ANIMATABLE_FORMATS.has(metadata.format || '')) { return false }
+    return metadata.pages > 1
+}
+
+/**
+ * The page to render for a still multi-image container, or undefined for Sharp's
+ * default. Sharp always pins `page` (default 0) on formats that support pages,
+ * which overrides libvips's own choice of the HEIF primary image, so a HEIC whose
+ * primary is not the first top-level image would render an auxiliary image.
+ */
+export function primaryPageOf(metadata: {format?: string, pagePrimary?: number}): number | undefined {
+    if (metadata.format !== 'heif') { return undefined }
+    return typeof metadata.pagePrimary === 'number' && metadata.pagePrimary > 0 ? metadata.pagePrimary : undefined
+}
+
+export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
+    return Sharp(buffer, {
+        failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS,
+        ...(page !== undefined ? { page } : {}),
+    })
 }
 
 function isPrivateIPv4(host: string): boolean {

@@ -3,7 +3,6 @@
 import {AbstractBlobStore} from 'abstract-blob-store'
 import config from 'config'
 import {createHash} from 'crypto'
-import etag from 'etag'
 import * as multihash from 'multihashes'
 import Sharp from 'sharp'
 import streamHead from 'stream-head/dist-es6'
@@ -56,6 +55,9 @@ import {
     ScalingMode,
     storeExists,
     storeRemove,
+    storeStat,
+    isAnimatedSource,
+    primaryPageOf,
     supportsAvif,
     supportsWebP
 } from './utils'
@@ -93,6 +95,17 @@ export function shouldCacheOriginal(
 const SERVICE_URL = new URL(config.get('service_url'))
 /** A rendered variant is addressed by a key that encodes its inputs, so it never changes. */
 const IMMUTABLE_CACHE_CONTROL = 'public,max-age=31536000,immutable'
+
+/**
+ * A stored variant the service could never have produced. Output formats are
+ * JPEG, PNG, WebP, AVIF or the source's own bytes for `match`, and `match` never
+ * keeps HEIF because no browser renders it (see needsMatchFallback); so HEIF under
+ * a variant key can only be a raw container stored by the old animated branch.
+ */
+export function isPoisonedVariant(mimeType: string): boolean {
+    const t = mimeType.toLowerCase()
+    return t === 'image/heif' || t === 'image/heic'
+}
 
 const fromFetch = (result: {res: NeedleResponse, isFallback: boolean}): ServedImage =>
     result.isFallback
@@ -175,10 +188,10 @@ async function convertCachedMatchVariant(
 ): Promise<{image: ServedImage, contentType: string}> {
     try {
         const metadata = await Sharp(cached, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
-        if (metadata.pages != null && metadata.pages > 1) {
+        if (isAnimatedSource(metadata, mimeType)) {
             return {image: realImage(cached), contentType: mimeType}
         }
-        const image = buildSharpPipeline(cached, false)
+        const image = buildSharpPipeline(cached, false, primaryPageOf(metadata))
         const contentType = applyMatchFallbackFormat(image, mimeType, acceptHeader, metadata.hasAlpha)
         const buffer = await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx))
         ctx.log.debug({ mimeType, contentType }, 'converted cached match variant for client')
@@ -367,7 +380,8 @@ export async function proxyHandler(ctx: KoaContext) {
         )
     }
     const imageKey = getImageKey(origKey, options)
-    ctx.set('ETag', etag(imageKey))
+    // No validator yet: a real variant's ETag is derived from its stored bytes
+    // (see realEtag), so it is set once those are in hand, on a hit or a render
     ctx.tag({imageKey})
     if (options.invalidate) {
         // Purge CDN first (fire-and-forget)
@@ -387,19 +401,15 @@ export async function proxyHandler(ctx: KoaContext) {
     }
     // ctx.fresh only consults the conditional headers once the status is
     // 2xx/304, and Koa's default is 404 at this point, so without an explicit
-    // 200 this branch could never fire (and never did). The ETag set above is
-    // the REAL variant's: a placeholder never shares it (see etagFor), so a
-    // match means the client holds the real bytes for this key, and those are
-    // immutable whatever the source is doing today. A substituted request
-    // derives its key from the default image, so a client's copy of a blocked
-    // source can never match it either; the guard is belt and braces.
+    // 200 the revalidation branch inside the cache-hit block could never fire.
+    // The 304 itself is answered only once a stored variant has been inspected
+    // and found healthy, see below: a validator alone does not prove the bytes
+    // behind it are the ones this service would render today.
     ctx.status = 200
-    if (ctx.fresh && !shouldBypassCache && !substitution) {
-        ctx.status = 304
-        return
-    }
     // check if we already have a converted image for a requested key
-    if (await storeExists(proxyStore, imageKey) && !options.ignorecache && !options.invalidate) {
+    const variantStat = (!options.ignorecache && !options.invalidate)
+        ? await storeStat(proxyStore, imageKey) : {exists: false}
+    if (variantStat.exists) {
         ctx.tag({store: 'resized'})
         ctx.log.debug('streaming %s from store', imageKey)
         const file = proxyStore.createReadStream(imageKey)
@@ -417,6 +427,35 @@ export async function proxyHandler(ctx: KoaContext) {
         })
         const {head, stream} = await streamHead(file, {bytes: 16384})
         const mimeType = await mimeMagic(head)
+        if (isPoisonedVariant(mimeType)) {
+            // The service never renders to HEIF, so a stored HEIF under a variant
+            // key is a raw container written back when a multi-image HEIC was
+            // mistaken for an animation (#43): unresized, and for most clients
+            // undisplayable. Drop it and take the miss path, which re-renders from
+            // the original or refetches; the repaired variant is stored on the way.
+            ctx.tag({repaired_variant: true})
+            ctx.log.warn({ imageKey, mimeType }, 'stored variant is a raw HEIF container, discarding and re-rendering')
+            file.destroy()
+            try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
+        } else {
+        // A 304 is a promise that the client's copy is what this key renders to,
+        // and it is made only here, with a healthy stored variant in hand. Before
+        // this point a client could present the validator of a raw container the
+        // old animated branch stored (#43) and be told to keep it. Without a
+        // stored variant the request renders and answers 200 instead, so the
+        // client replaces whatever it held. The ETag set earlier is the REAL
+        // variant's: a placeholder never shares it (see etagFor), and a
+        // substituted request derives its key from the default image, so a
+        // client's copy of a blocked source cannot match; the guard is belt and
+        // braces.
+        // The validator names the stored bytes, so a client holding a copy the
+        // repair replaced presents a different one and is not told to keep it
+        ctx.set('ETag', etagFor(realImage(head), imageKey, head, variantStat.size))
+        if (ctx.fresh && !shouldBypassCache && !substitution) {
+            file.destroy()
+            ctx.status = 304
+            return
+        }
         // Match variants are one bucket for every client that negotiated neither
         // AVIF nor WebP, so a stored AVIF/HEIF passthrough can be undecodable for
         // the client asking now. Convert the cached bytes rather than falling
@@ -444,9 +483,10 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.set('Content-Type', servedType)
         ctx.set('Vary', 'Accept')
         ctx.set('Cache-Control', cacheControlFor(served, IMMUTABLE_CACHE_CONTROL))
-        ctx.set('ETag', etagFor(served, imageKey))
+        ctx.set('ETag', etagFor(served, imageKey, head, variantStat.size))
         ctx.body = served.bytes
         return
+        } // end healthy cached variant
     }
 
     // check if we have the original
@@ -612,14 +652,9 @@ export async function proxyHandler(ctx: KoaContext) {
                 ? fallbackImage(metaResult.buffer, 'source unreadable, default substituted')
                 : derive(origin, metaResult.buffer)
             contentType = await mimeMagic(origin.bytes)
-            // Use metadata.pages when available; if null, fall back to content-type detection
-            // (conservative: assume GIF/APNG are animated when pages can't be determined)
-            const isGifOrApng = contentType === 'image/gif' || contentType === 'image/apng'
-            if (metadata.pages != null) {
-                isAnimated = metadata.pages > 1
-            } else {
-                isAnimated = isGifOrApng
-            }
+            // Only formats that can animate may say so through their page count;
+            // a HEIF with an auxiliary image is a still, see isAnimatedSource
+            isAnimated = isAnimatedSource(metadata, contentType)
         } catch (err) {
             ctx.log.error({ url: urlString, key: imageKey }, 'getSharpMetadataWithRetry failed')
             captureImageFailure('metadata_extraction_failed', ctx, { urlString, imageKey, origFromCache, error: String(err) })
@@ -653,7 +688,7 @@ export async function proxyHandler(ctx: KoaContext) {
             // key: every request for it gets these same bytes
             rendered = origin
         } else {
-        const image = buildSharpPipeline(origin.bytes, isAnimated)
+        const image = buildSharpPipeline(origin.bytes, isAnimated, isAnimated ? undefined : primaryPageOf(metadata))
 
         const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
         let width: number | undefined = safeParseInt(options.width)
@@ -791,6 +826,6 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
     ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
-    ctx.set('ETag', etagFor(rendered, imageKey))
+    ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes, rendered.bytes.length))
     ctx.body = rendered.bytes
 }
