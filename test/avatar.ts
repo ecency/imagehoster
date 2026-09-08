@@ -51,6 +51,24 @@ describe('avatar', function() {
         assert(meta.height && meta.height <= 256, 'avatar height should be <= 256')
     })
 
+    it('reaches the fetch when the first variant lookup stalls', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        const realExists = proxyStore.exists
+        const pending: any[] = []
+        ;(proxyStore as any).exists = (_key: any, done: any) => { pending.push(done) }
+        const t0 = Date.now()
+        try {
+            const res = await needle('get', `http://localhost:${port}/u/healthy/avatar/64`)
+            assert.equal(res.statusCode, 200)
+            assert.equal((await sharp(res.body).metadata()).width, 64)
+            assert(Date.now() - t0 < 2000, 'stalled lookups must cost at most a store budget each')
+        } finally {
+            ;(proxyStore as any).exists = realExists
+            for (const done of pending) { try { done(null, false) } catch (_e) { /* settled */ } }
+        }
+    })
+
     it('should serve avatar with size parameter', async function() {
         this.slow(2000)
         this.timeout(10000)

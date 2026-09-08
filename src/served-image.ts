@@ -180,8 +180,10 @@ export function etagFor(image: {kind: Provenance}, imageKey: string, head?: Buff
  * whether a write happened; the caller still owns error handling for a write
  * that fails.
  */
-export async function storeImage(store: AbstractBlobStore, key: BlobKey, image: ServedImage): Promise<boolean> {
+export async function storeImage(
+    store: AbstractBlobStore, key: BlobKey, image: ServedImage, signal?: AbortSignal,
+): Promise<boolean> {
     if (!isRealImage(image)) { return false }
-    await storeWrite(store, key, image.bytes)
+    await storeWrite(store, key, image.bytes, signal)
     return true
 }

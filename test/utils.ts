@@ -24,6 +24,9 @@ import {
     isAnimatedSource,
     parseProxiedUrl,
     primaryPageOf,
+    readStream,
+    storeExists,
+    storeExistsBounded,
     parsePlainUrl,
     getOrigKeyFromUrl,
     sanitizeIgnoreInvalidateParams,
@@ -36,10 +39,13 @@ import {
     redactUrlForLog,
     storeRemoveByPrefix,
     storeWrite,
+    streamHeadBounded,
     expandPurgeUrls,
 } from './../src/utils'
 
-import {AVIF_EFFORT, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
+import {PassThrough} from 'stream'
+
+import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, S3_CONNECT_TIMEOUT_MS, S3_MAX_ATTEMPTS, S3_REQUEST_TIMEOUT_MS, S3_WORST_CASE_MS, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -332,6 +338,133 @@ describe('utils', function() {
             const buf = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
             assert.equal((buildSharpPipeline(buf, false, 1) as any).options.input.page, 1)
             assert.equal((buildSharpPipeline(buf, false) as any).options.input.page, undefined)
+        })
+    })
+
+    describe('bounded store operations', function() {
+        const hangingStore: any = {
+            exists: () => undefined,           // never calls back
+            createReadStream: () => new PassThrough(), // never ends
+        }
+        const quiet = {warn: () => undefined, debug: () => undefined, info: () => undefined, error: () => undefined}
+
+        it('storeExists rejects with AbortError when the store never answers and the signal fires', async function() {
+            const t0 = Date.now()
+            await assert.rejects(storeExists(hangingStore, 'k', AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            assert(Date.now() - t0 < 1000, 'must not wait for the store')
+        })
+
+        it('storeExists rejects at once on an already-aborted signal', async function() {
+            const c = new AbortController(); c.abort()
+            await assert.rejects(storeExists(hangingStore, 'k', c.signal), (err: any) => err.name === 'AbortError')
+        })
+
+        it('storeExists hands the key and the signal to the store', async function() {
+            let seen: any
+            const store: any = { exists: (opts: any, done: any) => { seen = opts; done(null, true) } }
+            const signal = AbortSignal.timeout(1000)
+            assert.equal(await storeExists(store, 'thekey', signal), true)
+            assert.equal(seen.key, 'thekey')
+            assert.equal(seen.signal, signal)
+            // and a plain string key when there is no signal, as every store already accepts
+            assert.equal(await storeExists(store, 'plain'), true)
+            assert.equal(seen, 'plain')
+        })
+
+        it('readStream rejects and destroys the stream when the signal fires', async function() {
+            const stream = new PassThrough()
+            let destroyed = false
+            stream.on('close', () => { destroyed = true })
+            await assert.rejects(readStream(stream, AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            await new Promise((r) => setTimeout(r, 20))
+            assert.equal(destroyed, true, 'the stalled stream must be destroyed, not leaked')
+        })
+
+        it('readStream still resolves normally with a signal that never fires', async function() {
+            const stream = new PassThrough()
+            const p = readStream(stream, AbortSignal.timeout(5000))
+            stream.end(Buffer.from('bytes'))
+            assert.equal((await p).toString(), 'bytes')
+        })
+
+        it('storeExistsBounded treats a timeout and an error as absent', async function() {
+            assert.equal(await storeExistsBounded(hangingStore, 'k', AbortSignal.timeout(50), quiet, 'test'), false)
+            const failing: any = { exists: (_o: any, done: any) => done(new Error('boom')) }
+            assert.equal(await storeExistsBounded(failing, 'k', AbortSignal.timeout(1000), quiet, 'test'), false)
+            const present: any = { exists: (_o: any, done: any) => done(null, true) }
+            assert.equal(await storeExistsBounded(present, 'k', AbortSignal.timeout(1000), quiet, 'test'), true)
+        })
+
+        it('streamHeadBounded rejects on an input error instead of letting it escape', async function() {
+            // stream-head listens for errors only on its internal stream; an input that
+            // fails during the head read used to emit an unhandled error and kill the
+            // process (a simulated S3 GET failure exited Node with code 1)
+            const input = new PassThrough()
+            let escaped: any
+            const onUncaught = (err: any) => { escaped = err }
+            process.on('uncaughtException', onUncaught)
+            try {
+                const p = streamHeadBounded(input, 16384, AbortSignal.timeout(5000))
+                setTimeout(() => input.destroy(new Error('simulated S3 GET failure')), 10)
+                await assert.rejects(p, /simulated S3 GET failure/)
+                await new Promise((r) => setTimeout(r, 30))
+                assert.equal(escaped, undefined, 'the input error must be handled, not escape as uncaught')
+            } finally {
+                process.removeListener('uncaughtException', onUncaught)
+            }
+        })
+
+        it('streamHeadBounded forwards a later input error to the output stream it handed out', async function() {
+            const input = new PassThrough()
+            const p = streamHeadBounded(input, 4, AbortSignal.timeout(5000))
+            input.write(Buffer.from('12345678'))
+            const {head, stream} = await p
+            assert(head.toString().startsWith('1234'), 'stream-head returns whole chunks, at least the requested bytes')
+            const seen = new Promise<Error>((resolve) => stream.on('error', resolve))
+            input.destroy(new Error('late failure'))
+            assert.equal((await seen).message, 'late failure')
+        })
+
+        it('streamHeadBounded still resolves the head and passes the rest through', async function() {
+            const input = new PassThrough()
+            const p = streamHeadBounded(input, 3, AbortSignal.timeout(5000))
+            input.end(Buffer.from('abcdef'))
+            const {head, stream} = await p
+            assert(head.toString().startsWith('abc'))
+            assert.equal((await readStream(stream)).toString(), 'abcdef', 'the output carries the whole body, head included')
+        })
+
+        it('storeWrite rejects with AbortError when the store never finishes and the signal fires', async function() {
+            const hangingWriter: any = { createWriteStream: () => new PassThrough() } // done never called
+            const t0 = Date.now()
+            await assert.rejects(storeWrite(hangingWriter, 'k', Buffer.from('x'), AbortSignal.timeout(50)), (err: any) => err.name === 'AbortError')
+            assert(Date.now() - t0 < 1000)
+            const hangingPut: any = { putBuffer: () => new Promise(() => undefined) }
+            const c = new AbortController(); c.abort()
+            await assert.rejects(storeWrite(hangingPut, 'k', Buffer.from('x'), c.signal), (err: any) => err.name === 'AbortError')
+        })
+
+        it('keeps the client floors comfortably under the edge timeout', function() {
+            // every attempt connects and then stalls for the full request timeout
+            assert(S3_WORST_CASE_MS <= 16000, `worst case ${ S3_WORST_CASE_MS }ms must leave room for backoff under the 20s edge cut`)
+            assert.equal(S3_WORST_CASE_MS, S3_MAX_ATTEMPTS * (S3_CONNECT_TIMEOUT_MS + S3_REQUEST_TIMEOUT_MS))
+        })
+
+        it('budgetSignal clamps to the remaining deadline, and to the cap, and never disables the timer', async function() {
+            const fired = (sig: AbortSignal) => new Promise<number>((resolve) => {
+                const t0 = Date.now(); sig.addEventListener('abort', () => resolve(Date.now() - t0), {once: true})
+            })
+            // deadline sooner than the cap
+            const a = await fired(budgetSignal(Date.now() + 80, 5000))
+            assert(a >= 60 && a < 600, `expected ~80ms, got ${ a }`)
+            // deadline already gone: aborts immediately rather than never
+            const b = await fired(budgetSignal(Date.now() - 1000, 5000))
+            assert(b < 200, `expected immediate abort, got ${ b }`)
+            // no deadline: the cap rules
+            const c = await fired(budgetSignal(undefined, 60))
+            assert(c >= 40 && c < 600, `expected ~60ms, got ${ c }`)
+            assert.equal(STORE_OP_TIMEOUT_MS, 300, 'test config sets the knob low')
+            assert.equal(SERVE_READ_TIMEOUT_MS, 900)
         })
     })
 

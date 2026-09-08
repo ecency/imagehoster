@@ -89,15 +89,41 @@ export function camelToSnake(value: string) {
     return value.replace(/([A-Z])/g, (_, m) => `_${m.toLowerCase()}`).replace(/^_/, '')
 }
 
-export function readStream(stream: NodeJS.ReadableStream) {
+/** The error a store call rejects with when its AbortSignal fires. */
+export function storeAbortError(signal?: AbortSignal): Error {
+    const err = new Error('store operation aborted: ' + ((signal && (signal.reason as any)?.message) || 'timeout'))
+    err.name = 'AbortError'
+    return err
+}
+
+export function isStoreAbort(err: any): boolean {
+    return !!err && (err.name === 'AbortError' || err.name === 'TimeoutError')
+}
+
+/**
+ * Collects a stream into a Buffer. With a signal, aborts the read and destroys the
+ * stream when it fires, so a stalled object-store body cannot hold a request past
+ * its budget whatever the store implementation does with the signal itself.
+ */
+export function readStream(stream: NodeJS.ReadableStream, signal?: AbortSignal) {
     return new Promise<Buffer>((resolve, reject) => {
         const chunks: Buffer[] = []
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => {
+            if ((stream as any).destroy) { (stream as any).destroy() }
+            reject(storeAbortError(signal))
+        })
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
         stream.on('data', (chunk) => chunks.push(chunk))
-        stream.on('error', (err) => {
+        stream.on('error', (err) => finish(() => {
             if ((stream as any).destroy) { (stream as any).destroy() }
             reject(err)
-        })
-        stream.on('end', () => resolve(Buffer.concat(chunks)))
+        }))
+        stream.on('end', () => finish(() => resolve(Buffer.concat(chunks))))
     })
 }
 
@@ -115,47 +141,146 @@ export async function mimeMagic(data: Buffer): Promise<string> {
 }
 
 /**
+/**
  * Existence check that also reports the stored size when the store knows it
  * (every store here does: fs and memory from the object, S3 from HEAD). The
  * size is part of a real variant's validator, so the cache-hit path needs it
- * before it can answer a conditional request.
+ * before it can answer a conditional request. With a signal, the budget is
+ * handed to the store (the S3 store aborts the HEAD) and raced here as well, so
+ * a store that ignores it still cannot hold the caller past the budget.
  */
-export function storeStat(store: AbstractBlobStore, key: BlobKey): Promise<{exists: boolean, size?: number}> {
+export function storeStat(store: AbstractBlobStore, key: BlobKey, signal?: AbortSignal): Promise<{exists: boolean, size?: number}> {
     return new Promise((resolve, reject) => {
-        (store as any).exists(key, (error: any, exists?: boolean, size?: number) => {
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => reject(storeAbortError(signal)))
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
+        const opts: any = signal ? {key: typeof key === 'string' ? key : (key as any).key, signal} : key
+        ;(store as any).exists(opts, (error: any, exists?: boolean, size?: number) => finish(() => {
             if (error) { reject(error) } else { resolve({exists: !!exists, size}) }
-        })
+        }))
     })
 }
 
-export function storeExists(store: AbstractBlobStore, key: BlobKey) {
-    return new Promise<boolean>((resolve, reject) => {
-        store.exists(key, (error, exists) => {
-            if (error) { reject(error) } else { resolve(exists) }
+/** Existence check with an optional budget; see storeStat. */
+export function storeExists(store: AbstractBlobStore, key: BlobKey, signal?: AbortSignal): Promise<boolean> {
+    return storeStat(store, key, signal).then((r) => r.exists)
+}
+
+/**
+ * storeExistsBounded with the size: a stall or an error reads as absent.
+ */
+export async function storeStatBounded(
+    store: AbstractBlobStore, key: string, signal: AbortSignal, log: any, what: string,
+): Promise<{exists: boolean, size?: number}> {
+    try {
+        return await storeStat(store, key, signal)
+    } catch (err) {
+        log.warn({ err: (err as Error).message, key, what }, isStoreAbort(err)
+            ? 'store lookup timed out, treating as absent'
+            : 'store lookup failed, treating as absent')
+        return {exists: false}
+    }
+}
+
+/**
+ * A store existence check that treats a stall as "absent". Every read handler
+ * consults its stores before it fetches upstream, so a HEAD that hangs used to
+ * consume the fetch budget before the first candidate was tried; with a budget
+ * from `budgetSignal` the request loses one bounded wait and carries on to the
+ * fetch path or the placeholder. A genuine error is logged and treated the same
+ * way: the fetch path is the fallback for a store that cannot answer.
+ */
+export async function storeExistsBounded(
+    store: AbstractBlobStore, key: string, signal: AbortSignal, log: any, what: string,
+): Promise<boolean> {
+    try {
+        return await storeExists(store, key, signal)
+    } catch (err) {
+        log.warn({ err: (err as Error).message, key, what }, isStoreAbort(err)
+            ? 'store lookup timed out, treating as absent'
+            : 'store lookup failed, treating as absent')
+        return false
+    }
+}
+
+/**
+ * Reads the first `bytes` of a stream (for sniffing) under a budget. On abort the
+ * stream is destroyed and the caller gets an AbortError, so a stalled store cannot
+ * hold a cache hit open past the request's budget.
+ *
+ * stream-head listens for errors only on its own internal stream, never on the
+ * input, so an input that fails (an object-store GET that errors after the stream
+ * was handed out) would emit an unhandled 'error' and take the process down. The
+ * input's errors are owned here: before the head is read they reject this
+ * promise; after it, they are forwarded to the output stream the caller holds,
+ * where Koa's body handling or readStream() will see them.
+ */
+export async function streamHeadBounded(
+    stream: NodeJS.ReadableStream, bytes: number, signal: AbortSignal,
+): Promise<{head: Buffer, stream: NodeJS.ReadableStream}> {
+    const streamHead = (await import('stream-head')).default
+    return new Promise((resolve, reject) => {
+        let settled = false
+        let output: NodeJS.ReadableStream | undefined
+        const destroyInput = (err?: Error) => { if ((stream as any).destroy) { (stream as any).destroy(err) } }
+        const finish = (fn: () => void) => { if (!settled) { settled = true; signal.removeEventListener('abort', onAbort); fn() } }
+        const onAbort = () => finish(() => {
+            destroyInput()
+            reject(storeAbortError(signal))
         })
+        const onInputError = (err: Error) => {
+            if (!settled) { finish(() => reject(err)); return }
+            // the caller now owns the output; hand the failure to it rather than
+            // letting an unlistened input emit
+            if (output && (output as any).destroy) { (output as any).destroy(err) }
+        }
+        stream.on('error', onInputError)
+        if (signal.aborted) { onAbort(); return }
+        signal.addEventListener('abort', onAbort, {once: true})
+        streamHead(stream as any, {bytes}).then(
+            (r: any) => finish(() => { output = r.stream; resolve(r) }),
+            (err: any) => finish(() => { destroyInput(); reject(err) }),
+        )
     })
 }
 
 interface PutBufferStore {
-    putBuffer(key: string, buf: Buffer): Promise<void>
+    putBuffer(key: string, buf: Buffer, signal?: AbortSignal): Promise<void>
 }
 
 function hasPutBuffer(store: any): store is PutBufferStore {
     return typeof store.putBuffer === 'function'
 }
 
-export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string) {
+/**
+ * Writes a blob. With a signal the S3 upload is aborted when it fires and the
+ * caller gets an AbortError; a write on a request path is awaited before the
+ * response goes out, so a stalled object store must not hold it either.
+ */
+export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: Buffer | string, signal?: AbortSignal) {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data)
     // Use direct buffer upload for S3 stores (avoids stream double-buffering)
     if (hasPutBuffer(store)) {
         const k = typeof key === 'string' ? key : (key as any).key
-        await store.putBuffer(k, buf)
+        if (signal && signal.aborted) { throw storeAbortError(signal) }
+        await store.putBuffer(k, buf, signal)
         return { key: k }
     }
     return new Promise((resolve, reject) => {
-        const stream = store.createWriteStream(key, (error, metadata) => {
+        let settled = false
+        const finish = (fn: () => void) => { if (!settled) { settled = true; if (signal) { signal.removeEventListener('abort', onAbort) } fn() } }
+        const onAbort = () => finish(() => reject(storeAbortError(signal)))
+        if (signal) {
+            if (signal.aborted) { onAbort(); return }
+            signal.addEventListener('abort', onAbort, {once: true})
+        }
+        const stream = store.createWriteStream(key, (error, metadata) => finish(() => {
             if (error) { reject(error) } else { resolve(metadata) }
-        })
+        }))
         stream.write(buf)
         stream.end()
     })
