@@ -184,6 +184,37 @@ describe('animated sources', function() {
     // a 500x500 x300 source (75 MP in, inside every input budget) answered
     // `?width=2000` by upscaling every frame to 2000x2000, 1.2 GP of output and
     // 187 seconds of one of the service's ~12 encode slots, for an anonymous GET.
+        // libvips cannot auto-orient an animation: `rotate()` on a multi-page
+        // pipeline answers "Rotate is not supported for multi-page images" for
+        // the four orientations that swap the axes. Letting the render throw
+        // works, but a thrown render is deliberately not cached because it may be
+        // transient, and this one never is: every request pays the fetch again.
+        it('passes through an animation whose EXIF orientation cannot be applied', function() {
+            for (const orientation of [5, 6, 7, 8]) {
+                assert.equal(
+                    animatedRenderPlan({
+                        byteLength: bigGif.length,
+                        metadata: {pages: 8, width: 200, height: 150, orientation},
+                        options: negotiatedWebp({width: 100}),
+                        acceptHeader: WEBP_ACCEPT,
+                    }),
+                    undefined, `orientation ${orientation}`)
+            }
+        })
+
+        it('still transforms the orientations libvips can apply', function() {
+            for (const orientation of [undefined, 1, 2, 3, 4]) {
+                assert.deepEqual(
+                    animatedRenderPlan({
+                        byteLength: bigGif.length,
+                        metadata: {pages: 8, width: 200, height: 150, orientation},
+                        options: negotiatedWebp({width: 100}),
+                        acceptHeader: WEBP_ACCEPT,
+                    }),
+                    {frames: 8, outputType: 'image/webp'}, `orientation ${orientation}`)
+            }
+        })
+
     describe('what may be PRODUCED, not just consumed', function() {
         const plan = (over: Partial<ProxyOptions>, metadata: any, byteLength = bigGif.length) =>
             animatedRenderPlan({byteLength, metadata, options: {mode: ScalingMode.Cover, format: OutputFormat.Match, ...over},
@@ -391,18 +422,36 @@ describe('animated sources', function() {
             assert.ok(out, 'a WebP source with fast frames must still be rendered, not passed through')
         })
 
-        // 65535 is the largest a NETSCAPE2.0 block holds and a "forever" idiom.
-        // Normalising it to 65536 plays would not survive WebP's 16-bit ANIM
-        // field, so every render of such a GIF came back looking wrong.
-        it('treats the maximum stored loop count as forever', async function() {
-            this.timeout(30000)
-            const gif = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: true, loop: 65535})
-            assert.equal(readGifAnimation(gif).loop, 0)
-            const webp = await sharp(gif, {animated: true}).resize(40).webp({quality: 80, force: true}).toBuffer()
-            assert.equal(readWebpAnimation(webp).loop, readGifAnimation(gif).loop)
-            // One below the maximum still fits, and is still counted as plays.
-            const near = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: true, loop: 65534})
+        // The maximum stored count is a finite 65536 plays, not "forever", and
+        // that is how libvips reads it. WebP's ANIM loop is 16 bits, so a WebP
+        // render of such a GIF carries 0 — which DOES mean forever. Normalising
+        // it to forever here would wave that conversion through.
+        it('normalises the maximum stored loop count without calling it forever', function() {
+            const max = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 65535})
+            assert.equal(readGifAnimation(max).loop, 65536)
+            const near = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 65534})
             assert.equal(readGifAnimation(near).loop, 65535)
+            const forever = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 0})
+            assert.equal(readGifAnimation(forever).loop, 0)
+        })
+
+        it('refuses a WebP render that would turn 65536 plays into an endless loop', async function() {
+            this.timeout(30000)
+            const gif = makeAnimatedGif({width: 200, height: 150, frames: 8, delay: 10, noisy: true, loop: 65535})
+            const metadata = await sharp(gif).metadata()
+            const out = await renderAnimatedVariant({
+                bytes: gif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
+                encode, log: {warn: () => undefined, error: () => undefined, debug: () => undefined},
+            })
+            // libvips writes 65536 into a 16-bit field, and it reads back as 0.
+            assert.equal(out, undefined)
+            // The same source still renders to GIF, where the count survives.
+            const asGif = await renderAnimatedVariant({
+                bytes: gif, metadata, options: fitOptions({width: 100}), acceptHeader: 'image/*',
+                encode, log: console,
+            })
+            assert.ok(asGif, 'a GIF render keeps the loop count and must still happen')
+            assert.equal(readGifAnimation(asGif!.buffer).loop, readGifAnimation(gif).loop)
         })
 
         it('reads them back off a WebP the encoder wrote', async function() {

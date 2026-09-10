@@ -140,12 +140,15 @@ export function readGifAnimation(buffer: Buffer): AnimationFacts {
                 // libvips reads a GIF's stored 3 as 4 and writes ANIM 4, so an
                 // unnormalised reader rejects every correct render of a
                 // finite-loop GIF. 0 means forever in both and stays 0.
+                // Every non-zero count normalises the same way, 65535 included.
+                // It is tempting to read the maximum as "forever", but libvips
+                // does not: it reads 65535 as 65536 plays, and writing that to
+                // WebP's 16-bit ANIM field truncates to 0, which DOES mean
+                // forever. Special-casing it here would wave through exactly the
+                // conversion this guard exists to catch. Such a GIF renders to
+                // GIF (where the count survives) and is passed through for WebP.
                 const stored = buffer.readUInt16LE(p + 16)
-                // 65535 is a "loop forever" idiom, and it is also the largest
-                // value the field holds: +1 would not survive the 16-bit ANIM
-                // field of a WebP render, which reads back as 0. Treat it as the
-                // forever it is meant to be rather than reject every render of it.
-                facts.loop = stored === 0 || stored === 0xffff ? 0 : stored + 1
+                facts.loop = stored === 0 ? 0 : stored + 1
             }
             p += 2
             skipSubBlocks()
@@ -284,7 +287,7 @@ export function animatedOutputType(options: ProxyOptions): AnimatedOutputType {
  */
 export function animatedRenderPlan(input: {
     byteLength: number,
-    metadata: {pages?: number, width?: number, height?: number},
+    metadata: {pages?: number, width?: number, height?: number, orientation?: number},
     options: ProxyOptions,
     acceptHeader: string,
 }): {frames: number, outputType: AnimatedOutputType} | undefined {
@@ -292,6 +295,14 @@ export function animatedRenderPlan(input: {
     // libvips has to have seen the frames: an APNG, which it loads as a single
     // page, must never reach an encoder that would write that page as a still.
     if (typeof pages !== 'number' || pages < 2 || !width || !height) { return undefined }
+    // An EXIF orientation that swaps the axes cannot be applied to an animation:
+    // libvips answers `rotate()` on a multi-page pipeline with "Rotate is not
+    // supported for multi-page images" (5 to 8 throw; 1 to 4 are fine). Deciding
+    // it here makes it the passthrough it is, rather than an exception the caller
+    // has to read as one — and a thrown render is deliberately NOT cached, on the
+    // grounds that it may be transient, which this never is.
+    const orientation = input.metadata.orientation
+    if (typeof orientation === 'number' && orientation >= 5 && orientation <= 8) { return undefined }
     // Not worth the encode. A sticker is already small and a re-encode of one
     // saves a few KB at the price of a full multi-frame decode.
     if (input.byteLength <= ANIMATED_PASSTHROUGH_MAX_SIZE) { return undefined }
