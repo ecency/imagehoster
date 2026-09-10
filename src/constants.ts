@@ -91,6 +91,40 @@ export const MAX_ANIMATED_INPUT_PIXELS = (() => {
 })()
 
 /**
+ * Maximum pixels an animated render may PRODUCE: frames x output width x height.
+ *
+ * The input budget above cannot see this. What an animated encode costs is set
+ * by the box it writes, multiplied by the frame count, and the box is chosen by
+ * whoever wrote the URL (`?width`/`?height`). Measured on this build with
+ * photographic frames, both encoders cost roughly 240ms per megapixel of OUTPUT:
+ *
+ *   400x400  x40  =  6.4 MP out -> 1.6s (gif) / 1.7s (webp)
+ *   800x800  x40  = 25.6 MP out -> 5.8s (gif) / 6.1s (webp)
+ *   800x800 x120  = 76.8 MP out -> (webp) 18.3s
+ *
+ * (Flat, poster-like frames are an order of magnitude cheaper, which is why a
+ * synthetic fixture makes this look free. Real post GIFs are not flat.)
+ *
+ * 50 MP therefore buys roughly 12 seconds in the worst case, and comfortably
+ * admits the case this whole path exists for: the 1.57MB feed GIF is
+ * 1080x1350 over 150 frames, and the feed's 600x500 thumbnail resolves to a
+ * 400x500 box, so 30 MP of output, which renders in 2.7s. A full-size render of
+ * a long animation lands above the ceiling and is passed through, which is what
+ * it did before any of this existed. Configurable via `max_animated_output_pixels`.
+ *
+ * This is a proxy for a wall-clock bound, which is the thing actually wanted; an
+ * encode cannot be interrupted once started (see the queued-only cancellation in
+ * encode-limit.ts). Until it can, the size of the work has to be decided before
+ * it starts.
+ */
+export const MAX_ANIMATED_OUTPUT_PIXELS = (() => {
+    if (!config.has('max_animated_output_pixels')) { return 50_000_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('max_animated_output_pixels'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 50_000_000
+})()
+
+/**
  * Largest original the proxy will keep a cached copy of, in bytes.
  *
  * On a proxy miss we store two things: the rendered variant we are about to

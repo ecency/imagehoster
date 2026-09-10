@@ -35,9 +35,14 @@
 
 import Sharp from 'sharp'
 
-import {ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_INPUT_PIXELS, MAX_INPUT_PIXELS} from './constants'
+import {
+    ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_INPUT_PIXELS, MAX_ANIMATED_OUTPUT_PIXELS, MAX_INPUT_PIXELS,
+} from './constants'
 import {isEncodeAborted} from './encode-limit'
-import {applyProxyResize, buildSharpPipeline, OutputFormat, ProxyOptions, supportsWebP} from './utils'
+import {
+    applyProxyResize, buildSharpPipeline, OutputFormat, ProxyOptions, resolveOutputBox, resolveProxyResize,
+    supportsWebP,
+} from './utils'
 
 /** The only output types that can carry an animation here. */
 export type AnimatedOutputType = 'image/webp' | 'image/gif'
@@ -85,6 +90,22 @@ function gifDelayMs(hundredths: number): number {
 }
 
 /**
+ * A stored WebP frame duration as the frame actually plays.
+ *
+ * The same clamp as gifDelayMs and for the same reason, at the boundary libwebp
+ * itself uses: a duration of 10ms or less is written back as 100ms. Verified on
+ * this build by rewriting the ANMF durations of a real animated WebP and
+ * re-encoding it: 5ms and 10ms come back as 100ms, 15ms and 20ms unchanged.
+ *
+ * Without this an animated WebP SOURCE from an encoder that does not clamp is
+ * measured on a different scale from the render made out of it, and every such
+ * source is rejected as "duration changed" and served whole.
+ */
+function webpDurationMs(stored: number): number {
+    return stored <= 10 ? 100 : stored
+}
+
+/**
  * Frames, playback duration and loop count declared by a GIF's own container.
  *
  * The walk skips extension blocks and each frame's LZW sub-blocks by their
@@ -120,7 +141,11 @@ export function readGifAnimation(buffer: Buffer): AnimationFacts {
                 // unnormalised reader rejects every correct render of a
                 // finite-loop GIF. 0 means forever in both and stays 0.
                 const stored = buffer.readUInt16LE(p + 16)
-                facts.loop = stored === 0 ? 0 : stored + 1
+                // 65535 is a "loop forever" idiom, and it is also the largest
+                // value the field holds: +1 would not survive the 16-bit ANIM
+                // field of a WebP render, which reads back as 0. Treat it as the
+                // forever it is meant to be rather than reject every render of it.
+                facts.loop = stored === 0 || stored === 0xffff ? 0 : stored + 1
             }
             p += 2
             skipSubBlocks()
@@ -174,7 +199,7 @@ export function readWebpAnimation(buffer: Buffer): AnimationFacts {
         if (tag === 'ANMF' && size >= 16) {
             facts.frames++
             // 3+3 byte offset, 3+3 byte size, then a 24-bit little-endian duration
-            facts.durationMs += buffer.readUIntLE(payload + 12, 3)
+            facts.durationMs += webpDurationMs(buffer.readUIntLE(payload + 12, 3))
         }
         p = payload + size + (size % 2)         // chunks are padded to even length
     }
@@ -275,9 +300,19 @@ export function animatedRenderPlan(input: {
     if (width * height > MAX_INPUT_PIXELS) { return undefined }
     // The frames together answer to their own, much larger budget. libvips
     // streams an animated pipeline rather than holding every frame at once, so
-    // adding frames costs time rather than memory, and time is what that budget
-    // is sized against. See MAX_ANIMATED_INPUT_PIXELS.
+    // adding frames costs time rather than memory. See MAX_ANIMATED_INPUT_PIXELS.
     if (pages * width * height > MAX_ANIMATED_INPUT_PIXELS) { return undefined }
+
+    // And the frames we are about to WRITE answer to a budget of their own. The
+    // two are not the same number and the source cannot stand in for the output:
+    // the output box comes from the request, so without this a small animation
+    // and a large `?width` buy an encode the source budget never sees. An
+    // animated resize never enlarges (see resolveProxyResize), so this is also
+    // bounded by the source, but it is the multiplication by frames that makes
+    // it worth checking rather than assuming.
+    const box = resolveOutputBox(input.metadata, resolveProxyResize(input.metadata, input.options, true))
+    if (!box || pages * box.width * box.height > MAX_ANIMATED_OUTPUT_PIXELS) { return undefined }
+
     return {frames: pages, outputType: animatedOutputType(input.options)}
 }
 
@@ -323,7 +358,7 @@ export async function renderAnimatedVariant(input: {
     let buffer: Buffer
     try {
         const image = buildSharpPipeline(input.bytes, true)
-        applyProxyResize(image, input.metadata, input.options)
+        applyProxyResize(image, input.metadata, input.options, true)
         if (plan.outputType === 'image/webp') {
             // Same quality as the still WebP path, and libvips carries the
             // source's frame delays and loop count across on its own.
