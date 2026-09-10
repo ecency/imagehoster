@@ -10,7 +10,9 @@ import {
     readGifAnimation, readWebpAnimation, renderAnimatedVariant,
 } from './../src/animated'
 import {ANIMATED_PASSTHROUGH_MAX_SIZE} from './../src/constants'
-import {base58Enc, OutputFormat, ProxyOptions, ScalingMode} from './../src/utils'
+import {
+    base58Enc, OutputFormat, ProxyOptions, resolveOutputBox, resolveProxyResize, ScalingMode,
+} from './../src/utils'
 
 import {makeAnimatedGif} from './animated-gif-fixture'
 
@@ -35,6 +37,10 @@ const negotiatedWebp = (over: Partial<ProxyOptions> = {}): ProxyOptions =>
     fitOptions({format: OutputFormat.WEBP, ...over})
 
 describe('animated sources', function() {
+
+    /** The caller's encode runner, ungated: the queueing is not what these test. */
+    const encode = (image: sharp.Sharp) => image.toBuffer()
+
 
     it('the fixture really is an animation, and big enough to be worth transforming', async function() {
         const meta = await sharp(bigGif).metadata()
@@ -156,15 +162,114 @@ describe('animated sources', function() {
 
         // The case this budget split exists for. Every frame is a normal photo
         // and there are a lot of them, which is exactly what a heavy post-body
-        // GIF looks like: 1080x1350 over 150 frames is 219 MP, and the still
-        // budget rejected it while resizing 200KB stickers happily.
+        // GIF looks like: 1080x1350 over 150 frames is 219 MP of input, and the
+        // still budget rejected it while resizing 200KB stickers happily.
+        //
+        // Asked for at a size the service will actually write. What it may
+        // PRODUCE is a separate budget with its own tests below: at full size
+        // this same source is refused, because 219 MP of output is a two-minute
+        // encode holding one of twelve slots.
         it('transforms an animation whose frames are ordinary but numerous', function() {
             assert.deepEqual(plan({
                 byteLength: 1_572_008,
                 metadata: {pages: 150, width: 1080, height: 1350},
-                options: negotiatedWebp(),
+                options: negotiatedWebp({width: 320}),
                 acceptHeader: WEBP_ACCEPT,
             }), {frames: 150, outputType: 'image/webp'})
+        })
+    })
+
+    // #47 admitted an animated source on its INPUT size alone, while the encode it
+    // then paid for was sized by the request. Measured before this budget existed:
+    // a 500x500 x300 source (75 MP in, inside every input budget) answered
+    // `?width=2000` by upscaling every frame to 2000x2000, 1.2 GP of output and
+    // 187 seconds of one of the service's ~12 encode slots, for an anonymous GET.
+        // libvips cannot auto-orient an animation: `rotate()` on a multi-page
+        // pipeline answers "Rotate is not supported for multi-page images" for
+        // the four orientations that swap the axes. Letting the render throw
+        // works, but a thrown render is deliberately not cached because it may be
+        // transient, and this one never is: every request pays the fetch again.
+        it('passes through an animation whose EXIF orientation cannot be applied', function() {
+            for (const orientation of [5, 6, 7, 8]) {
+                assert.equal(
+                    animatedRenderPlan({
+                        byteLength: bigGif.length,
+                        metadata: {pages: 8, width: 200, height: 150, orientation},
+                        options: negotiatedWebp({width: 100}),
+                        acceptHeader: WEBP_ACCEPT,
+                    }),
+                    undefined, `orientation ${orientation}`)
+            }
+        })
+
+        it('still transforms the orientations libvips can apply', function() {
+            for (const orientation of [undefined, 1, 2, 3, 4]) {
+                assert.deepEqual(
+                    animatedRenderPlan({
+                        byteLength: bigGif.length,
+                        metadata: {pages: 8, width: 200, height: 150, orientation},
+                        options: negotiatedWebp({width: 100}),
+                        acceptHeader: WEBP_ACCEPT,
+                    }),
+                    {frames: 8, outputType: 'image/webp'}, `orientation ${orientation}`)
+            }
+        })
+
+    describe('what may be PRODUCED, not just consumed', function() {
+        const plan = (over: Partial<ProxyOptions>, metadata: any, byteLength = bigGif.length) =>
+            animatedRenderPlan({byteLength, metadata, options: {mode: ScalingMode.Cover, format: OutputFormat.Match, ...over},
+                                acceptHeader: WEBP_ACCEPT})
+
+        it('passes through a render whose frames together would be too big to write', function() {
+            // 150 frames of 1080x1350 asked for at full size: 219 MP of output.
+            assert.equal(plan({}, {pages: 150, width: 1080, height: 1350}, 1_572_008), undefined)
+        })
+
+        it('still transforms the feed thumbnail that motivated the path', function() {
+            // The same source at the feed's box resolves to 400x500, so 30 MP.
+            assert.deepEqual(
+                animatedRenderPlan({
+                    byteLength: 1_572_008,
+                    metadata: {pages: 150, width: 1080, height: 1350},
+                    options: {mode: ScalingMode.Fit, format: OutputFormat.WEBP, width: 600, height: 500},
+                    acceptHeader: WEBP_ACCEPT,
+                }),
+                {frames: 150, outputType: 'image/webp'})
+        })
+
+        // The output box is what the budget is about, so a request that cannot
+        // grow the source cannot spend more than the source's own size either.
+        it('never enlarges an animated source, whatever width is asked for', async function() {
+            this.timeout(30000)
+            const metadata = await sharp(bigGif).metadata()
+            const out = await renderAnimatedVariant({
+                bytes: bigGif, metadata, options: {mode: ScalingMode.Cover, format: OutputFormat.WEBP, width: 2000},
+                acceptHeader: WEBP_ACCEPT, encode, log: console,
+            })
+            assert.ok(out, 'expected a render')
+            const rendered = await sharp(out!.buffer).metadata()
+            assert.equal(rendered.width, metadata.width,
+                `asked for 2000 on a ${metadata.width}px source and got ${rendered.width}`)
+        })
+
+        // A still is a different bargain: a cover crop is expected to fill the box
+        // it was given, and callers rely on that. Only the animated path refuses.
+        it('leaves the still-image cover crop free to enlarge', function() {
+            const still = {width: 100, height: 100}
+            const opts = {mode: ScalingMode.Cover, format: OutputFormat.WEBP, width: 800} as ProxyOptions
+            assert.equal(resolveProxyResize(still, opts, false).withoutEnlargement, false)
+            assert.equal(resolveProxyResize(still, opts, true).withoutEnlargement, true)
+        })
+
+        it('measures the box a fit resize actually lands on, not the one requested', function() {
+            const box = resolveOutputBox({width: 1080, height: 1350},
+                {width: 600, height: 500, fit: 'inside', withoutEnlargement: true})
+            assert.deepEqual(box, {width: 400, height: 500})
+        })
+
+        it('declines to guess when the source dimensions are unknown', function() {
+            assert.equal(resolveOutputBox({}, {width: 600, fit: 'inside', withoutEnlargement: true}), undefined)
+            assert.equal(plan({width: 600}, {pages: 8, width: undefined, height: undefined}), undefined)
         })
     })
 
@@ -263,6 +368,92 @@ describe('animated sources', function() {
             assert.equal(readGifAnimation(makeAnimatedGif({frames: 5, delay: 2, noisy: false})).durationMs, 100)
         })
 
+        // The GIF side clamps a sub-20ms delay to the 100ms it plays at; the WebP
+        // side has to do the same at libwebp's own boundary, or a source from an
+        // encoder that did not clamp is measured on a different scale from the
+        // render made out of it and is rejected as "duration changed".
+        it('reads a sub-10ms WebP frame as the 100ms it actually plays at', async function() {
+            this.timeout(30000)
+            const gif = makeAnimatedGif({width: 100, height: 80, frames: 6, delay: 4, noisy: true})
+            const normal = await sharp(gif, {animated: true}).webp({quality: 80, force: true}).toBuffer()
+
+            /** Rewrite every ANMF duration, the way another encoder might have. */
+            const withDuration = (ms: number) => {
+                const b = Buffer.from(normal)
+                const end = Math.min(b.readUInt32LE(4) + 8, b.length)
+                let p = 12
+                while (p + 8 <= end) {
+                    const size = b.readUInt32LE(p + 4)
+                    if (b.toString('ascii', p, p + 4) === 'ANMF') { b.writeUIntLE(ms, p + 8 + 12, 3) }
+                    p = p + 8 + size + (size % 2)
+                }
+                return b
+            }
+
+            for (const ms of [0, 5, 10]) {
+                assert.equal(readWebpAnimation(withDuration(ms)).durationMs, 600, `${ms}ms frames`)
+            }
+            // Above the boundary the stored value is what plays, and is left alone.
+            assert.equal(readWebpAnimation(withDuration(15)).durationMs, 90)
+            assert.equal(readWebpAnimation(withDuration(40)).durationMs, 240)
+        })
+
+        it('accepts a render of an animated WebP whose frames declare under 10ms', async function() {
+            this.timeout(30000)
+            // Big enough to be worth transforming, or it is passed through for
+            // its size and the test proves nothing about durations.
+            const gif = makeAnimatedGif({width: 400, height: 300, frames: 30, delay: 4, noisy: true})
+            const normal = await sharp(gif, {animated: true}).webp({quality: 80, force: true}).toBuffer()
+            assert.ok(normal.length > ANIMATED_PASSTHROUGH_MAX_SIZE,
+                `fixture is ${normal.length} bytes, under the ${ANIMATED_PASSTHROUGH_MAX_SIZE} ceiling`)
+            const source = Buffer.from(normal)
+            const end = Math.min(source.readUInt32LE(4) + 8, source.length)
+            let p = 12
+            while (p + 8 <= end) {
+                const size = source.readUInt32LE(p + 4)
+                if (source.toString('ascii', p, p + 4) === 'ANMF') { source.writeUIntLE(5, p + 8 + 12, 3) }
+                p = p + 8 + size + (size % 2)
+            }
+            const metadata = await sharp(source).metadata()
+            const out = await renderAnimatedVariant({
+                bytes: source, metadata, options: negotiatedWebp({width: 50}),
+                acceptHeader: WEBP_ACCEPT, encode, log: console,
+            })
+            assert.ok(out, 'a WebP source with fast frames must still be rendered, not passed through')
+        })
+
+        // The maximum stored count is a finite 65536 plays, not "forever", and
+        // that is how libvips reads it. WebP's ANIM loop is 16 bits, so a WebP
+        // render of such a GIF carries 0 — which DOES mean forever. Normalising
+        // it to forever here would wave that conversion through.
+        it('normalises the maximum stored loop count without calling it forever', function() {
+            const max = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 65535})
+            assert.equal(readGifAnimation(max).loop, 65536)
+            const near = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 65534})
+            assert.equal(readGifAnimation(near).loop, 65535)
+            const forever = makeAnimatedGif({width: 80, height: 60, frames: 4, delay: 5, noisy: false, loop: 0})
+            assert.equal(readGifAnimation(forever).loop, 0)
+        })
+
+        it('refuses a WebP render that would turn 65536 plays into an endless loop', async function() {
+            this.timeout(30000)
+            const gif = makeAnimatedGif({width: 200, height: 150, frames: 8, delay: 10, noisy: true, loop: 65535})
+            const metadata = await sharp(gif).metadata()
+            const out = await renderAnimatedVariant({
+                bytes: gif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
+                encode, log: {warn: () => undefined, error: () => undefined, debug: () => undefined},
+            })
+            // libvips writes 65536 into a 16-bit field, and it reads back as 0.
+            assert.equal(out, undefined)
+            // The same source still renders to GIF, where the count survives.
+            const asGif = await renderAnimatedVariant({
+                bytes: gif, metadata, options: fitOptions({width: 100}), acceptHeader: 'image/*',
+                encode, log: console,
+            })
+            assert.ok(asGif, 'a GIF render keeps the loop count and must still happen')
+            assert.equal(readGifAnimation(asGif!.buffer).loop, readGifAnimation(gif).loop)
+        })
+
         it('reads them back off a WebP the encoder wrote', async function() {
             this.timeout(20000)
             const gif = makeAnimatedGif({width: 120, height: 90, frames: 6, delay: 10, noisy: true})
@@ -284,7 +475,6 @@ describe('animated sources', function() {
     })
 
     describe('rendering keeps the animation', function() {
-        const encode = (image: sharp.Sharp) => image.toBuffer()
 
         it('renders an animated WebP with every frame, materially smaller', async function() {
             this.timeout(20000)

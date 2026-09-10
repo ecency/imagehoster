@@ -891,11 +891,19 @@ export function primaryPageOf(metadata: {format?: string, pagePrimary?: number})
  * neither. Shared by the still and the animated render so an animation is sized
  * by exactly the same rules as the still it replaced.
  */
-export function applyProxyResize(
-    image: Sharp.Sharp,
+/**
+ * The resize this request resolves to, without applying it.
+ *
+ * Split out of applyProxyResize so a caller can know the size it is about to
+ * encode BEFORE paying for it. The animated path needs that: its cost is the
+ * output box multiplied by the frame count, and a budget that reads the source
+ * alone cannot see it.
+ */
+export function resolveProxyResize(
     metadata: {width?: number, height?: number},
     options: ProxyOptions,
-): void {
+    animated: boolean = false,
+): {width?: number, height?: number, fit: 'cover' | 'inside', withoutEnlargement: boolean} {
     const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
     let width: number | undefined = safeParseInt(options.width)
     let height: number | undefined = safeParseInt(options.height)
@@ -926,22 +934,67 @@ export function applyProxyResize(
         case ScalingMode.Cover:
             if (bothUnspecified) {
                 // User didn't request specific dimensions — preserve aspect ratio
-                image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
-            } else {
-                image.rotate().resize(width, height, {fit: 'cover'})
+                return {width, height, fit: 'inside', withoutEnlargement: true}
             }
-            break
+            // A requested box is honoured for a still, enlargement included: that
+            // is what a cover crop means and callers depend on it. An ANIMATION
+            // is never enlarged, because doing so multiplies the encode by the
+            // square of the scale on EVERY frame while adding no detail, and the
+            // scale is chosen by whoever wrote the URL.
+            return {width, height, fit: 'cover', withoutEnlargement: animated}
         case ScalingMode.Fit:
+        default:
             // Only set defaults if BOTH dimensions are undefined
             // If one dimension is defined, Sharp will auto-calculate the other
             if (width === undefined && height === undefined) {
                 width = maxWidth
                 height = maxHeight
             }
-
-            image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
-            break
+            return {width, height, fit: 'inside', withoutEnlargement: true}
     }
+}
+
+/**
+ * The pixel box a resolved resize will actually produce, given the source.
+ *
+ * Exact for `inside` (the mode a feed thumbnail uses), where the scale is the
+ * smallest of the requested ratios; `cover` is bounded rather than modelled,
+ * which is enough for a budget and never under-counts. Undefined when the source
+ * dimensions are unknown, so the caller can decide rather than assume.
+ */
+export function resolveOutputBox(
+    metadata: {width?: number, height?: number},
+    resize: {width?: number, height?: number, fit: 'cover' | 'inside', withoutEnlargement: boolean},
+): {width: number, height: number} | undefined {
+    const srcW = metadata.width
+    const srcH = metadata.height
+    if (!srcW || !srcH) { return undefined }
+
+    if (resize.fit === 'cover') {
+        const w = resize.width ?? srcW
+        const h = resize.height ?? srcH
+        return {
+            width: Math.max(1, resize.withoutEnlargement ? Math.min(w, srcW) : w),
+            height: Math.max(1, resize.withoutEnlargement ? Math.min(h, srcH) : h),
+        }
+    }
+
+    const ratios: number[] = []
+    if (resize.width) { ratios.push(resize.width / srcW) }
+    if (resize.height) { ratios.push(resize.height / srcH) }
+    if (resize.withoutEnlargement) { ratios.push(1) }
+    const scale = ratios.length > 0 ? Math.min(...ratios) : 1
+    return {width: Math.max(1, Math.round(srcW * scale)), height: Math.max(1, Math.round(srcH * scale))}
+}
+
+export function applyProxyResize(
+    image: Sharp.Sharp,
+    metadata: {width?: number, height?: number},
+    options: ProxyOptions,
+    animated: boolean = false,
+): void {
+    const {width, height, fit, withoutEnlargement} = resolveProxyResize(metadata, options, animated)
+    image.rotate().resize(width, height, {fit, withoutEnlargement})
 }
 
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
