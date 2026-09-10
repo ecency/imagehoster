@@ -70,7 +70,11 @@ export function countWebpFrames(buffer: Buffer): number {
 export interface AnimationFacts {
     frames: number
     durationMs: number
-    /** Times to play the animation; 0 is forever in both containers. */
+    /**
+     * Times the animation PLAYS, 0 being forever. Normalised, because the two
+     * containers count differently: a GIF's NETSCAPE2.0 block stores repeats
+     * after the first play, a WebP's ANIM chunk stores total plays.
+     */
     loop: number
 }
 
@@ -110,7 +114,13 @@ export function readGifAnimation(buffer: Buffer): AnimationFacts {
                 pending = buffer.readUInt16LE(p + 4)
             } else if (label === 0xff && buffer.toString('ascii', p + 3, p + 14) === 'NETSCAPE2.0' &&
                        p + 19 < buffer.length && buffer[p + 14] === 0x03 && buffer[p + 15] === 0x01) {
-                facts.loop = buffer.readUInt16LE(p + 16)
+                // GIF counts REPEATS AFTER the first play; WebP's ANIM counts total
+                // plays. Normalising here is what lets the two be compared at all:
+                // libvips reads a GIF's stored 3 as 4 and writes ANIM 4, so an
+                // unnormalised reader rejects every correct render of a
+                // finite-loop GIF. 0 means forever in both and stays 0.
+                const stored = buffer.readUInt16LE(p + 16)
+                facts.loop = stored === 0 ? 0 : stored + 1
             }
             p += 2
             skipSubBlocks()
@@ -142,21 +152,31 @@ export function readWebpAnimation(buffer: Buffer): AnimationFacts {
     if (buffer.length < 16 ||
         buffer.toString('ascii', 0, 4) !== 'RIFF' ||
         buffer.toString('ascii', 8, 12) !== 'WEBP') { return facts }
+    // The walk stops where the RIFF header says the file does, not where the
+    // buffer does. Bytes appended past that endpoint are not chunks, and reading
+    // them as chunks would let anything chunk-shaped rewrite the frame count or
+    // the loop of a container that never declared it.
+    const declared = buffer.readUInt32LE(4) + 8
+    const end = Math.min(declared, buffer.length)
     let p = 12
     let isAnimation = false
-    while (p + 8 <= buffer.length) {
+    while (p + 8 <= end) {
         const tag = buffer.toString('ascii', p, p + 4)
         const size = buffer.readUInt32LE(p + 4)
-        if (tag === 'ANIM' && p + 14 <= buffer.length) {
+        const payload = p + 8
+        // A chunk whose declared payload runs past the container is malformed;
+        // there is nothing after it worth reading either.
+        if (payload + size > end) { break }
+        if (tag === 'ANIM' && size >= 6) {
             isAnimation = true
-            facts.loop = buffer.readUInt16LE(p + 12)   // after a 4-byte background colour
+            facts.loop = buffer.readUInt16LE(payload + 4)   // after a 4-byte background colour
         }
-        if (tag === 'ANMF' && p + 24 <= buffer.length) {
+        if (tag === 'ANMF' && size >= 16) {
             facts.frames++
             // 3+3 byte offset, 3+3 byte size, then a 24-bit little-endian duration
-            facts.durationMs += buffer.readUIntLE(p + 20, 3)
+            facts.durationMs += buffer.readUIntLE(payload + 12, 3)
         }
-        p += 8 + size + (size % 2)              // chunks are padded to even length
+        p = payload + size + (size % 2)         // chunks are padded to even length
     }
     return isAnimation ? facts : {frames: 0, durationMs: 0, loop: 1}
 }

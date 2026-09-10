@@ -182,9 +182,48 @@ describe('animated sources', function() {
             assert.deepEqual(readGifAnimation(gif), {frames: 5, durationMs: 600, loop: 0})
         })
 
-        it('reads a finite loop count', function() {
+        // A GIF's NETSCAPE2.0 block stores REPEATS AFTER the first play; a WebP's
+        // ANIM chunk stores TOTAL plays. libvips does that conversion when it
+        // transcodes, so a reader that returned the stored 3 here would compare
+        // it against the WebP's 4 and reject every correct render of a
+        // finite-loop GIF. Both readers report plays.
+        it('reads a finite loop count as the number of plays', function() {
             const gif = makeAnimatedGif({frames: 4, delay: 10, noisy: false, loop: 3})
-            assert.equal(readGifAnimation(gif).loop, 3)
+            assert.equal(readGifAnimation(gif).loop, 4)
+        })
+
+        it('agrees with the WebP a finite-loop GIF transcodes into', async function() {
+            this.timeout(20000)
+            const gif = makeAnimatedGif({width: 120, height: 90, frames: 5, delay: 10, noisy: true, loop: 3})
+            const webp = await sharp(gif, {animated: true}).resize(60)
+                .webp({quality: 80, force: true}).toBuffer()
+            assert.equal(readWebpAnimation(webp).loop, readGifAnimation(gif).loop)
+        })
+
+        // Bytes past the endpoint the RIFF header declares are not chunks. Reading
+        // them as chunks would let anything chunk-shaped rewrite the frame count
+        // or the loop, and reject a render that is perfectly good.
+        it('stops where the RIFF header says the file ends', async function() {
+            this.timeout(20000)
+            const gif = makeAnimatedGif({width: 120, height: 90, frames: 6, delay: 10, noisy: true})
+            const webp = await sharp(gif, {animated: true}).resize(60)
+                .webp({quality: 80, force: true}).toBuffer()
+            const clean = readWebpAnimation(webp)
+            assert.equal(clean.frames, 6)
+
+            // An ANIM chunk claiming a loop of 9, and an extra frame, appended
+            // after the container's own end.
+            const anim = Buffer.alloc(8 + 6)
+            anim.write('ANIM', 0, 'ascii')
+            anim.writeUInt32LE(6, 4)
+            anim.writeUInt16LE(9, 8 + 4)
+            const anmf = Buffer.alloc(8 + 16)
+            anmf.write('ANMF', 0, 'ascii')
+            anmf.writeUInt32LE(16, 4)
+            anmf.writeUIntLE(5000, 8 + 12, 3)
+
+            const trailing = Buffer.concat([webp, anim, anmf])
+            assert.deepEqual(readWebpAnimation(trailing), clean)
         })
 
         // A GIF that asks for 0 or 1 hundredths does not play that fast anywhere:
