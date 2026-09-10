@@ -36,7 +36,8 @@
 import Sharp from 'sharp'
 
 import {
-    ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_INPUT_PIXELS, MAX_ANIMATED_OUTPUT_PIXELS, MAX_INPUT_PIXELS,
+    ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_INPUT_PIXELS, MAX_ANIMATED_OUTPUT_PIXELS_GIF,
+    MAX_ANIMATED_OUTPUT_PIXELS_WEBP, MAX_INPUT_PIXELS,
 } from './constants'
 import {isEncodeAborted} from './encode-limit'
 import {
@@ -321,10 +322,21 @@ export function animatedRenderPlan(input: {
     // animated resize never enlarges (see resolveProxyResize), so this is also
     // bounded by the source, but it is the multiplication by frames that makes
     // it worth checking rather than assuming.
+    //
+    // That budget belongs to the ENCODER, not to the request: writing a
+    // megapixel as GIF costs several times what writing it as WebP does, because
+    // GIF has to quantise every frame to 256 colours. Deciding the output type
+    // first is free - it is a pure function of options, which parseOptions has
+    // already folded Accept into - and it is what keeps one number from being
+    // simultaneously too tight for WebP and too loose for GIF (#57).
+    const outputType = animatedOutputType(input.options)
+    const outputBudget = outputType === 'image/webp'
+        ? MAX_ANIMATED_OUTPUT_PIXELS_WEBP
+        : MAX_ANIMATED_OUTPUT_PIXELS_GIF
     const box = resolveOutputBox(input.metadata, resolveProxyResize(input.metadata, input.options, true))
-    if (!box || pages * box.width * box.height > MAX_ANIMATED_OUTPUT_PIXELS) { return undefined }
+    if (!box || pages * box.width * box.height > outputBudget) { return undefined }
 
-    return {frames: pages, outputType: animatedOutputType(input.options)}
+    return {frames: pages, outputType}
 }
 
 /**
