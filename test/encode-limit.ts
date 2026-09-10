@@ -145,6 +145,48 @@ describe('encode concurrency limit', function() {
         assert.equal(encodeLimitStats().queued, 0)
     })
 
+    // The signal is checked at the door and while queued. It also has to be
+    // checked in the HAND-OFF: `grant()` drops the abort listener when it gives
+    // the slot away, so a client that leaves in the moment between being granted
+    // a slot and the await resuming would otherwise have its encode start anyway.
+    it('does not start work for a client that left during the hand-off', async function() {
+        const ac = new AbortController()
+        let ran = false
+        const p = withEncodeSlot(async () => { ran = true; return 'done' }, ac.signal)
+        ac.abort()
+        await assert.rejects(p, (e: any) => isEncodeAborted(e))
+        assert.equal(ran, false, 'Sharp must not have been called for a closed socket')
+    })
+
+    it('gives the slot back when it refuses that hand-off', async function() {
+        const before = encodeLimitStats().active
+        const ac = new AbortController()
+        const p = withEncodeSlot(async () => 'done', ac.signal)
+        ac.abort()
+        await assert.rejects(p, (e: any) => isEncodeAborted(e))
+        assert.equal(encodeLimitStats().active, before, 'a refused hand-off must not leak its slot')
+        // ...and the gate still works afterwards.
+        assert.equal(await withEncodeSlot(async () => 'ok'), 'ok')
+    })
+
+    // The other half of the contract, and the reason the slot is held to the end:
+    // an encode already running cannot be abandoned, so the result is still
+    // produced and the slot is still returned exactly once.
+    it('completes work already running when the client leaves, and still frees the slot', async function() {
+        const before = encodeLimitStats().active
+        const ac = new AbortController()
+        let finished = false
+        const p = withEncodeSlot(async () => {
+            await new Promise((r) => setTimeout(r, 50))
+            finished = true
+            return 'done'
+        }, ac.signal)
+        setTimeout(() => ac.abort(), 10)
+        assert.equal(await p, 'done')
+        assert.equal(finished, true)
+        assert.equal(encodeLimitStats().active, before)
+    })
+
     it('rejects immediately when the signal is already aborted', async function() {
         const controller = new AbortController()
         controller.abort()

@@ -190,9 +190,34 @@ function release(): void {
  * matters under load: the cache in front of us gives up long before a deep queue
  * drains, so without it the queue fills with work for dead sockets while live
  * requests wait behind it.
+ *
+ * The signal covers everything up to the moment work STARTS: already aborted at
+ * the door, aborted while queued, and aborted in the hand-off. It does not, and
+ * cannot, abandon an encode already running. Measured on the sharp/libvips this
+ * repo pins (0.33.5 / 8.15.3), calling `.destroy()` on the instance 402ms into a
+ * 7.0s encode changed nothing: the promise RESOLVED with the full buffer at
+ * 6,987ms, having burnt 7.1s of CPU. There is no cancellation to propagate, so
+ * do not add an abort listener here expecting one.
+ *
+ * That is also why the slot is held to the end rather than released on abort.
+ * The native encode keeps its libuv threadpool thread whether or not anyone is
+ * still waiting for the result, so releasing early would admit another encode
+ * against a thread that is still busy and oversubscribe the pool — the exact
+ * starvation RESERVED_POOL_SLOTS exists to prevent. Wasted work is bounded at
+ * the other end instead, by not admitting an encode too big to finish quickly
+ * (see MAX_ANIMATED_OUTPUT_PIXELS and the size gate below).
  */
 export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     await acquire(signal)
+    // The slot is ours, but a queued client can go away in the moment between the
+    // hand-off and this line resuming: `grant()` drops the abort listener, so
+    // nothing else would notice, and the encode would run for a closed socket.
+    // Checking here is what makes the contract exact — a slot is never SPENT on
+    // work for a client that has already gone.
+    if (signal && signal.aborted) {
+        release()
+        throw abortedError()
+    }
     try {
         return await fn()
     } finally {
