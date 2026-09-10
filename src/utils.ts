@@ -13,7 +13,7 @@ import Sharp from 'sharp'
 import { URL } from 'url'
 
 import { domainBlacklist, imageBlacklist } from './blacklist'
-import { INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_INPUT_PIXELS } from './constants'
+import { INTERNAL_SERVICE_ORIGINS, isEmptyImageUrl, MAX_ANIMATED_INPUT_PIXELS, MAX_INPUT_PIXELS } from './constants'
 import { APIError } from './error'
 import {fetchImageWithFallbacks} from './fetch-image'
 import { logger } from './logger'
@@ -946,7 +946,11 @@ export function applyProxyResize(
 
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
     return Sharp(buffer, {
-        failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS,
+        failOnError: false, animated,
+        // An animated read loads every frame, so it is measured against the
+        // budget written for that: the still one describes a single frame's
+        // memory and rejects perfectly ordinary animations when summed.
+        limitInputPixels: animated ? MAX_ANIMATED_INPUT_PIXELS : MAX_INPUT_PIXELS,
         ...(page !== undefined ? { page } : {}),
     })
 }

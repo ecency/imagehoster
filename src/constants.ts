@@ -44,6 +44,53 @@ export const MAX_INPUT_PIXELS = (() => {
 })()
 
 /**
+ * Maximum input pixels an ANIMATED source may total across all its frames.
+ *
+ * MAX_INPUT_PIXELS is sized for a still decode, where the pixel count IS the
+ * memory: one 16000x16000 frame becomes ~1GB of raw RGBA. Applying that same
+ * number to the frames of an animation summed together does not measure the same
+ * thing. libvips streams an animated pipeline frame by frame instead of holding
+ * the whole strip, so cost stays flat as frames are added. Measured on this
+ * build (sharp 0.33.5 / libvips 8.15.3), resizing to a feed thumbnail:
+ *
+ *   1.9 MP,  22 frames -> 70MB peak RSS, 0.3s
+ *   46 MP,   69 frames -> 82MB peak RSS, 0.8s
+ *   59 MP,  367 frames -> 82MB peak RSS, 3.9s
+ *   219 MP, 150 frames -> 84MB peak RSS, 2.7s
+ *
+ * against a 60MB baseline for the process with sharp loaded: 10 to 25MB of
+ * marginal memory whatever the pixel count. What does grow is TIME, and that is
+ * already bounded elsewhere, by the encode slot gate every animated encode has
+ * to queue for and by the abort signal that drops the render when the client
+ * leaves.
+ *
+ * So this exists to keep the pathological out, not to protect memory: the still
+ * budget still applies to each individual frame, and this caps the total work.
+ *
+ * Aggregate, for production (12 cores, num_workers 6, UV_THREADPOOL_SIZE 16):
+ * resolveEncodeBudget gives floor(12/6) = 2 encode slots per worker, so 12
+ * service-wide, and every animated encode has to hold one. All 12 running an
+ * animation at this ceiling at once is 12 x ~25MB = ~300MB of marginal memory on
+ * a 62GB box. Memory is not the binding constraint at any plausible limit.
+ *
+ * TIME is what this number really buys, so it is set at 300 MP rather than
+ * generously: ~37% above the largest animation seen in production traffic
+ * (219 MP), and about 3.6s of encode at the measurements above. That matters
+ * because an encode slot is held until the encode FINISHES. `withEncodeSlot`
+ * checks the abort signal before starting and never again, and Sharp's toBuffer
+ * cannot be cancelled once running, so a client that leaves mid-encode still
+ * costs the full render (see the queued-only wording of ENCODE_ABORTED). Setting
+ * this higher lengthens the worst case a live request can queue behind an
+ * abandoned one. Configurable via `max_animated_input_pixels`.
+ */
+export const MAX_ANIMATED_INPUT_PIXELS = (() => {
+    if (!config.has('max_animated_input_pixels')) { return 300_000_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('max_animated_input_pixels'))
+    return Number.isSafeInteger(v) && v > 0 ? v : 300_000_000
+})()
+
+/**
  * Largest original the proxy will keep a cached copy of, in bytes.
  *
  * On a proxy miss we store two things: the rendered variant we are about to
