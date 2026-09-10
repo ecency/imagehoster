@@ -337,7 +337,24 @@ export function getImageKey(origKey: string, options: ProxyOptions): string {
         return `${origKey}_${options.width || 0}x${options.height || 0}${options.blur ? '_blur' : ''}`
     }
     const rv = [origKey, ScalingMode[options.mode], OutputFormat[options.format]]
-    if (options.width) { rv.push(options.width.toFixed(0)) }
+    // Both dimensions are POSITIONAL, so a missing width has to hold its place.
+    // Without the placeholder `?width=100` and `?height=100` built the same key,
+    // and the first of the two to render was then served to the other under
+    // `immutable, max-age=1y` with the variant's own ETag: a different image,
+    // pinned for a year at the edge and in the store.
+    //
+    // The placeholder is only written when there is a height to disambiguate
+    // from, so every key that already existed for a width, or for both, keeps
+    // the bytes it has. Only height-only variants get a new key, and a new key
+    // is a miss and a re-render, never a wrong answer.
+    //
+    // Deliberately NOT normalised to always-both (`..._600_0`). That reads more
+    // consistently with the fit+match form above, which has always written both
+    // axes and so never collided, but it would rename every width-only variant
+    // in the store: a 15-minute sample of production keys is roughly 15-20%
+    // `Fit_AVIF_600`, `Fit_AVIF_1280`, `Fit_AVIF_800` and friends, all of which
+    // would re-render on next request to buy nothing a reader can see.
+    if (options.width) { rv.push(options.width.toFixed(0)) } else if (options.height) { rv.push('0') }
     if (options.height) { rv.push(options.height.toFixed(0)) }
     if (options.blur) { rv.push('blur') }
     return rv.join('_')

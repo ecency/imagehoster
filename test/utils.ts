@@ -36,6 +36,7 @@ import {
     isInternalUploadUrl,
     ScalingMode,
     OutputFormat,
+    ProxyOptions,
     redactUrlForLog,
     storeRemoveByPrefix,
     storeWrite,
@@ -1261,5 +1262,50 @@ describe('redactUrlForLog', function() {
         assert.equal(redactUrlForLog(''), '')
         assert.equal(redactUrlForLog(undefined), '')
         assert.equal(redactUrlForLog(null), '')
+    })
+})
+
+describe('variant keys keep the two dimensions apart', function() {
+    const key = (o: Partial<ProxyOptions>) =>
+        getImageKey('DQmFIXTURE', {mode: ScalingMode.Cover, format: OutputFormat.WEBP, ...o} as ProxyOptions)
+
+    // Both dimensions are positional. A width-only and a height-only request used
+    // to build the same key, so whichever rendered first was served to the other
+    // under `immutable, max-age=1y` with the real variant's ETag.
+    it('gives a width-only and a height-only request different keys', function() {
+        assert.notEqual(key({width: 100}), key({height: 100}))
+    })
+
+    it('does the same once blurred, where the suffix used to hide it', function() {
+        assert.notEqual(key({width: 100, blur: true}), key({height: 100, blur: true}))
+    })
+
+    it('holds the width position open so the height cannot read as one', function() {
+        assert.equal(key({height: 100}), 'DQmFIXTURE_Cover_WEBP_0_100')
+    })
+
+    // The fix is only worth having if it does not invalidate the whole store, so
+    // these pin the forms that must NOT move.
+    it('leaves every key that already had a width exactly as it was', function() {
+        assert.equal(key({width: 100}), 'DQmFIXTURE_Cover_WEBP_100')
+        assert.equal(key({width: 100, height: 200}), 'DQmFIXTURE_Cover_WEBP_100_200')
+        assert.equal(key({width: 100, blur: true}), 'DQmFIXTURE_Cover_WEBP_100_blur')
+        assert.equal(key({}), 'DQmFIXTURE_Cover_WEBP')
+    })
+
+    // Avatars and covers always pass both dimensions, so nothing they stored moves.
+    it('leaves the avatar and cover key shapes alone', function() {
+        assert.equal(
+            getImageKey('U123', {width: 256, height: 256, mode: ScalingMode.Cover, format: OutputFormat.WEBP} as ProxyOptions),
+            'U123_Cover_WEBP_256_256')
+    })
+
+    // The fit+match route already wrote both axes, and is untouched.
+    it('keeps the fit+match form, which never collided', function() {
+        const fit = (o: Partial<ProxyOptions>) =>
+            getImageKey('DQmFIXTURE', {mode: ScalingMode.Fit, format: OutputFormat.Match, ...o} as ProxyOptions)
+        assert.equal(fit({width: 100}), 'DQmFIXTURE_100x0')
+        assert.equal(fit({height: 100}), 'DQmFIXTURE_0x100')
+        assert.notEqual(fit({width: 100}), fit({height: 100}))
     })
 })
