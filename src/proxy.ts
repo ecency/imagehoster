@@ -63,7 +63,8 @@ import {
     primaryPageOf,
     streamHeadBounded,
     supportsAvif,
-    supportsWebP
+    supportsWebP,
+    acceptsAnyImageType
 } from './utils'
 
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
@@ -713,6 +714,10 @@ export async function proxyHandler(ctx: KoaContext) {
         // LQIP, so it is rendered from the first frame below rather than decoding
         // every frame to squash them into one.
         let animatedRender: {buffer: Buffer, contentType: string} | undefined
+        // A render that THREW is not a passthrough decision: it may be transient,
+        // and storing the source under this variant's key would freeze the
+        // unresized original there for every later request.
+        let animatedRenderFailed = false
         if (isAnimated && !options.blur && !isLegacy) {
             animatedRender = await renderAnimatedVariant({
                 bytes: origin.bytes,
@@ -726,12 +731,32 @@ export async function proxyHandler(ctx: KoaContext) {
                 log: ctx.log,
                 onFramesDropped: (info) => captureImageFailure('animated_frames_dropped', ctx,
                     { urlString, imageKey, ...info }),
+                onRenderFailed: () => { animatedRenderFailed = true },
             })
         }
-        if (animatedRender) {
+        const clientRefusesWebp =
+            !supportsWebP(acceptHeader) && !acceptsAnyImageType(acceptHeader)
+
+        if (animatedRender && animatedRender.contentType === 'image/webp' && clientRefusesWebp) {
+            // The variant for this key is WebP (its options negotiated or asked for
+            // it), but THIS client enumerated the image types it reads and WebP was
+            // not among them — an AVIF-only Accept, say. Hand it the source, which
+            // every client can read, and do not store those bytes: the WebP variant
+            // stays correct for the clients the key belongs to.
+            //
+            // `*/*` and `image/*` are NOT this case: a client that names no image
+            // type told us nothing, so it keeps the smaller WebP.
+            ctx.tag({animated: 'source-for-client-without-webp'})
+            rendered = passthroughImage(origin.bytes, 'client does not accept the animated variant format')
+        } else if (animatedRender) {
             ctx.tag({animated: animatedRender.contentType})
             rendered = derive(origin, animatedRender.buffer)
             contentType = animatedRender.contentType
+        } else if (animatedRenderFailed) {
+            // Serve the animation, but never as this key's variant: the next
+            // request has to be free to try the encode again.
+            ctx.tag({animated: 'render-failed'})
+            rendered = passthroughImage(origin.bytes, 'animated render failed, source served uncached')
         } else if (isAnimated && !options.blur) {
             // Nothing safe or worthwhile to render: a deliberate passthrough of the
             // animation, and a real variant for this key, so every request for it

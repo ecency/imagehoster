@@ -177,7 +177,13 @@ export async function renderAnimatedVariant(input: {
     acceptHeader: string,
     encode: (image: Sharp.Sharp) => Promise<Buffer>,
     log: any,
-    onFramesDropped?: (info: {expected: number, got: number, outputType: AnimatedOutputType}) => void,
+    onFramesDropped?: (info: {expected: number, got: number, outputType: AnimatedOutputType}) => void
+    /**
+     * The encoder threw. Distinct from every other `undefined` this returns: those
+     * are deliberate passthroughs whose result is worth caching, while this one may
+     * be transient and must not be stored as if it were the variant.
+     */
+    onRenderFailed?: (info: {outputType: AnimatedOutputType}) => void,
 }): Promise<{buffer: Buffer, contentType: AnimatedOutputType} | undefined> {
     const plan = animatedRenderPlan({
         byteLength: input.bytes.length,
@@ -202,6 +208,7 @@ export async function renderAnimatedVariant(input: {
     } catch (err) {
         if (isEncodeAborted(err)) { throw err }
         input.log.warn({err, outputType: plan.outputType}, 'animated render failed, serving source untouched')
+        if (input.onRenderFailed) { input.onRenderFailed({outputType: plan.outputType}) }
         return undefined
     }
 

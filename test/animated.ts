@@ -345,6 +345,45 @@ describe('animated sources', function() {
             assert.equal(countWebpFrames(res.body), 8)
         })
 
+        // The variant for this key is WebP, but this client cannot decode WebP.
+        // It gets the animation in its source format, and those bytes must not be
+        // stored as the variant — the key belongs to the clients that asked for it.
+        it('hands the source to a client that cannot take the WebP variant', async function() {
+            this.slow(4000)
+            this.timeout(20000)
+            const res = await proxy('animated-noavif.gif', '?width=100&format=avif', {accept: 'image/avif'})
+            assert.equal(res.statusCode, 200)
+            assert.equal(res.headers['content-type'], 'image/gif')
+            assert.equal(countGifFrames(res.body), 8)
+            // Served, not stored: a WebP-capable client still gets the real variant.
+            const second = await proxy('animated-noavif.gif', '?width=100&format=avif', {accept: WEBP_ACCEPT})
+            assert.equal(second.headers['content-type'], 'image/webp')
+        })
+
+        // A THROWN encode is not a decision, it may be transient — so the source
+        // is served but must never be stored as this key's variant, or the
+        // unresized original is frozen there for every later request.
+        it('does not cache the source when the encode throws', async function() {
+            this.slow(4000)
+            this.timeout(20000)
+            const proto = sharp.prototype as unknown as {toBuffer: () => Promise<Buffer>}
+            const realToBuffer = proto.toBuffer
+            proto.toBuffer = () => Promise.reject(new Error('libvips exploded'))
+            let res
+            try {
+                res = await proxy('animated-throws.gif', '?width=100', {accept: WEBP_ACCEPT})
+            } finally {
+                proto.toBuffer = realToBuffer
+            }
+            assert.equal(res!.statusCode, 200)
+            assert.equal(countGifFrames(res!.body), 8, 'the animation is still served')
+
+            // The next request must be free to try again — and succeed.
+            const second = await proxy('animated-throws.gif', '?width=100', {accept: WEBP_ACCEPT})
+            assert.equal(second.headers['content-type'], 'image/webp',
+                'a retry produced the real variant, so the failure was not cached')
+        })
+
         it('leaves a small animated source untouched', async function() {
             this.slow(4000)
             this.timeout(20000)
