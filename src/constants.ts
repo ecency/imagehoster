@@ -69,6 +69,27 @@ export const MAX_CACHED_ORIGINAL_SIZE = (() => {
     return Number.isSafeInteger(v) && v >= 0 ? v : 1_000_000
 })()
 
+/**
+ * Largest animated source the proxy serves through untouched, in bytes.
+ *
+ * An animated GIF used to be handed back as it was at every size, because a
+ * Sharp resize that forgets `animated: true` renders the first frame and ships a
+ * still. That is why the LCP element of a feed page could be a 1.5MB GIF that
+ * `?width=320` did nothing to. Above this size the animation is re-rendered at
+ * the requested size (see animated.ts), which only keeps the result if it still
+ * holds every frame and is smaller.
+ *
+ * Below it the encode is not worth its CPU: stickers and emotes are already
+ * small, and a re-encode of one saves a few KB at best. Configurable via
+ * `animated_passthrough_max_size`; 0 transforms every animated source.
+ */
+export const ANIMATED_PASSTHROUGH_MAX_SIZE = (() => {
+    if (!config.has('animated_passthrough_max_size')) { return 100_000 }
+    // TOML parses this as a number; Number() also tolerates a string override.
+    const v = Number(config.get('animated_passthrough_max_size'))
+    return Number.isSafeInteger(v) && v >= 0 ? v : 100_000
+})()
+
 /** Special empty image indicator - used to denote "proxy without resizing" */
 export const SPECIAL_EMPTY_IMAGE_PATH = '0x0'
 
