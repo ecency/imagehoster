@@ -82,6 +82,15 @@ export interface AnimatedGifOptions {
      * which is what a gifsicle-optimised GIF from a post body looks like.
      */
     localPalette?: boolean
+    /**
+     * Repeat each drawn pose this many times, so the GIF holds still between
+     * moves. Real animations do this constantly (a talking head between words, a
+     * loop that pauses on its punchline) and it is what makes an encoder merge
+     * frames: libwebp writes one frame carrying the whole held delay.
+     */
+    hold?: number
+    /** Times to play the animation, as the NETSCAPE2.0 block stores it; 0 is forever. */
+    loop?: number
 }
 
 export function makeAnimatedGif(options: AnimatedGifOptions = {}): Buffer {
@@ -91,6 +100,8 @@ export function makeAnimatedGif(options: AnimatedGifOptions = {}): Buffer {
     const delay = options.delay ?? 10
     const noisy = options.noisy ?? true
     const localPalette = options.localPalette ?? false
+    const hold = Math.max(1, options.hold ?? 1)
+    const loop = options.loop ?? 0
 
     const palette = Buffer.alloc(256 * 3)
     for (let i = 0; i < 256; i++) {
@@ -107,25 +118,29 @@ export function makeAnimatedGif(options: AnimatedGifOptions = {}): Buffer {
     screen[4] = 0x80 | (7 << 4) | 7  // global colour table, 8-bit colour, 256 entries
     parts.push(screen, palette)
 
-    // NETSCAPE2.0 application extension: loop forever
-    parts.push(Buffer.from([0x21, 0xff, 0x0b]), Buffer.from('NETSCAPE2.0', 'ascii'),
-               Buffer.from([0x03, 0x01, 0x00, 0x00, 0x00]))
+    // NETSCAPE2.0 application extension: how many times to play, 0 being forever
+    const netscape = Buffer.from([0x03, 0x01, 0x00, 0x00, 0x00])
+    netscape.writeUInt16LE(loop, 2)
+    parts.push(Buffer.from([0x21, 0xff, 0x0b]), Buffer.from('NETSCAPE2.0', 'ascii'), netscape)
 
+    const poses = Math.ceil(frames / hold)
     for (let f = 0; f < frames; f++) {
+        // Frames within one hold are drawn identically, byte for byte.
+        const pose = Math.floor(f / hold)
         const pixels = Buffer.alloc(width * height)
         for (let y = 0; y < height; y++) {
             const row = y * width
             if (noisy) {
                 for (let x = 0; x < width; x++) {
-                    pixels[row + x] = (((x * 7919 + y * 104729 + f * 15485863) ^ (x * y)) >>> 3) & 0xff
+                    pixels[row + x] = (((x * 7919 + y * 104729 + pose * 15485863) ^ (x * y)) >>> 3) & 0xff
                 }
             } else {
                 pixels.fill(((y >> 4) * 16) & 0xff, row, row + width)
             }
         }
-        // A block that moves between frames, so the frames differ from each other
+        // A block that moves between poses, so the poses differ from each other
         const blockSize = Math.max(4, Math.floor(Math.min(width, height) / 5))
-        const left = Math.floor((f / frames) * (width - blockSize))
+        const left = Math.floor((pose / poses) * (width - blockSize))
         const top = Math.floor(height / 3)
         for (let y = top; y < Math.min(top + blockSize, height); y++) {
             pixels.fill(200, y * width + left, y * width + left + blockSize)
