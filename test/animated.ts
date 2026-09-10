@@ -6,7 +6,8 @@ import sharp from 'sharp'
 
 import {app} from './../src/app'
 import {
-    animatedOutputType, animatedRenderPlan, countGifFrames, countWebpFrames, renderAnimatedVariant,
+    animatedOutputType, animatedRenderPlan, countGifFrames, countWebpFrames, readAnimation,
+    readGifAnimation, readWebpAnimation, renderAnimatedVariant,
 } from './../src/animated'
 import {ANIMATED_PASSTHROUGH_MAX_SIZE} from './../src/constants'
 import {base58Enc, OutputFormat, ProxyOptions, ScalingMode} from './../src/utils'
@@ -168,6 +169,96 @@ describe('animated sources', function() {
         })
     })
 
+    /**
+     * The guard's real subject. What has to survive a re-encode is the animation
+     * AS IT PLAYS, and libwebp reaches that by merging consecutive identical
+     * frames and adding their delays together. Counting frames called those
+     * correct renders failures and served multi-MB sources instead of them.
+     */
+    describe('reading an animation off its own container', function() {
+
+        it('reads frames, running time and loop count from a GIF', function() {
+            const gif = makeAnimatedGif({frames: 5, delay: 12, noisy: false, loop: 0})
+            assert.deepEqual(readGifAnimation(gif), {frames: 5, durationMs: 600, loop: 0})
+        })
+
+        // A GIF's NETSCAPE2.0 block stores REPEATS AFTER the first play; a WebP's
+        // ANIM chunk stores TOTAL plays. libvips does that conversion when it
+        // transcodes, so a reader that returned the stored 3 here would compare
+        // it against the WebP's 4 and reject every correct render of a
+        // finite-loop GIF. Both readers report plays.
+        it('reads a finite loop count as the number of plays', function() {
+            const gif = makeAnimatedGif({frames: 4, delay: 10, noisy: false, loop: 3})
+            assert.equal(readGifAnimation(gif).loop, 4)
+        })
+
+        it('agrees with the WebP a finite-loop GIF transcodes into', async function() {
+            this.timeout(20000)
+            const gif = makeAnimatedGif({width: 120, height: 90, frames: 5, delay: 10, noisy: true, loop: 3})
+            const webp = await sharp(gif, {animated: true}).resize(60)
+                .webp({quality: 80, force: true}).toBuffer()
+            assert.equal(readWebpAnimation(webp).loop, readGifAnimation(gif).loop)
+        })
+
+        // Bytes past the endpoint the RIFF header declares are not chunks. Reading
+        // them as chunks would let anything chunk-shaped rewrite the frame count
+        // or the loop, and reject a render that is perfectly good.
+        it('stops where the RIFF header says the file ends', async function() {
+            this.timeout(20000)
+            const gif = makeAnimatedGif({width: 120, height: 90, frames: 6, delay: 10, noisy: true})
+            const webp = await sharp(gif, {animated: true}).resize(60)
+                .webp({quality: 80, force: true}).toBuffer()
+            const clean = readWebpAnimation(webp)
+            assert.equal(clean.frames, 6)
+
+            // An ANIM chunk claiming a loop of 9, and an extra frame, appended
+            // after the container's own end.
+            const anim = Buffer.alloc(8 + 6)
+            anim.write('ANIM', 0, 'ascii')
+            anim.writeUInt32LE(6, 4)
+            anim.writeUInt16LE(9, 8 + 4)
+            const anmf = Buffer.alloc(8 + 16)
+            anmf.write('ANMF', 0, 'ascii')
+            anmf.writeUInt32LE(16, 4)
+            anmf.writeUIntLE(5000, 8 + 12, 3)
+
+            const trailing = Buffer.concat([webp, anim, anmf])
+            assert.deepEqual(readWebpAnimation(trailing), clean)
+        })
+
+        // A GIF that asks for 0 or 1 hundredths does not play that fast anywhere:
+        // browsers have clamped anything under 20ms to 100ms for decades, and
+        // libwebp writes that same 100ms when it re-encodes one. Reading the
+        // stored value instead would call a correct re-encode a mismatch.
+        it('reads a sub-20ms frame as the 100ms it actually plays at', function() {
+            for (const delay of [0, 1]) {
+                const gif = makeAnimatedGif({frames: 5, delay, noisy: false})
+                assert.equal(readGifAnimation(gif).durationMs, 500, `delay ${delay}`)
+            }
+            // 2 hundredths is exactly at the boundary and is left alone
+            assert.equal(readGifAnimation(makeAnimatedGif({frames: 5, delay: 2, noisy: false})).durationMs, 100)
+        })
+
+        it('reads them back off a WebP the encoder wrote', async function() {
+            this.timeout(20000)
+            const gif = makeAnimatedGif({width: 120, height: 90, frames: 6, delay: 10, noisy: true})
+            const webp = await sharp(gif, {animated: true}).resize(60).webp({quality: 80, force: true}).toBuffer()
+            const facts = readWebpAnimation(webp)
+            assert.equal(facts.frames, 6)
+            assert.equal(facts.durationMs, readGifAnimation(gif).durationMs)
+            assert.equal(facts.loop, 0)
+        })
+
+        it('reports a still as no animation at all', async function() {
+            this.timeout(20000)
+            const still = await sharp({create: {width: 20, height: 20, channels: 3,
+                background: {r: 1, g: 2, b: 3}}}).webp().toBuffer()
+            assert.equal(readWebpAnimation(still).frames, 0)
+            assert.equal(readAnimation(Buffer.from('not an image'), 'image/gif').frames, 0)
+            assert.equal(readAnimation(still, 'image/jpeg').frames, 0)
+        })
+    })
+
     describe('rendering keeps the animation', function() {
         const encode = (image: sharp.Sharp) => image.toBuffer()
 
@@ -221,6 +312,70 @@ describe('animated sources', function() {
             assert.equal(rendered.loop, metadata.loop)
         })
 
+        /**
+         * The regression this guard change exists for. A GIF that holds a pose
+         * comes back from libwebp with fewer, longer frames: the same animation,
+         * fewer container entries. Counting frames threw these away and served
+         * the source, which on the GIF that started this work meant 1.5MB instead
+         * of 169KB.
+         */
+        it('accepts a render whose frames were merged, as long as it still plays the same', async function() {
+            this.timeout(20000)
+            const held = makeAnimatedGif({width: 200, height: 150, frames: 32, hold: 4, delay: 10, noisy: true})
+            const source = readGifAnimation(held)
+            const metadata = await sharp(held).metadata()
+            const out = await renderAnimatedVariant({
+                bytes: held, metadata, options: negotiatedWebp({width: 100}),
+                acceptHeader: WEBP_ACCEPT, encode, log: console,
+            })
+            assert.ok(out, 'expected a render, got a passthrough')
+            const facts = readWebpAnimation(out!.buffer)
+            // The merge really happened, so this is not a vacuous pass...
+            assert.ok(facts.frames < source.frames,
+                `expected fewer than ${source.frames} frames, got ${facts.frames}`)
+            // ...and what matters survived it.
+            assert.ok(facts.frames >= 2, 'still an animation')
+            assert.equal(facts.durationMs, source.durationMs)
+            assert.equal(facts.loop, source.loop)
+            assert.ok(out!.buffer.length < held.length / 2)
+        })
+
+        it('hands the source back when the render would play for a different length of time', async function() {
+            this.timeout(20000)
+            const metadata = await sharp(bigGif).metadata()
+            // A real animated WebP of the right shape, and the wrong duration:
+            // same eight frames, each declaring five times the delay.
+            const slower = makeAnimatedGif({width: 200, height: 150, frames: 8, delay: 50, noisy: true})
+            const dropped: any[] = []
+            const out = await renderAnimatedVariant({
+                bytes: bigGif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
+                encode: () => sharp(slower, {animated: true}).resize(100)
+                    .webp({quality: 80, force: true}).toBuffer(),
+                log: {warn: () => undefined, error: () => undefined, debug: () => undefined},
+                onFramesDropped: (info) => dropped.push(info),
+            })
+            assert.equal(out, undefined)
+            assert.equal(dropped[0].reason, 'duration')
+            assert.equal(dropped[0].expectedDurationMs, readGifAnimation(bigGif).durationMs)
+        })
+
+        it('hands the source back when the render would stop looping', async function() {
+            this.timeout(20000)
+            const metadata = await sharp(bigGif).metadata()
+            const once = makeAnimatedGif({width: 200, height: 150, frames: 8, delay: 10, noisy: true, loop: 1})
+            const dropped: any[] = []
+            const out = await renderAnimatedVariant({
+                bytes: bigGif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
+                // Same frames, same running time, plays through once instead of forever.
+                encode: () => sharp(once, {animated: true}).resize(100)
+                    .webp({quality: 80, force: true, loop: 1}).toBuffer(),
+                log: {warn: () => undefined, error: () => undefined, debug: () => undefined},
+                onFramesDropped: (info) => dropped.push(info),
+            })
+            assert.equal(out, undefined)
+            assert.equal(dropped[0].reason, 'loop')
+        })
+
         it('hands the source back when the render would not be smaller', async function() {
             this.timeout(20000)
             const metadata = await sharp(bigGif).metadata()
@@ -247,7 +402,10 @@ describe('animated sources', function() {
                 onFramesDropped: (info) => dropped.push(info),
             })
             assert.equal(out, undefined)
-            assert.deepEqual(dropped, [{expected: 8, got: 0, outputType: 'image/webp'}])
+            assert.equal(dropped.length, 1)
+            assert.equal(dropped[0].reason, 'de-animated')
+            assert.equal(dropped[0].got, 0)
+            assert.equal(dropped[0].outputType, 'image/webp')
         })
 
         it('hands the source back when Sharp cannot render it', async function() {

@@ -18,13 +18,19 @@
  *    cannot: handed a multi-page pipeline they write the frames as one tall
  *    "filmstrip" still. An animated source is therefore only ever encoded to
  *    animated WebP (for a client that takes WebP) or back to GIF.
- *  - The bytes we are about to serve must carry the same number of frames as the
- *    source, counted off the output container itself, and must be smaller than
- *    the source. Either check failing hands the original bytes back.
+ *  - The bytes we are about to serve must still PLAY as the source did, read off
+ *    the output container itself, and must be smaller than the source. Either
+ *    check failing hands the original bytes back.
  *
- * The frame count is read from the container rather than from a second libvips
- * decode on purpose: the thing being guarded against is libvips dropping frames,
- * so asking libvips whether it dropped any is not an independent answer.
+ * "Plays as the source did" is not "has as many frames as the source". libwebp
+ * merges consecutive identical frames and adds their delays together, so a
+ * correct re-encode of a GIF that holds a pose comes back with fewer frames and
+ * the same running time (150 -> 35 on the GIF that started this work). The test
+ * is therefore: still an animation, same total duration, same loop count.
+ *
+ * All of that is read from the container rather than from a second libvips
+ * decode on purpose: the thing being guarded against is libvips losing an
+ * animation, so asking libvips whether it lost one is not an independent answer.
  */
 
 import Sharp from 'sharp'
@@ -39,13 +45,56 @@ export type AnimatedOutputType = 'image/webp' | 'image/gif'
 /**
  * Frames declared by a GIF's own container: one per image descriptor.
  *
- * The walk skips extension blocks and each frame's LZW sub-blocks by their
- * length bytes, so it costs a handful of jumps per frame, not a decode. Anything
- * it cannot follow ends the walk and reports what it counted so far, which
- * fails the equality check at the call site rather than passing on a guess.
+ * Reads the same walk as readGifAnimation, so the two can never disagree about
+ * what a container holds.
  */
 export function countGifFrames(buffer: Buffer): number {
-    if (buffer.length < 13 || buffer.toString('ascii', 0, 3) !== 'GIF') { return 0 }
+    return readGifAnimation(buffer).frames
+}
+
+/**
+ * Frames declared by a WebP's own RIFF container: one per ANMF chunk, and only
+ * when the ANIM chunk that makes the file an animation is present.
+ */
+export function countWebpFrames(buffer: Buffer): number {
+    return readWebpAnimation(buffer).frames
+}
+/**
+ * What a container says about its own animation.
+ *
+ * `durationMs` is PLAYBACK time, not the sum of the delays a container stores.
+ * A GIF frame that declares less than 20ms plays at 100ms: browsers have clamped
+ * it that way for decades, and libwebp writes that same 100ms when it re-encodes
+ * one. Comparing raw stored delays would call that correct re-encode a mismatch.
+ */
+export interface AnimationFacts {
+    frames: number
+    durationMs: number
+    /**
+     * Times the animation PLAYS, 0 being forever. Normalised, because the two
+     * containers count differently: a GIF's NETSCAPE2.0 block stores repeats
+     * after the first play, a WebP's ANIM chunk stores total plays.
+     */
+    loop: number
+}
+
+/** A stored GIF delay, in hundredths of a second, as the frame actually plays. */
+function gifDelayMs(hundredths: number): number {
+    const ms = hundredths * 10
+    return ms < 20 ? 100 : ms
+}
+
+/**
+ * Frames, playback duration and loop count declared by a GIF's own container.
+ *
+ * The walk skips extension blocks and each frame's LZW sub-blocks by their
+ * length bytes, so it costs a handful of jumps per frame, not a decode. Anything
+ * it cannot follow ends the walk and reports what it read so far, which fails
+ * the check at the call site rather than passing on a guess.
+ */
+export function readGifAnimation(buffer: Buffer): AnimationFacts {
+    const facts: AnimationFacts = {frames: 0, durationMs: 0, loop: 1}
+    if (buffer.length < 13 || buffer.toString('ascii', 0, 3) !== 'GIF') { return facts }
     const packed = buffer[10]
     let p = 13
     // Global colour table, when the screen descriptor says there is one
@@ -54,17 +103,33 @@ export function countGifFrames(buffer: Buffer): number {
         while (p < buffer.length && buffer[p] !== 0) { p += buffer[p] + 1 }
         p++
     }
-    let frames = 0
+    // The delay a Graphic Control Extension sets for the frame that follows it.
+    let pending = 0
     while (p < buffer.length) {
         const block = buffer[p]
         if (block === 0x3b) { break }           // trailer
         if (block === 0x21) {                   // extension: label + sub-blocks
+            const label = buffer[p + 1]
+            if (label === 0xf9 && p + 7 < buffer.length) {
+                pending = buffer.readUInt16LE(p + 4)
+            } else if (label === 0xff && buffer.toString('ascii', p + 3, p + 14) === 'NETSCAPE2.0' &&
+                       p + 19 < buffer.length && buffer[p + 14] === 0x03 && buffer[p + 15] === 0x01) {
+                // GIF counts REPEATS AFTER the first play; WebP's ANIM counts total
+                // plays. Normalising here is what lets the two be compared at all:
+                // libvips reads a GIF's stored 3 as 4 and writes ANIM 4, so an
+                // unnormalised reader rejects every correct render of a
+                // finite-loop GIF. 0 means forever in both and stays 0.
+                const stored = buffer.readUInt16LE(p + 16)
+                facts.loop = stored === 0 ? 0 : stored + 1
+            }
             p += 2
             skipSubBlocks()
             continue
         }
         if (block === 0x2c) {                   // image descriptor: one frame
-            frames++
+            facts.frames++
+            facts.durationMs += gifDelayMs(pending)
+            pending = 0
             const localPacked = buffer[p + 9]
             p += 10
             if (localPacked & 0x80) { p += 3 * (1 << ((localPacked & 0x07) + 1)) }
@@ -74,37 +139,88 @@ export function countGifFrames(buffer: Buffer): number {
         }
         break                                   // not a block boundary any more
     }
-    return frames
+    return facts
 }
 
 /**
- * Frames declared by a WebP's own RIFF container: one per ANMF chunk, and only
- * when the ANIM chunk that makes the file an animation is present.
+ * Frames, playback duration and loop count declared by a WebP's own RIFF
+ * container: one ANMF chunk per frame, carrying its own duration, and the ANIM
+ * chunk that makes the file an animation at all.
  */
-export function countWebpFrames(buffer: Buffer): number {
+export function readWebpAnimation(buffer: Buffer): AnimationFacts {
+    const facts: AnimationFacts = {frames: 0, durationMs: 0, loop: 1}
     if (buffer.length < 16 ||
         buffer.toString('ascii', 0, 4) !== 'RIFF' ||
-        buffer.toString('ascii', 8, 12) !== 'WEBP') { return 0 }
+        buffer.toString('ascii', 8, 12) !== 'WEBP') { return facts }
+    // The walk stops where the RIFF header says the file does, not where the
+    // buffer does. Bytes appended past that endpoint are not chunks, and reading
+    // them as chunks would let anything chunk-shaped rewrite the frame count or
+    // the loop of a container that never declared it.
+    const declared = buffer.readUInt32LE(4) + 8
+    const end = Math.min(declared, buffer.length)
     let p = 12
-    let frames = 0
     let isAnimation = false
-    while (p + 8 <= buffer.length) {
+    while (p + 8 <= end) {
         const tag = buffer.toString('ascii', p, p + 4)
         const size = buffer.readUInt32LE(p + 4)
-        if (tag === 'ANIM') { isAnimation = true }
-        if (tag === 'ANMF') { frames++ }
-        p += 8 + size + (size % 2)              // chunks are padded to even length
+        const payload = p + 8
+        // A chunk whose declared payload runs past the container is malformed;
+        // there is nothing after it worth reading either.
+        if (payload + size > end) { break }
+        if (tag === 'ANIM' && size >= 6) {
+            isAnimation = true
+            facts.loop = buffer.readUInt16LE(payload + 4)   // after a 4-byte background colour
+        }
+        if (tag === 'ANMF' && size >= 16) {
+            facts.frames++
+            // 3+3 byte offset, 3+3 byte size, then a 24-bit little-endian duration
+            facts.durationMs += buffer.readUIntLE(payload + 12, 3)
+        }
+        p = payload + size + (size % 2)         // chunks are padded to even length
     }
-    return isAnimation ? frames : 0
+    return isAnimation ? facts : {frames: 0, durationMs: 0, loop: 1}
 }
 
-/** Frames the given bytes declare, for the output types we encode animations to. */
-export function countAnimationFrames(buffer: Buffer, contentType: string): number {
+/** What the given bytes declare, for the containers this file reads and writes. */
+export function readAnimation(buffer: Buffer, contentType: string): AnimationFacts {
     switch (contentType) {
-        case 'image/gif': return countGifFrames(buffer)
-        case 'image/webp': return countWebpFrames(buffer)
-        default: return 0
+        case 'image/gif': return readGifAnimation(buffer)
+        case 'image/webp': return readWebpAnimation(buffer)
+        default: return {frames: 0, durationMs: 0, loop: 1}
     }
+}
+
+/** The container a Sharp `metadata.format` names, for the two we can read. */
+function sourceContainerType(format?: string): string {
+    return format === 'gif' ? 'image/gif' : format === 'webp' ? 'image/webp' : ''
+}
+
+/**
+ * Why the rendered bytes are not the source's animation, or undefined when they
+ * are.
+ *
+ * Frame count is deliberately NOT the test. libwebp merges consecutive identical
+ * frames and adds their delays together, so a correct re-encode of a GIF that
+ * holds a pose routinely comes back with far fewer frames than it went in with
+ * (measured in production: 150 -> 35, and 167 -> 91, both playing identically).
+ * Judging those by count threw the whole render away and served multi-MB sources
+ * instead. What has to survive is the animation as it plays: still animated,
+ * same total running time, same loop count.
+ *
+ * A source container this file cannot read leaves nothing to compare against, so
+ * that case keeps the old exact-count check rather than trusting the render.
+ */
+function animationLost(source: AnimationFacts, rendered: AnimationFacts, planned: number):
+        'de-animated' | 'duration' | 'loop' | 'frames' | undefined {
+    // Whatever else changed, bytes that are no longer an animation are the
+    // failure this path exists to catch: a still where a moving image belongs.
+    if (rendered.frames < 2) { return 'de-animated' }
+    if (source.frames < 1) {
+        return rendered.frames === planned ? undefined : 'frames'
+    }
+    if (rendered.durationMs !== source.durationMs) { return 'duration' }
+    if (rendered.loop !== source.loop) { return 'loop' }
+    return undefined
 }
 
 /**
@@ -177,7 +293,14 @@ export async function renderAnimatedVariant(input: {
     acceptHeader: string,
     encode: (image: Sharp.Sharp) => Promise<Buffer>,
     log: any,
-    onFramesDropped?: (info: {expected: number, got: number, outputType: AnimatedOutputType}) => void
+    onFramesDropped?: (info: {
+        reason: string,
+        expected: number,
+        got: number,
+        expectedDurationMs?: number,
+        gotDurationMs: number,
+        outputType: AnimatedOutputType,
+    }) => void
     /**
      * The encoder threw. Distinct from every other `undefined` this returns: those
      * are deliberate passthroughs whose result is worth caching, while this one may
@@ -212,15 +335,22 @@ export async function renderAnimatedVariant(input: {
         return undefined
     }
 
-    const frames = countAnimationFrames(buffer, plan.outputType)
-    if (frames !== plan.frames) {
+    const rendered = readAnimation(buffer, plan.outputType)
+    const source = readAnimation(input.bytes, sourceContainerType(input.metadata.format))
+    const reason = animationLost(source, rendered, plan.frames)
+    if (reason) {
         // The one outcome this whole path exists to prevent. Serve the source and
         // tell someone: it means this libvips no longer round-trips animation.
-        input.log.error({expected: plan.frames, got: frames, outputType: plan.outputType},
-            'animated render lost frames, serving source untouched')
-        if (input.onFramesDropped) {
-            input.onFramesDropped({expected: plan.frames, got: frames, outputType: plan.outputType})
+        const info = {
+            reason,
+            expected: plan.frames,
+            got: rendered.frames,
+            expectedDurationMs: source.frames > 0 ? source.durationMs : undefined,
+            gotDurationMs: rendered.durationMs,
+            outputType: plan.outputType,
         }
+        input.log.error(info, 'animated render lost the animation, serving source untouched')
+        if (input.onFramesDropped) { input.onFramesDropped(info) }
         return undefined
     }
 
