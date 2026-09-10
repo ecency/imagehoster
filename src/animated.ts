@@ -275,8 +275,8 @@ export function animatedRenderPlan(input: {
     if (width * height > MAX_INPUT_PIXELS) { return undefined }
     // The frames together answer to their own, much larger budget. libvips
     // streams an animated pipeline rather than holding every frame at once, so
-    // adding frames costs time, not memory, and the time is already bounded by
-    // the encode slot gate and the abort signal. See MAX_ANIMATED_INPUT_PIXELS.
+    // adding frames costs time rather than memory, and time is what that budget
+    // is sized against. See MAX_ANIMATED_INPUT_PIXELS.
     if (pages * width * height > MAX_ANIMATED_INPUT_PIXELS) { return undefined }
     return {frames: pages, outputType: animatedOutputType(input.options)}
 }
