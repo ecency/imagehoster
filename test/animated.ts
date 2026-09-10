@@ -133,14 +133,38 @@ describe('animated sources', function() {
             }), undefined)
         })
 
-        it('passes through when every frame together blows the pixel budget', function() {
+        it('passes through a source with one enormous frame', function() {
+            // The still-image budget is about ONE frame's memory, and this is the
+            // decompression bomb it was written for.
             assert.equal(plan({
                 byteLength: bigGif.length,
-                // one frame is fine, 4000 of them are not
-                metadata: {pages: 4000, width: 1000, height: 1000},
+                metadata: {pages: 4, width: 16000, height: 16000},
                 options: fitOptions(),
                 acceptHeader: WEBP_ACCEPT,
             }), undefined)
+        })
+
+        it('passes through when every frame together blows the animated budget', function() {
+            assert.equal(plan({
+                byteLength: bigGif.length,
+                // Each frame is ordinary; a thousand of them is not.
+                metadata: {pages: 1000, width: 1000, height: 1000},
+                options: fitOptions(),
+                acceptHeader: WEBP_ACCEPT,
+            }), undefined)
+        })
+
+        // The case this budget split exists for. Every frame is a normal photo
+        // and there are a lot of them, which is exactly what a heavy post-body
+        // GIF looks like: 1080x1350 over 150 frames is 219 MP, and the still
+        // budget rejected it while resizing 200KB stickers happily.
+        it('transforms an animation whose frames are ordinary but numerous', function() {
+            assert.deepEqual(plan({
+                byteLength: 1_572_008,
+                metadata: {pages: 150, width: 1080, height: 1350},
+                options: negotiatedWebp(),
+                acceptHeader: WEBP_ACCEPT,
+            }), {frames: 150, outputType: 'image/webp'})
         })
     })
 

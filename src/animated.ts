@@ -35,7 +35,7 @@
 
 import Sharp from 'sharp'
 
-import {ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_INPUT_PIXELS} from './constants'
+import {ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_INPUT_PIXELS, MAX_INPUT_PIXELS} from './constants'
 import {isEncodeAborted} from './encode-limit'
 import {applyProxyResize, buildSharpPipeline, OutputFormat, ProxyOptions, supportsWebP} from './utils'
 
@@ -270,10 +270,14 @@ export function animatedRenderPlan(input: {
     // Not worth the encode. A sticker is already small and a re-encode of one
     // saves a few KB at the price of a full multi-frame decode.
     if (input.byteLength <= ANIMATED_PASSTHROUGH_MAX_SIZE) { return undefined }
-    // An animated decode is the whole "toilet roll" of frames at once, so the
-    // pixel budget applies to every frame together. Past it there is no safe
-    // render, and the passthrough is what the request already got yesterday.
-    if (pages * width * height > MAX_INPUT_PIXELS) { return undefined }
+    // Each FRAME still answers to the still-image budget: one enormous frame is
+    // the decompression bomb that budget was written for, animated or not.
+    if (width * height > MAX_INPUT_PIXELS) { return undefined }
+    // The frames together answer to their own, much larger budget. libvips
+    // streams an animated pipeline rather than holding every frame at once, so
+    // adding frames costs time, not memory, and the time is already bounded by
+    // the encode slot gate and the abort signal. See MAX_ANIMATED_INPUT_PIXELS.
+    if (pages * width * height > MAX_ANIMATED_INPUT_PIXELS) { return undefined }
     return {frames: pages, outputType: animatedOutputType(input.options)}
 }
 
