@@ -885,6 +885,65 @@ export function primaryPageOf(metadata: {format?: string, pagePrimary?: number})
     return typeof metadata.pagePrimary === 'number' && metadata.pagePrimary > 0 ? metadata.pagePrimary : undefined
 }
 
+/**
+ * Stage the proxy's resize on a pipeline: the requested dimensions capped
+ * against the configured limits, or the standard cap when the caller asked for
+ * neither. Shared by the still and the animated render so an animation is sized
+ * by exactly the same rules as the still it replaced.
+ */
+export function applyProxyResize(
+    image: Sharp.Sharp,
+    metadata: {width?: number, height?: number},
+    options: ProxyOptions,
+): void {
+    const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
+    let width: number | undefined = safeParseInt(options.width)
+    let height: number | undefined = safeParseInt(options.height)
+
+    // Cap user-specified dimensions against custom limits
+    if (width !== undefined && width > 0) {
+        if (width > maxCustomWidth) { width = maxCustomWidth }
+    }
+    if (height !== undefined && height > 0) {
+        if (height > maxCustomHeight) { height = maxCustomHeight }
+    }
+
+    // When neither dimension is specified by the user, cap oversized images
+    // to default max limits to save bandwidth. Only apply when BOTH are
+    // unspecified — if one dimension is set, the other should auto-calculate
+    // from aspect ratio to avoid unnatural crops.
+    const bothUnspecified = (width === undefined || width === 0) && (height === undefined || height === 0)
+    if (bothUnspecified) {
+        if (metadata.width && metadata.width > maxWidth) { width = maxWidth }
+        if (metadata.height && metadata.height > maxHeight) { height = maxHeight }
+    }
+
+    // Convert 0 to undefined for Sharp (means auto-calculate based on aspect ratio)
+    if (width === 0) { width = undefined }
+    if (height === 0) { height = undefined }
+
+    switch (options.mode) {
+        case ScalingMode.Cover:
+            if (bothUnspecified) {
+                // User didn't request specific dimensions — preserve aspect ratio
+                image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
+            } else {
+                image.rotate().resize(width, height, {fit: 'cover'})
+            }
+            break
+        case ScalingMode.Fit:
+            // Only set defaults if BOTH dimensions are undefined
+            // If one dimension is defined, Sharp will auto-calculate the other
+            if (width === undefined && height === undefined) {
+                width = maxWidth
+                height = maxHeight
+            }
+
+            image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
+            break
+    }
+}
+
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
     return Sharp(buffer, {
         failOnError: false, animated, limitInputPixels: MAX_INPUT_PIXELS,

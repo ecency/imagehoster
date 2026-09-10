@@ -74,6 +74,14 @@ max_input_pixels = 100000000
 # this size only the variant is cached. 0 disables caching originals entirely.
 max_cached_original_size = 1000000 # 1mb
 
+# Largest animated source (GIF, animated WebP) served through untouched, in
+# bytes. Above this the proxy re-renders the animation at the requested size,
+# to animated WebP for a client that takes WebP and back to GIF otherwise; the
+# render is kept only if it holds every frame of the source and is smaller than
+# it. Small animations (stickers, emotes) are not worth the encode, so they keep
+# the passthrough. 0 transforms every animated source above zero bytes.
+animated_passthrough_max_size = 100000 # 100kb
+
 # redis db used for ratelimiting uploads
 # redis_url = 'redis://localhost'
 redis_url = 'redis://myredis'

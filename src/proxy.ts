@@ -26,18 +26,19 @@ import {
     cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, passthroughImage, Provenance,
     realImage, ServedImage, storeImage, worstOf,
 } from './served-image'
+import {renderAnimatedVariant} from './animated'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
 import {
     AcceptedContentTypes,
     applyMatchFallbackFormat,
+    applyProxyResize,
     assertPublicUrl,
     buildSharpPipeline,
     fetchUrl,
     getDefaultUrlAndParams,
     getImageKey,
-    getProxyImageLimits,
     getSharpMetadataWithRetry,
     hasValidInvalidateKey,
     isBlacklistedUrl,
@@ -51,7 +52,6 @@ import {
     ProxyOptions,
     purgeCache,
     readStream,
-    safeParseInt,
     ScalingMode,
     isStoreAbort,
     storeExists,
@@ -63,7 +63,8 @@ import {
     primaryPageOf,
     streamHeadBounded,
     supportsAvif,
-    supportsWebP
+    supportsWebP,
+    acceptsAnyImageType
 } from './utils'
 
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
@@ -707,61 +708,69 @@ export async function proxyHandler(ctx: KoaContext) {
         }
         APIError.assert(metadata.width && metadata.height, APIError.Code.InvalidImage)
 
-        // Animated images (GIF/APNG): skip Sharp pipeline entirely to preserve animation.
-        // Sharp resize can strip frames even with animated:true, so passthrough is the only safe option.
-        if (isAnimated && !options.blur) {
-            // deliberate passthrough of the animation, and a real variant for this
-            // key: every request for it gets these same bytes
+        // Animated sources (GIF, animated WebP, APNG) are re-rendered by a path of
+        // their own, which keeps every frame or hands the source back untouched
+        // (see animated.ts). A blur placeholder is not an animation: it is a ~20px
+        // LQIP, so it is rendered from the first frame below rather than decoding
+        // every frame to squash them into one.
+        let animatedRender: {buffer: Buffer, contentType: string} | undefined
+        // A render that THREW is not a passthrough decision: it may be transient,
+        // and storing the source under this variant's key would freeze the
+        // unresized original there for every later request.
+        let animatedRenderFailed = false
+        if (isAnimated && !options.blur && !isLegacy) {
+            animatedRender = await renderAnimatedVariant({
+                bytes: origin.bytes,
+                metadata,
+                options,
+                acceptHeader,
+                // {animated: true}: this encode walks every frame, so it must queue
+                // even at thumbnail sizes, which the size-based gate would wave through.
+                encode: (image) =>
+                    runEncode(() => image.toBuffer(), {...options, animated: true}, clientGoneSignal(ctx)),
+                log: ctx.log,
+                onFramesDropped: (info) => captureImageFailure('animated_frames_dropped', ctx,
+                    { urlString, imageKey, ...info }),
+                onRenderFailed: () => { animatedRenderFailed = true },
+            })
+        }
+        const clientRefusesWebp =
+            !supportsWebP(acceptHeader) && !acceptsAnyImageType(acceptHeader)
+
+        if (animatedRender && animatedRender.contentType === 'image/webp' && clientRefusesWebp) {
+            // The variant for this key is WebP (its options negotiated or asked for
+            // it), but THIS client enumerated the image types it reads and WebP was
+            // not among them — an AVIF-only Accept, say. Hand it the source, which
+            // every client can read, and do not store those bytes: the WebP variant
+            // stays correct for the clients the key belongs to.
+            //
+            // `*/*` and `image/*` are NOT this case: a client that names no image
+            // type told us nothing, so it keeps the smaller WebP.
+            ctx.tag({animated: 'source-for-client-without-webp'})
+            rendered = passthroughImage(origin.bytes, 'client does not accept the animated variant format')
+        } else if (animatedRender) {
+            ctx.tag({animated: animatedRender.contentType})
+            rendered = derive(origin, animatedRender.buffer)
+            contentType = animatedRender.contentType
+        } else if (animatedRenderFailed) {
+            // Serve the animation, but never as this key's variant: the next
+            // request has to be free to try the encode again.
+            ctx.tag({animated: 'render-failed'})
+            rendered = passthroughImage(origin.bytes, 'animated render failed, source served uncached')
+        } else if (isAnimated && !options.blur) {
+            // Nothing safe or worthwhile to render: a deliberate passthrough of the
+            // animation, and a real variant for this key, so every request for it
+            // gets these same bytes. Legacy requests are never stored, so they are
+            // never re-rendered either: the encode would be repeated per request.
+            ctx.tag({animated: 'passthrough'})
             rendered = origin
         } else {
-        const image = buildSharpPipeline(origin.bytes, isAnimated, isAnimated ? undefined : primaryPageOf(metadata))
+        // Reaching here with an animated source means a blur placeholder, which is
+        // rendered from the first frame: `animated` stays false, so libvips decodes
+        // one page instead of the whole roll.
+        const image = buildSharpPipeline(origin.bytes, false, primaryPageOf(metadata))
 
-        const { maxWidth, maxHeight, maxCustomWidth, maxCustomHeight } = getProxyImageLimits()
-        let width: number | undefined = safeParseInt(options.width)
-        let height: number | undefined = safeParseInt(options.height)
-
-        // Cap user-specified dimensions against custom limits
-        if (width !== undefined && width > 0) {
-          if (width > maxCustomWidth) { width = maxCustomWidth }
-        }
-        if (height !== undefined && height > 0) {
-          if (height > maxCustomHeight) { height = maxCustomHeight }
-        }
-
-        // When neither dimension is specified by the user, cap oversized images
-        // to default max limits to save bandwidth. Only apply when BOTH are
-        // unspecified — if one dimension is set, the other should auto-calculate
-        // from aspect ratio to avoid unnatural crops.
-        const bothUnspecified = (width === undefined || width === 0) && (height === undefined || height === 0)
-        if (bothUnspecified) {
-          if (metadata.width && metadata.width > maxWidth) { width = maxWidth }
-          if (metadata.height && metadata.height > maxHeight) { height = maxHeight }
-        }
-
-        // Convert 0 to undefined for Sharp (means auto-calculate based on aspect ratio)
-        if (width === 0) { width = undefined }
-        if (height === 0) { height = undefined }
-
-        switch (options.mode) {
-            case ScalingMode.Cover:
-                if (bothUnspecified) {
-                    // User didn't request specific dimensions — preserve aspect ratio
-                    image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
-                } else {
-                    image.rotate().resize(width, height, {fit: 'cover'})
-                }
-                break
-            case ScalingMode.Fit:
-                // Only set defaults if BOTH dimensions are undefined
-                // If one dimension is defined, Sharp will auto-calculate the other
-                if (width === undefined && height === undefined) {
-                    width = maxWidth
-                    height = maxHeight
-                }
-
-                image.rotate().resize(width, height, { fit: 'inside', withoutEnlargement: true })
-                break
-        }
+        applyProxyResize(image, metadata, options)
 
         switch (options.format) {
             case OutputFormat.Match:
@@ -826,7 +835,7 @@ export async function proxyHandler(ctx: KoaContext) {
             rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, reason)
             contentType = await mimeMagic(origin.bytes)
         }
-        } // end non-animated Sharp pipeline
+        } // end still Sharp pipeline
 
         // Legacy requests are never persisted (open proxy, see legacy-proxy.ts).
         // Everything else is decided by the value: storeImage writes a real render
