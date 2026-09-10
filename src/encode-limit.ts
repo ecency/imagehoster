@@ -217,9 +217,16 @@ export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSign
 export const ENCODE_GATE_MIN_PIXELS = 256 * 256
 
 /** Whether an encode for this output target is expensive enough to queue. */
-export function encodeNeedsSlot(target: {width?: number, height?: number, blur?: boolean}): boolean {
+export function encodeNeedsSlot(
+    target: {width?: number, height?: number, blur?: boolean, animated?: boolean},
+): boolean {
     // Blur placeholders are ~20px LQIP thumbnails regardless of the requested size.
     if (target.blur) { return false }
+    // An animated encode decodes and re-encodes every frame, so the size-based
+    // cheapness rule below does not hold for it: a 150x150 thumbnail of a 40-frame
+    // GIF is hundreds of milliseconds, not the ~13ms a still of that size costs.
+    // Feed thumbnails are exactly the sizes that would otherwise bypass the gate.
+    if (target.animated) { return true }
     const {width, height} = target
     // An unspecified target means "no resize" — it could be the full original, so gate it.
     if (!width || !height) { return true }
@@ -233,7 +240,7 @@ export function encodeNeedsSlot(target: {width?: number, height?: number, blur?:
  */
 export async function runEncode<T>(
     fn: () => Promise<T>,
-    target: {width?: number, height?: number, blur?: boolean},
+    target: {width?: number, height?: number, blur?: boolean, animated?: boolean},
     signal: AbortSignal | undefined,
 ): Promise<T> {
     // Check for a client that already left before either path. withEncodeSlot

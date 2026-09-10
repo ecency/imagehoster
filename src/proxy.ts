@@ -719,7 +719,10 @@ export async function proxyHandler(ctx: KoaContext) {
                 metadata,
                 options,
                 acceptHeader,
-                encode: (image) => runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx)),
+                // {animated: true}: this encode walks every frame, so it must queue
+                // even at thumbnail sizes, which the size-based gate would wave through.
+                encode: (image) =>
+                    runEncode(() => image.toBuffer(), {...options, animated: true}, clientGoneSignal(ctx)),
                 log: ctx.log,
                 onFramesDropped: (info) => captureImageFailure('animated_frames_dropped', ctx,
                     { urlString, imageKey, ...info }),

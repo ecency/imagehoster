@@ -23,6 +23,16 @@ const fitOptions = (over: Partial<ProxyOptions> = {}): ProxyOptions =>
 
 const WEBP_ACCEPT = 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
 
+/**
+ * What a WebP-accepting client's options look like BY THE TIME this code runs.
+ * parseOptions folds the Accept header into options.format before the render
+ * path sees it — an unspecified or `match` request from such a client is already
+ * AVIF or WEBP — so a unit-level fixture that passes `format: Match` plus a WebP
+ * Accept describes a request the proxy never makes.
+ */
+const negotiatedWebp = (over: Partial<ProxyOptions> = {}): ProxyOptions =>
+    fitOptions({format: OutputFormat.WEBP, ...over})
+
 describe('animated sources', function() {
 
     it('the fixture really is an animation, and big enough to be worth transforming', async function() {
@@ -88,10 +98,12 @@ describe('animated sources', function() {
         const plan = (over: Parameters<typeof animatedRenderPlan>[0]) => animatedRenderPlan(over)
 
         it('transforms a multi-page source over the ceiling', function() {
+            // negotiatedWebp, not fitOptions: by the time a plan is made, parseOptions
+            // has already turned a WebP-accepting client's `match` into WEBP.
             assert.deepEqual(plan({
                 byteLength: bigGif.length,
                 metadata: {pages: 8, width: 200, height: 150},
-                options: fitOptions(),
+                options: negotiatedWebp(),
                 acceptHeader: WEBP_ACCEPT,
             }), {frames: 8, outputType: 'image/webp'})
         })
@@ -132,21 +144,27 @@ describe('animated sources', function() {
     })
 
     describe('output format', function() {
-        it('is WebP for a client that names it', function() {
-            assert.equal(animatedOutputType(fitOptions(), WEBP_ACCEPT), 'image/webp')
-            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.WEBP}), ''), 'image/webp')
+        // parseOptions folds Accept into options.format before this runs, and the
+        // variant key is built from options — so the format must be a function of
+        // options ALONE. Reading Accept again here would hand two clients that
+        // share a key two different formats.
+        it('is WebP for a client whose negotiation landed on WebP or AVIF', function() {
+            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.WEBP})), 'image/webp')
+            // libvips cannot write an animated AVIF, so AVIF resolves to WebP —
+            // still the smaller animated format, and the same for every client
+            // that reaches this key.
+            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.AVIF})), 'image/webp')
         })
 
-        it('is WebP, never AVIF, when the client negotiated AVIF', function() {
-            // libvips cannot write an animated AVIF: handed a multi-page pipeline it
-            // writes the frames as one tall still.
-            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.AVIF}), WEBP_ACCEPT), 'image/webp')
+        it('is GIF for a client that negotiated neither', function() {
+            assert.equal(animatedOutputType(fitOptions()), 'image/gif')
         })
 
-        it('is GIF for a client that named neither', function() {
-            assert.equal(animatedOutputType(fitOptions(), 'image/*'), 'image/gif')
-            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.AVIF}), 'image/avif'), 'image/gif')
-            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.PNG}), 'image/png'), 'image/gif')
+        // The case that WAS header-dependent: same key for every client, but the
+        // bytes differed by Accept.
+        it('is GIF for an explicit still format, whatever the client accepts', function() {
+            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.PNG})), 'image/gif')
+            assert.equal(animatedOutputType(fitOptions({format: OutputFormat.JPEG})), 'image/gif')
         })
     })
 
@@ -157,7 +175,7 @@ describe('animated sources', function() {
             this.timeout(20000)
             const metadata = await sharp(bigGif).metadata()
             const out = await renderAnimatedVariant({
-                bytes: bigGif, metadata, options: fitOptions({width: 100}),
+                bytes: bigGif, metadata, options: negotiatedWebp({width: 100}),
                 acceptHeader: WEBP_ACCEPT, encode, log: console,
             })
             assert.ok(out, 'expected a render, got a passthrough')
@@ -221,7 +239,7 @@ describe('animated sources', function() {
             const metadata = await sharp(bigGif).metadata()
             const dropped: any[] = []
             const out = await renderAnimatedVariant({
-                bytes: bigGif, metadata, options: fitOptions({width: 100}), acceptHeader: WEBP_ACCEPT,
+                bytes: bigGif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
                 // What a Sharp that ignored `animated: true` would hand back: the
                 // first frame only. It must never be served as the variant.
                 encode: (image) => sharp(bigGif).resize(100).webp({quality: 80, force: true}).toBuffer(),
@@ -236,7 +254,7 @@ describe('animated sources', function() {
             this.timeout(20000)
             const metadata = await sharp(bigGif).metadata()
             const out = await renderAnimatedVariant({
-                bytes: bigGif, metadata, options: fitOptions({width: 100}), acceptHeader: WEBP_ACCEPT,
+                bytes: bigGif, metadata, options: negotiatedWebp({width: 100}), acceptHeader: WEBP_ACCEPT,
                 encode: () => Promise.reject(new Error('vips said no')),
                 log: {warn: () => undefined, error: () => undefined, debug: () => undefined},
             })
@@ -316,9 +334,15 @@ describe('animated sources', function() {
             this.timeout(20000)
             const res = await proxy('animated-avif.gif', '?width=100&format=avif', {accept: '*/*'})
             assert.equal(res.statusCode, 200)
+            // The point of the test: libvips writes a multi-page pipeline to AVIF
+            // as one tall still, so an animated source must never answer as AVIF.
             assert.notEqual(res.headers['content-type'], 'image/avif')
-            assert.equal(res.headers['content-type'], 'image/gif')
-            assert.equal(countGifFrames(res.body), 8)
+            // It answers WebP, the one format libvips can both write animated and
+            // every AVIF-capable client can decode. Which format it is must depend
+            // on the options alone, never on this request's Accept, because the
+            // variant key is built from the options.
+            assert.equal(res.headers['content-type'], 'image/webp')
+            assert.equal(countWebpFrames(res.body), 8)
         })
 
         it('leaves a small animated source untouched', async function() {

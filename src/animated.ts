@@ -117,8 +117,21 @@ export function countAnimationFrames(buffer: Buffer, contentType: string): numbe
  * can write, so an AVIF request that also accepts WebP is served WebP). A client
  * that named neither gets its GIF back, resized.
  */
-export function animatedOutputType(options: ProxyOptions, acceptHeader: string): AnimatedOutputType {
-    if (options.format === OutputFormat.WEBP || supportsWebP(acceptHeader)) {
+export function animatedOutputType(options: ProxyOptions): AnimatedOutputType {
+    // Decided by options alone, never by the Accept header directly. parseOptions
+    // has ALREADY folded Accept into options.format (an unspecified or `match`
+    // request becomes AVIF or WEBP for a client that takes them), and the variant
+    // key is built from options — so reading Accept a second time here could hand
+    // two clients that share a key two different formats. That is what happened
+    // for an explicit ?format=png or ?format=jpeg: same key for everyone, but WebP
+    // bytes for a WebP-accepting client and GIF bytes for the next one.
+    //
+    // AVIF maps to WebP rather than to itself because libvips cannot write an
+    // animated AVIF: handed a multi-page pipeline it writes the frames as one
+    // tall still. A negotiated AVIF client still gets the smaller animated
+    // format, and the key it read AVIF from stays consistent for every client
+    // that resolves to it.
+    if (options.format === OutputFormat.WEBP || options.format === OutputFormat.AVIF) {
         return 'image/webp'
     }
     return 'image/gif'
@@ -145,7 +158,7 @@ export function animatedRenderPlan(input: {
     // pixel budget applies to every frame together. Past it there is no safe
     // render, and the passthrough is what the request already got yesterday.
     if (pages * width * height > MAX_INPUT_PIXELS) { return undefined }
-    return {frames: pages, outputType: animatedOutputType(input.options, input.acceptHeader)}
+    return {frames: pages, outputType: animatedOutputType(input.options)}
 }
 
 /**

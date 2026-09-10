@@ -229,6 +229,22 @@ describe('encode concurrency limit', function() {
             assert.equal(encodeNeedsSlot({width: 1280}), true, 'half-specified is still unknown area')
         })
 
+        // The size rule reads pixel area, which says nothing about how many frames
+        // sit behind those pixels. A feed thumbnail of a 40-frame GIF is a few
+        // hundred milliseconds of decode+encode at 150x150 — a size the rule above
+        // waves straight through.
+        it('gates an animated encode at any size', function() {
+            assert.equal(encodeNeedsSlot({width: 150, height: 150, animated: true}), true,
+                'a thumbnail-sized animated encode still walks every frame')
+            assert.equal(encodeNeedsSlot({width: 64, height: 64, animated: true}), true)
+            assert.equal(encodeNeedsSlot({width: 150, height: 150}), false,
+                'the same size is still cheap for a still image')
+        })
+
+        it('still skips the gate for an animated BLUR, which is one frame', function() {
+            assert.equal(encodeNeedsSlot({width: 20, height: 20, animated: true, blur: true}), false)
+        })
+
         it('never gates a blur placeholder regardless of requested size', function() {
             assert.equal(encodeNeedsSlot({width: 1280, height: 1280, blur: true}), false)
         })
