@@ -154,6 +154,8 @@ Key configuration sections:
 - `max_image_size`, `max_image_width`, `max_image_height` - Size limits (`max_image_size` defaults to 20MB)
 - `max_cached_original_size` - Largest original the proxy cache keeps a copy of (default 1MB, `0` disables). Does not apply to avatar/cover originals, which are a bounded, frequently re-read set worth ~0.1% of the store
 - `animated_passthrough_max_size` - Largest animated source served through untouched (default 100KB). Above it the animation is re-rendered at the requested size; see src/animated.ts
+- `max_animated_input_pixels` - Frames x source width x height an animated source may be READ at (default 300M)
+- `max_animated_output_pixels_webp`, `max_animated_output_pixels_gif` - Frames x output width x height an animated render may WRITE, per output encoder (defaults 50M and 15M). Two numbers because GIF has to quantise every frame to 256 colours and WebP does not: measured over 144 renders of 13 real post GIFs, GIF costs 1.7x WebP at the median, 8x at p95 and ~18x on the same source at the same box. Past ~15 MP a re-encoded GIF saves a median 7% for several seconds of work. Replaces the single `max_animated_output_pixels` (removed, not aliased)
 - `default_avatar`, `default_cover` - Fallback images
 - `sentry_dsn` - Optional Sentry DSN for error tracking
 - `invalidate_token` - Optional token for cache invalidation API

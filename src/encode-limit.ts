@@ -205,7 +205,7 @@ function release(): void {
  * against a thread that is still busy and oversubscribe the pool — the exact
  * starvation RESERVED_POOL_SLOTS exists to prevent. Wasted work is bounded at
  * the other end instead, by not admitting an encode too big to finish quickly
- * (see MAX_ANIMATED_OUTPUT_PIXELS and the size gate below).
+ * (see MAX_ANIMATED_OUTPUT_PIXELS_WEBP / _GIF and the size gate below).
  */
 export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     await acquire(signal)

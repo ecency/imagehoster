@@ -9,7 +9,9 @@ import {
     animatedOutputType, animatedRenderPlan, countGifFrames, countWebpFrames, readAnimation,
     readGifAnimation, readWebpAnimation, renderAnimatedVariant,
 } from './../src/animated'
-import {ANIMATED_PASSTHROUGH_MAX_SIZE} from './../src/constants'
+import {
+    ANIMATED_PASSTHROUGH_MAX_SIZE, MAX_ANIMATED_OUTPUT_PIXELS_GIF, MAX_ANIMATED_OUTPUT_PIXELS_WEBP,
+} from './../src/constants'
 import {
     base58Enc, OutputFormat, ProxyOptions, resolveOutputBox, resolveProxyResize, ScalingMode,
 } from './../src/utils'
@@ -270,6 +272,56 @@ describe('animated sources', function() {
         it('declines to guess when the source dimensions are unknown', function() {
             assert.equal(resolveOutputBox({}, {width: 600, fit: 'inside', withoutEnlargement: true}), undefined)
             assert.equal(plan({width: 600}, {pages: 8, width: undefined, height: undefined}), undefined)
+        })
+
+        // #57. GIF costs several times what WebP does to write the same
+        // megapixel, because it has to quantise every frame to 256 colours,
+        // so one budget was too tight for one encoder and too loose for the
+        // other. The budget belongs to the encoder that is about to run.
+        describe('the budget belongs to the output encoder', function() {
+            // The #1802 source at the feed's own box: 400x500 over 150 frames,
+            // 30 MP of output. Inside WebP's budget, well over GIF's.
+            const feedSource = {pages: 150, width: 1080, height: 1350}
+            const atFeedBox = (format: OutputFormat) => animatedRenderPlan({
+                byteLength: 1_572_008,
+                metadata: feedSource,
+                options: {mode: ScalingMode.Fit, format, width: 600, height: 500},
+                acceptHeader: WEBP_ACCEPT,
+            })
+
+            const feedBoxPixels = (() => {
+                const box = resolveOutputBox(feedSource, resolveProxyResize(feedSource,
+                    {mode: ScalingMode.Fit, format: OutputFormat.WEBP, width: 600, height: 500}, true))
+                return feedSource.pages * box!.width * box!.height
+            })()
+
+            it('is not one number for both encoders', function() {
+                assert.ok(MAX_ANIMATED_OUTPUT_PIXELS_WEBP > MAX_ANIMATED_OUTPUT_PIXELS_GIF,
+                    'WebP is the cheaper encoder, so it is the one that may write more')
+                // Without this the fixture below proves nothing.
+                assert.ok(feedBoxPixels <= MAX_ANIMATED_OUTPUT_PIXELS_WEBP &&
+                          feedBoxPixels > MAX_ANIMATED_OUTPUT_PIXELS_GIF,
+                    `the 30 MP feed box must straddle the two budgets; it is ${feedBoxPixels}`)
+            })
+
+            it('renders the feed thumbnail for a client that takes WebP', function() {
+                assert.deepEqual(atFeedBox(OutputFormat.WEBP), {frames: 150, outputType: 'image/webp'})
+            })
+
+            it('passes the same box through for a client that refused WebP', function() {
+                // Measured over 54 real GIF renders: past ~15 MP a re-encoded GIF
+                // saves a median of 7% for several seconds of quantisation, and
+                // half the results come out bigger than the source and are thrown
+                // away. Not worth an encode slot.
+                assert.equal(atFeedBox(OutputFormat.Match), undefined)
+            })
+
+            it('reads the budget for the format the request resolved to, not the one it asked for', function() {
+                // AVIF cannot hold an animation, so it renders as WebP (see
+                // animatedOutputType), so it must spend WebP's budget,
+                // not the GIF budget its own name would suggest.
+                assert.deepEqual(atFeedBox(OutputFormat.AVIF), {frames: 150, outputType: 'image/webp'})
+            })
         })
     })
 

@@ -92,37 +92,81 @@ export const MAX_ANIMATED_INPUT_PIXELS = (() => {
 
 /**
  * Maximum pixels an animated render may PRODUCE: frames x output width x height.
+ * One budget per output encoder, because the two do not cost remotely the same.
  *
  * The input budget above cannot see this. What an animated encode costs is set
  * by the box it writes, multiplied by the frame count, and the box is chosen by
- * whoever wrote the URL (`?width`/`?height`). Measured on this build with
- * photographic frames, both encoders cost roughly 240ms per megapixel of OUTPUT:
+ * whoever wrote the URL (`?width`/`?height`). A single number covered both
+ * encoders until #57. It was calibrated on synthetic fixtures that put GIF and
+ * WebP within a few percent of each other; real sources do not behave that way.
  *
- *   400x400  x40  =  6.4 MP out -> 1.6s (gif) / 1.7s (webp)
- *   800x800  x40  = 25.6 MP out -> 5.8s (gif) / 6.1s (webp)
- *   800x800 x120  = 76.8 MP out -> (webp) 18.3s
+ * Re-measured through the whole renderAnimatedVariant path on 13 real animated
+ * GIFs taken from live posts, six output boxes each, sharp_concurrency 1
+ * (144 renders; a slower box than production, so these are upper bounds):
  *
- * (Flat, poster-like frames are an order of magnitude cheaper, which is why a
- * synthetic fixture makes this look free. Real post GIFs are not flat.)
+ *                    WebP        GIF
+ *   cheapest        22 ms/MP   127 ms/MP
+ *   p50            170 ms/MP   290 ms/MP
+ *   p95            293 ms/MP  2474 ms/MP
+ *   worst          644 ms/MP  4583 ms/MP
+ *   renders kept     68/78       39/66
+ *   median saving      83%         22%
  *
- * 50 MP therefore buys roughly 12 seconds in the worst case, and comfortably
- * admits the case this whole path exists for: the 1.57MB feed GIF is
- * 1080x1350 over 150 frames, and the feed's 600x500 thumbnail resolves to a
- * 400x500 box, so 30 MP of output, which renders in 2.7s. A full-size render of
- * a long animation lands above the ceiling and is passed through, which is what
- * it did before any of this existed. Configurable via `max_animated_output_pixels`.
+ * Three things follow, and only the first was visible before:
  *
- * This is a proxy for a wall-clock bound, which is the thing actually wanted; an
+ *  - GIF is the dearer encoder at every percentile, because it has to quantise
+ *    every frame down to a 256-colour palette and WebP never does. Same source,
+ *    same box, two sources measured at the 30 MP feed thumbnail: 2.8s vs 49.0s
+ *    and 6.0s vs 105.1s. Roughly 18x, twice. One budget therefore has to be
+ *    wrong in both directions at once.
+ *  - Cost per megapixel is NOT a property of the format. It spans 29x between
+ *    sources for WebP and 36x for GIF, driven by frame CONTENT rather than by
+ *    frame count or box size, so no single number is tight for every source.
+ *    #53 and #57 each sized this from one source and reached opposite answers.
+ *  - For GIF, cost and size have come apart completely: the dearest renders
+ *    measured are DOWNSCALES at SMALL output (4583 ms/MP at 7.4 MP, 34s), because
+ *    interpolating frames invents colours the palette then has to fit. A pixel
+ *    budget cannot see that case, and this one does not pretend to.
+ *
+ * WebP keeps the 50 MP it already had. It is deliberately NOT raised to the
+ * ~150 MP #57 proposed: that figure came from the #1802 source, which measures
+ * 23-92 ms/MP and is the cheapest in the sample, and 150 MP of a p95 source is
+ * 44s of encode against an edge that gives up at 20s.
+ *
+ * GIF drops to 15 MP, which is where its VALUE stops rather than where its cost
+ * starts. Above that line the sample spent 468s of encode across 21 renders, kept
+ * 15 of them (the rest came out bigger than the source and were thrown away), and
+ * those 15 saved a median of 7%. Below it a re-encoded GIF still earns its slot,
+ * saving 60-97%. The drop also closes a live hazard rather than only lost savings:
+ * a 30 MP feed thumbnail sits inside the old shared budget, and as GIF that is a
+ * 49-105s encode holding one of twelve service-wide slots long after the edge
+ * has hung up on the client that asked for it.
+ *
+ * Configurable via `max_animated_output_pixels_webp` and
+ * `max_animated_output_pixels_gif`. These replace the single
+ * `max_animated_output_pixels` #53 added a day earlier, which is gone rather
+ * than aliased: it was never documented as a knob, and neither production.toml
+ * nor the running container's environment set it.
+ *
+ * These stand in for a wall-clock bound, which is the thing actually wanted; an
  * encode cannot be interrupted once started (see the queued-only cancellation in
  * encode-limit.ts). Until it can, the size of the work has to be decided before
  * it starts.
  */
-export const MAX_ANIMATED_OUTPUT_PIXELS = (() => {
-    if (!config.has('max_animated_output_pixels')) { return 50_000_000 }
+function animatedOutputBudget(key: string, fallback: number): number {
+    if (!config.has(key)) { return fallback }
     // TOML parses this as a number; Number() also tolerates a string override.
-    const v = Number(config.get('max_animated_output_pixels'))
-    return Number.isSafeInteger(v) && v > 0 ? v : 50_000_000
-})()
+    const v = Number(config.get(key))
+    return Number.isSafeInteger(v) && v > 0 ? v : fallback
+}
+
+/** WebP: the cheaper encoder, and the one nearly every client resolves to. */
+export const MAX_ANIMATED_OUTPUT_PIXELS_WEBP =
+    animatedOutputBudget('max_animated_output_pixels_webp', 50_000_000)
+
+/** GIF: only reached by a client that refused WebP, and several times dearer. */
+export const MAX_ANIMATED_OUTPUT_PIXELS_GIF =
+    animatedOutputBudget('max_animated_output_pixels_gif', 15_000_000)
 
 /**
  * Largest original the proxy will keep a cached copy of, in bytes.
