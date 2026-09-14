@@ -23,7 +23,8 @@ const IMGUR_MIRROR_PREFIX = 'https://external-content.duckduckgo.com/iu/?u='
 const isImgurUrl = (urlString: string): boolean => {
     let host: string
     try {
-        host = new URL(urlString).hostname.toLowerCase()
+        // The trailing-dot FQDN form ("i.imgur.com.") names the same host
+        host = new URL(urlString).hostname.toLowerCase().replace(/\.$/, '')
     } catch (_e) {
         return false
     }

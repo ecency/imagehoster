@@ -64,8 +64,13 @@ describe('fallback mirror chain', function() {
         assert.deepEqual(candidates(), [https, source, IMGUR_MIRROR + encodeURIComponent(https)])
     })
 
-    it('covers imgur.com and its subdomains', async function() {
-        for (const source of ['https://imgur.com/mirror-apex-3.png', 'https://m.imgur.com/mirror-sub-4.png']) {
+    it('covers imgur.com and its subdomains, trailing-dot form included', async function() {
+        const sources = [
+            'https://imgur.com/mirror-apex-3.png',
+            'https://m.imgur.com/mirror-sub-4.png',
+            'https://i.imgur.com./mirror-fqdn-11.png',
+        ]
+        for (const source of sources) {
             requested = []
             answer = onlyImgurMirror
             const result = await fetch(source)
