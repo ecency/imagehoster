@@ -94,7 +94,9 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 **Fallback System** (src/fallback.ts, src/fetch-image.ts)
 - Multiple mirror attempt strategy for failed image fetches
 - HTTPS upgrade: http:// URLs are tried as https:// first (many servers block HTTP but serve HTTPS fine, e.g. hivebuzz.me)
-- Mirror chain: HTTPS upgrade → original URL → images.hive.blog/p/ → steemitimages.com/p/ → images.hive.blog/0x0/ → steemitimages.com/0x0/ → img.leopedia.io/0x0/ → wsrv.nl
+- Mirror chain (URL without query params): HTTPS upgrade → original URL → (imgur hosts only) DuckDuckGo image proxy → images.hive.blog/p/ → steemitimages.com/p/ → images.hive.blog/0x0/ → steemitimages.com/0x0/ → img.leopedia.io/0x0/ → wsrv.nl
+- Mirror chain (URL with query params): same up to steemitimages.com/p/, then wsrv.nl → images.hive.blog/0x0/ → steemitimages.com/0x0/ → img.leopedia.io/0x0/
+- imgur (`imgur.com` and its subdomains) refuses datacenter networks, so the origin and every public mirror fail for it. Those URLs get `external-content.duckduckgo.com/iu/?u=<encoded https url>` right after the origin (#62). It is an undocumented third-party endpoint, so it stays scoped to imgur; a first-party egress is tracked in #63. It answers a missing or non-image source with a 4xx, which the chain already treats as a failed candidate
 - URLs with query params: /p/ routes (base58) tried first (preserves params), /0x0/ routes tried last (lose params)
 - Serves default fallback image if all mirrors fail
 - Cache-Control: 2 minutes (max-age=120) for fallback images, 1 hour for successful avatars/covers, 1 year immutable for proxy images
