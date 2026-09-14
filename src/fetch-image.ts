@@ -14,6 +14,22 @@ import {
 } from './constants'
 import { assertPublicUrl, fetchUrl, getUrlHashKey, isBlacklistedUrl, NeedleResponse, redactUrlForLog } from './utils'
 
+// imgur refuses requests from datacenter networks, so the origin fetch and every
+// server-side mirror below fail the same way for its images. DuckDuckGo's image
+// proxy can still reach it. Scoped to imgur hosts on purpose: it is an
+// undocumented third-party endpoint, not a general mirror.
+const IMGUR_MIRROR_PREFIX = 'https://external-content.duckduckgo.com/iu/?u='
+
+const isImgurUrl = (urlString: string): boolean => {
+    let host: string
+    try {
+        host = new URL(urlString).hostname.toLowerCase()
+    } catch (_e) {
+        return false
+    }
+    return host === 'imgur.com' || host.endsWith('.imgur.com')
+}
+
 const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const hasQuery = urlString.indexOf('?') !== -1
     // Try HTTPS upgrade first for http:// URLs — many servers block HTTP
@@ -22,6 +38,8 @@ const buildFallbackUrls = (urlString: string, urlParams: string): string[] => {
     const urls: string[] = [
         ...(httpsUrl ? [httpsUrl] : []),
         urlString, // original URL
+        // Right after the origin, since the public mirrors cannot reach imgur either
+        ...(isImgurUrl(urlString) ? [IMGUR_MIRROR_PREFIX + encodeURIComponent(httpsUrl || urlString)] : []),
         // /p/ routes use base58 encoding — safely preserves query params
         'https://images.hive.blog/p/' + urlParams,
         'https://steemitimages.com/p/' + urlParams,
