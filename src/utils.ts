@@ -256,6 +256,20 @@ function hasPutBuffer(store: any): store is PutBufferStore {
     return typeof store.putBuffer === 'function'
 }
 
+/** Settles with `p`, or rejects with an AbortError once `signal` fires. A late rejection of `p` is swallowed. */
+function raceSignal<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+    p.catch(() => undefined)
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(storeAbortError(signal))
+        if (signal.aborted) { onAbort(); return }
+        signal.addEventListener('abort', onAbort, {once: true})
+        p.then(
+            (v) => { signal.removeEventListener('abort', onAbort); resolve(v) },
+            (e) => { signal.removeEventListener('abort', onAbort); reject(e) },
+        )
+    })
+}
+
 /**
  * Writes a blob. With a signal the S3 upload is aborted when it fires and the
  * caller gets an AbortError; a write on a request path is awaited before the
@@ -267,7 +281,11 @@ export async function storeWrite(store: AbstractBlobStore, key: BlobKey, data: B
     if (hasPutBuffer(store)) {
         const k = typeof key === 'string' ? key : (key as any).key
         if (signal && signal.aborted) { throw storeAbortError(signal) }
-        await store.putBuffer(k, buf, signal)
+        const put = store.putBuffer(k, buf, signal)
+        // the signal is passed down, but a store may ignore it (the fs store) and
+        // the S3 SDK does not cancel a retry backoff (a long Retry-After), so the
+        // caller is released at the signal either way
+        if (signal) { await raceSignal(put, signal) } else { await put }
         return { key: k }
     }
     return new Promise((resolve, reject) => {

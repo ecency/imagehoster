@@ -405,6 +405,22 @@ export const UPLOAD_WRITE_MAX_ATTEMPTS = 3
  */
 export const UPLOAD_DEADLINE_MS = EDGE_FIRST_BYTE_TIMEOUT_MS - 1500
 /**
+ * Time the PUT keeps for one full attempt (connect plus request floor). The
+ * dedupe HEAD only runs on time beyond this reserve, since the account and
+ * profile lookups before it share the same deadline and can leave little.
+ */
+export const UPLOAD_PUT_RESERVE_MS = S3_CONNECT_TIMEOUT_MS + UPLOAD_WRITE_REQUEST_TIMEOUT_MS
+/** Cap on the dedupe HEAD. It only saves a redundant PUT, so it gets a short leash. */
+export const UPLOAD_DEDUPE_TIMEOUT_MS = 1500
+
+/**
+ * Budget for the dedupe HEAD at `now`: whatever is left above the PUT reserve,
+ * capped at UPLOAD_DEDUPE_TIMEOUT_MS. Zero or less means skip the HEAD and write.
+ */
+export function uploadDedupeBudgetMs(deadlineAt: number, now: number = Date.now()): number {
+    return Math.min(UPLOAD_DEDUPE_TIMEOUT_MS, deadlineAt - now - UPLOAD_PUT_RESERVE_MS)
+}
+/**
  * Worst case for one unsignalled call: every attempt connects and then stalls
  * for the full request timeout. Pinned by a test to stay under the edge's 20 s
  * with room for backoff, because these floors are the only bound on calls made

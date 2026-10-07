@@ -75,8 +75,7 @@ describe('upload', function() {
             const {response, body} = await uploadImage(data, port)
             assert.equal(response.statusCode, 200)
             assert(hung >= 1, 'the stalled lookup was attempted')
-            // store_op_timeout_ms is 300 in the test config
-            assert(Date.now() - t0 < 3000, 'the stalled lookup costs at most one store budget')
+            assert(Date.now() - t0 < 4000, 'the stalled lookup costs at most UPLOAD_DEDUPE_TIMEOUT_MS')
             ;(uploadStore as any).exists = realExists
             const key = body.url.split('/').slice(-2)[0]
             const res = await needle('get', `:${ port }/${ key }/x.jpg`)

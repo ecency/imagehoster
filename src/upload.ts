@@ -11,7 +11,7 @@ import {accountBlacklist} from './blacklist'
 import {getAccount, getProfile, getRatelimit, HiveAccount, HiveAccountAuthority, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {logger} from './logger'
-import {budgetSignal, STORE_OP_TIMEOUT_MS, UPLOAD_DEADLINE_MS} from './constants'
+import {budgetSignal, UPLOAD_DEADLINE_MS, uploadDedupeBudgetMs} from './constants'
 import {AcceptedContentTypes, isStoreAbort, mimeMagic, readStream, storeExistsBounded, storeWrite} from './utils'
 
 const SERVICE_URL = new URL(config.get('service_url'))
@@ -145,12 +145,15 @@ function b64uToB64 (str: string) {
  *
  * The key is the content hash, so writing an existing image again is harmless:
  * a dedupe HEAD that stalls or fails reads as absent and the PUT goes ahead
- * rather than failing the upload. The PUT runs on the upload store's write
- * client (longer floors, retries) and is aborted at the deadline, which answers
+ * rather than failing the upload, and the HEAD is skipped outright when the
+ * lookups before it left no more than the PUT reserve. The PUT runs on the
+ * upload store's write client (longer floors, retries) and is aborted at the
+ * deadline, which answers
  * 504 so the client can tell a slow store from a broken upload.
  */
 async function storeUpload(ctx: KoaContext, key: string, data: Buffer, uploader: string, deadlineAt: number) {
-    if (await storeExistsBounded(uploadStore, key, budgetSignal(deadlineAt, STORE_OP_TIMEOUT_MS), ctx.log, 'upload dedupe')) {
+    const dedupeMs = uploadDedupeBudgetMs(deadlineAt)
+    if (dedupeMs > 0 && await storeExistsBounded(uploadStore, key, AbortSignal.timeout(dedupeMs), ctx.log, 'upload dedupe')) {
         ctx.log.debug('key %s already exists in store', key)
         return
     }
