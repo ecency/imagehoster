@@ -11,7 +11,8 @@ import {accountBlacklist} from './blacklist'
 import {getAccount, getProfile, getRatelimit, HiveAccount, HiveAccountAuthority, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {logger} from './logger'
-import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
+import {budgetSignal, STORE_OP_TIMEOUT_MS, UPLOAD_DEADLINE_MS} from './constants'
+import {AcceptedContentTypes, isStoreAbort, mimeMagic, readStream, storeExistsBounded, storeWrite} from './utils'
 
 const SERVICE_URL = new URL(config.get('service_url'))
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
@@ -139,6 +140,29 @@ function b64uToB64 (str: string) {
     const tt = str.replace(/(-|_|\.)/g, function(m) { return b64uLookup[m]})
     return tt
 }
+/**
+ * Writes an upload unless the store already has it, within `deadlineAt`.
+ *
+ * The key is the content hash, so writing an existing image again is harmless:
+ * a dedupe HEAD that stalls or fails reads as absent and the PUT goes ahead
+ * rather than failing the upload. The PUT runs on the upload store's write
+ * client (longer floors, retries) and is aborted at the deadline, which answers
+ * 504 so the client can tell a slow store from a broken upload.
+ */
+async function storeUpload(ctx: KoaContext, key: string, data: Buffer, uploader: string, deadlineAt: number) {
+    if (await storeExistsBounded(uploadStore, key, budgetSignal(deadlineAt, STORE_OP_TIMEOUT_MS), ctx.log, 'upload dedupe')) {
+        ctx.log.debug('key %s already exists in store', key)
+        return
+    }
+    try {
+        await storeWrite(uploadStore, key, data, budgetSignal(deadlineAt, UPLOAD_DEADLINE_MS))
+    } catch (cause) {
+        ctx.log.error({ err: cause, key, uploader }, 'failed to write uploaded image to storage')
+        const code = isStoreAbort(cause) ? APIError.Code.StoreTimeout : APIError.Code.InternalError
+        throw new APIError({ cause: cause as Error, code, message: 'Failed to store uploaded image' })
+    }
+}
+
 export async function uploadHsHandler(ctx: KoaContext) {
     ctx.tag({handler: 'hsupload'})
     let validSignature = false
@@ -162,6 +186,8 @@ export async function uploadHsHandler(ctx: KoaContext) {
         file.name = `image-${Date.now()}.${ext}`
     }
     const data = await readStream(file.stream)
+    // the edge's first-byte timer starts once the body is in
+    const storeDeadlineAt = Date.now() + UPLOAD_DEADLINE_MS
 
     // extra check if client manges to lie about the content-length
     APIError.assert((file.stream as any).truncated !== true,
@@ -277,16 +303,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
         const url = new URL(`${ key }/${ file.name }`, SERVICE_URL)
 
-        if (!(await storeExists(uploadStore, key))) {
-            try {
-                await storeWrite(uploadStore, key, data)
-            } catch (cause) {
-                ctx.log.error({ err: cause, key, uploader: account.name }, 'failed to write uploaded image to storage')
-                throw new APIError({ cause, code: APIError.Code.InternalError, message: 'Failed to store uploaded image' })
-            }
-        } else {
-            ctx.log.debug('key %s already exists in store', key)
-        }
+        await storeUpload(ctx, key, data, account.name, storeDeadlineAt)
 
         ctx.log.info({uploader: account.name, size: data.byteLength}, 'image uploaded')
 
@@ -318,6 +335,8 @@ export async function uploadHandler(ctx: KoaContext) {
         file.name = `image-${Date.now()}.${ext}`
     }
     const data = await readStream(file.stream)
+    // the edge's first-byte timer starts once the body is in
+    const storeDeadlineAt = Date.now() + UPLOAD_DEADLINE_MS
 
     // extra check if client manges to lie about the content-length
     APIError.assert((file.stream as any).truncated !== true,
@@ -460,16 +479,7 @@ export async function uploadHandler(ctx: KoaContext) {
     const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
     const url = new URL(`${ key }/${ file.name }`, SERVICE_URL)
 
-    if (!(await storeExists(uploadStore, key))) {
-        try {
-            await storeWrite(uploadStore, key, data)
-        } catch (cause) {
-            ctx.log.error({ err: cause, key, uploader: account.name }, 'failed to write uploaded image to storage')
-            throw new APIError({ cause, code: APIError.Code.InternalError, message: 'Failed to store uploaded image' })
-        }
-    } else {
-        ctx.log.debug('key %s already exists in store', key)
-    }
+    await storeUpload(ctx, key, data, account.name, storeDeadlineAt)
 
     ctx.log.info({uploader: account.name, size: data.byteLength}, 'image uploaded')
 

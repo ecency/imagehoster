@@ -386,6 +386,25 @@ export const S3_CONNECT_TIMEOUT_MS = 2000
 export const S3_REQUEST_TIMEOUT_MS = 5000
 export const S3_MAX_ATTEMPTS = 2
 /**
+ * Floors for the upload store's WRITES, on a client of their own.
+ *
+ * A user upload is the one write whose failure the user sees: the editor gets a
+ * 500 and the image is lost. The shared 5 s floor suits a lookup that can fall
+ * through to something else, but on 2026-10-07 07:10-07:20 UTC the object store
+ * slowed down and a third of uploads failed with both attempts cut at 5 s. A PUT
+ * gets 8 s per attempt and up to three attempts instead, and the handler bounds
+ * the whole write with `UPLOAD_DEADLINE_MS` so the retries can never outlive the
+ * edge.
+ */
+export const UPLOAD_WRITE_REQUEST_TIMEOUT_MS = 8000
+export const UPLOAD_WRITE_MAX_ATTEMPTS = 3
+/**
+ * What an upload may spend on the store (dedupe HEAD plus PUT and its retries),
+ * counted from when the body has been parsed. The edge's first-byte timer runs
+ * from the same point, so this leaves 1.5 s under it for the response.
+ */
+export const UPLOAD_DEADLINE_MS = EDGE_FIRST_BYTE_TIMEOUT_MS - 1500
+/**
  * Worst case for one unsignalled call: every attempt connects and then stalls
  * for the full request timeout. Pinned by a test to stay under the edge's 20 s
  * with room for backoff, because these floors are the only bound on calls made

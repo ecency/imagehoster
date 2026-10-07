@@ -46,7 +46,7 @@ import {
 
 import {PassThrough} from 'stream'
 
-import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, S3_CONNECT_TIMEOUT_MS, S3_MAX_ATTEMPTS, S3_REQUEST_TIMEOUT_MS, S3_WORST_CASE_MS, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
+import {AVIF_EFFORT, budgetSignal, DEFAULT_AVATAR_HASH, DEFAULT_FALLBACK_IMAGE_URL, EDGE_FIRST_BYTE_TIMEOUT_MS, EMPTY_IMAGE_URL_PATTERNS, FETCH_CANDIDATE_WALL_MS, FETCH_DEADLINE_DEFAULT_MS, FETCH_DEADLINE_MS, FETCH_DEFAULT_WALL_MS, FETCH_MIN_REMAINING_MS, FETCH_RENDER_SLACK_MS, INTERNAL_SERVICE_ORIGINS, LEGACY_SERVICE_BASE_URL, S3_CONNECT_TIMEOUT_MS, S3_MAX_ATTEMPTS, S3_REQUEST_TIMEOUT_MS, S3_WORST_CASE_MS, SERVE_READ_TIMEOUT_MS, SERVICE_BASE_URL, SPECIAL_EMPTY_IMAGE_PATH, STORE_OP_TIMEOUT_MS, UPLOAD_DEADLINE_MS, UPLOAD_WRITE_REQUEST_TIMEOUT_MS, applyUrlReplacements, isEmptyImageUrl, startsWithEmptyImagePrefix} from './../src/constants'
 
 import { APIError } from './../src/error'
 
@@ -449,6 +449,13 @@ describe('utils', function() {
             // every attempt connects and then stalls for the full request timeout
             assert(S3_WORST_CASE_MS <= 16000, `worst case ${ S3_WORST_CASE_MS }ms must leave room for backoff under the 20s edge cut`)
             assert.equal(S3_WORST_CASE_MS, S3_MAX_ATTEMPTS * (S3_CONNECT_TIMEOUT_MS + S3_REQUEST_TIMEOUT_MS))
+        })
+
+        it('gives an upload PUT longer attempts than the shared floor, and still answers under the edge', function() {
+            assert(UPLOAD_WRITE_REQUEST_TIMEOUT_MS > S3_REQUEST_TIMEOUT_MS)
+            // one full attempt plus the dedupe lookup must fit, so a single slow PUT can still succeed
+            assert(STORE_OP_TIMEOUT_MS + S3_CONNECT_TIMEOUT_MS + UPLOAD_WRITE_REQUEST_TIMEOUT_MS < UPLOAD_DEADLINE_MS)
+            assert(UPLOAD_DEADLINE_MS < EDGE_FIRST_BYTE_TIMEOUT_MS, 'the deadline aborts the retries before the edge cuts the request')
         })
 
         it('budgetSignal clamps to the remaining deadline, and to the cap, and never disables the timer', async function() {
