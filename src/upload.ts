@@ -11,7 +11,7 @@ import {accountBlacklist} from './blacklist'
 import {getAccount, getProfile, getRatelimit, HiveAccount, HiveAccountAuthority, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {logger} from './logger'
-import {budgetSignal, UPLOAD_DEADLINE_MS, uploadDedupeBudgetMs} from './constants'
+import {budgetSignal, UPLOAD_DEADLINE_MS, UPLOAD_PUT_RESERVE_MS, uploadDedupeBudgetMs} from './constants'
 import {AcceptedContentTypes, isStoreAbort, mimeMagic, readStream, storeExistsBounded, storeWrite} from './utils'
 
 const SERVICE_URL = new URL(config.get('service_url'))
@@ -141,6 +141,26 @@ function b64uToB64 (str: string) {
     return tt
 }
 /**
+ * Bounds an account, rate-limit or profile lookup so the store keeps its PUT
+ * reserve: the lookups must settle by `deadlineAt - UPLOAD_PUT_RESERVE_MS`.
+ *
+ * They run on the same edge clock as the write, with up to three attempts per
+ * RPC, so without this a slow-but-successful lookup could leave the PUT nothing
+ * or run past the edge before the handler answered. Past the bound the upload
+ * answers 503, which clients treat as temporary. The lookup itself is not
+ * cancellable and finishes in the background; its late result is dropped.
+ */
+export function withinLookupBudget<T>(lookup: Promise<T>, deadlineAt: number): Promise<T> {
+    lookup.catch(() => undefined)
+    const ms = deadlineAt - UPLOAD_PUT_RESERVE_MS - Date.now()
+    const timedOut = () => new APIError({code: APIError.Code.LookupTimeout, message: 'Account lookup timed out'})
+    if (ms <= 0) { return Promise.reject(timedOut()) }
+    let timer: NodeJS.Timeout | undefined
+    const bound = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timedOut()), ms) })
+    return Promise.race([lookup, bound]).finally(() => clearTimeout(timer))
+}
+
+/**
  * Writes an upload unless the store already has it, within `deadlineAt`.
  *
  * The key is the content hash, so writing an existing image again is harmless:
@@ -232,7 +252,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         const hash = createHash('sha256').update(message).digest()
         const username = tokenObj.authors[0].toLowerCase()
 
-        const [account]: HiveAccount[] = await getAccount(username)
+        const [account]: HiveAccount[] = await withinLookupBudget(getAccount(username), storeDeadlineAt)
         APIError.assert(account, APIError.Code.NoSuchAccount)
         ctx.log.warn('uploading app %s', signedMessage.app)
 
@@ -272,7 +292,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
             ? []
             : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
         if (delegatedTypes.length > 0) {
-            const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
+            const [appAccount]: HiveAccount[] = await withinLookupBudget(getAccount(UPLOAD_LIMITS.app_account), storeDeadlineAt)
             if (appAccount) {
                 // Same authority level only: a posting delegation is not satisfied
                 // by the delegate's active key, and an active delegation is not
@@ -290,7 +310,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
 
         if (redisClient) {
             try {
-                const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+                const limit = await withinLookupBudget(getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration), storeDeadlineAt)
                 APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
             } catch (error) {
                 if (error instanceof APIError) throw error
@@ -300,7 +320,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         }
 
         // Use get_profile for accurate reputation (get_accounts returns incorrect data)
-        const profile = await getProfile(username, false)
+        const profile = await withinLookupBudget(getProfile(username, false), storeDeadlineAt)
         APIError.assert(profile && profile.reputation >= UPLOAD_LIMITS.reputation, APIError.Code.Deplorable)
 
         const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
@@ -354,7 +374,7 @@ export async function uploadHandler(ctx: KoaContext) {
         .update(data)
         .digest()
 
-    const [account]: HiveAccount[] = await getAccount(ctx.params['username'].toLowerCase())
+    const [account]: HiveAccount[] = await withinLookupBudget(getAccount(ctx.params['username'].toLowerCase()), storeDeadlineAt)
     APIError.assert(account, APIError.Code.NoSuchAccount)
 
     let validSignature = false
@@ -416,7 +436,7 @@ export async function uploadHandler(ctx: KoaContext) {
                     ? []
                     : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
                 if (delegatedTypes.length > 0) {
-                    const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
+                    const [appAccount]: HiveAccount[] = await withinLookupBudget(getAccount(UPLOAD_LIMITS.app_account), storeDeadlineAt)
                     if (appAccount) {
                         validSignature = delegatedTypes.some(
                             (type) => authoritySignedBy(appAccount[type], hash, parsedSigns))
@@ -466,7 +486,7 @@ export async function uploadHandler(ctx: KoaContext) {
 
     if (redisClient) {
         try {
-            const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+            const limit = await withinLookupBudget(getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration), storeDeadlineAt)
             APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         } catch (error) {
             if (error instanceof APIError) throw error
@@ -476,7 +496,7 @@ export async function uploadHandler(ctx: KoaContext) {
     }
 
     // Use get_profile for accurate reputation (get_accounts returns incorrect data)
-    const profile = await getProfile(ctx.params['username'].toLowerCase(), false)
+    const profile = await withinLookupBudget(getProfile(ctx.params['username'].toLowerCase(), false), storeDeadlineAt)
     APIError.assert(profile && profile.reputation >= UPLOAD_LIMITS.reputation, APIError.Code.Deplorable)
 
     const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
