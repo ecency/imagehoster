@@ -11,7 +11,8 @@ import {accountBlacklist} from './blacklist'
 import {getAccount, getProfile, getRatelimit, HiveAccount, HiveAccountAuthority, KoaContext, redisClient, uploadStore} from './common'
 import {APIError} from './error'
 import {logger} from './logger'
-import {AcceptedContentTypes, mimeMagic, readStream, storeExists, storeWrite} from './utils'
+import {budgetSignal, UPLOAD_DEADLINE_MS, UPLOAD_PUT_RESERVE_MS, uploadDedupeBudgetMs} from './constants'
+import {AcceptedContentTypes, isStoreAbort, mimeMagic, readStream, storeExistsBounded, storeWrite} from './utils'
 
 const SERVICE_URL = new URL(config.get('service_url'))
 const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
@@ -139,6 +140,52 @@ function b64uToB64 (str: string) {
     const tt = str.replace(/(-|_|\.)/g, function(m) { return b64uLookup[m]})
     return tt
 }
+/**
+ * Bounds an account, rate-limit or profile lookup so the store keeps its PUT
+ * reserve: the lookups must settle by `deadlineAt - UPLOAD_PUT_RESERVE_MS`.
+ *
+ * They run on the same edge clock as the write, with up to three attempts per
+ * RPC, so without this a slow-but-successful lookup could leave the PUT nothing
+ * or run past the edge before the handler answered. Past the bound the upload
+ * answers 503, which clients treat as temporary. The lookup itself is not
+ * cancellable and finishes in the background; its late result is dropped.
+ */
+export function withinLookupBudget<T>(lookup: Promise<T>, deadlineAt: number): Promise<T> {
+    lookup.catch(() => undefined)
+    const ms = deadlineAt - UPLOAD_PUT_RESERVE_MS - Date.now()
+    const timedOut = () => new APIError({code: APIError.Code.LookupTimeout, message: 'Account lookup timed out'})
+    if (ms <= 0) { return Promise.reject(timedOut()) }
+    let timer: NodeJS.Timeout | undefined
+    const bound = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(timedOut()), ms) })
+    return Promise.race([lookup, bound]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Writes an upload unless the store already has it, within `deadlineAt`.
+ *
+ * The key is the content hash, so writing an existing image again is harmless:
+ * a dedupe HEAD that stalls or fails reads as absent and the PUT goes ahead
+ * rather than failing the upload, and the HEAD is skipped outright when the
+ * lookups before it left no more than the PUT reserve. The PUT runs on the
+ * upload store's write client (longer floors, retries) and is aborted at the
+ * deadline, which answers
+ * 504 so the client can tell a slow store from a broken upload.
+ */
+async function storeUpload(ctx: KoaContext, key: string, data: Buffer, uploader: string, deadlineAt: number) {
+    const dedupeMs = uploadDedupeBudgetMs(deadlineAt)
+    if (dedupeMs > 0 && await storeExistsBounded(uploadStore, key, AbortSignal.timeout(dedupeMs), ctx.log, 'upload dedupe')) {
+        ctx.log.debug('key %s already exists in store', key)
+        return
+    }
+    try {
+        await storeWrite(uploadStore, key, data, budgetSignal(deadlineAt, UPLOAD_DEADLINE_MS))
+    } catch (cause) {
+        ctx.log.error({ err: cause, key, uploader }, 'failed to write uploaded image to storage')
+        const code = isStoreAbort(cause) ? APIError.Code.StoreTimeout : APIError.Code.InternalError
+        throw new APIError({ cause: cause as Error, code, message: 'Failed to store uploaded image' })
+    }
+}
+
 export async function uploadHsHandler(ctx: KoaContext) {
     ctx.tag({handler: 'hsupload'})
     let validSignature = false
@@ -162,6 +209,8 @@ export async function uploadHsHandler(ctx: KoaContext) {
         file.name = `image-${Date.now()}.${ext}`
     }
     const data = await readStream(file.stream)
+    // the edge's first-byte timer starts once the body is in
+    const storeDeadlineAt = Date.now() + UPLOAD_DEADLINE_MS
 
     // extra check if client manges to lie about the content-length
     APIError.assert((file.stream as any).truncated !== true,
@@ -203,7 +252,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
         const hash = createHash('sha256').update(message).digest()
         const username = tokenObj.authors[0].toLowerCase()
 
-        const [account]: HiveAccount[] = await getAccount(username)
+        const [account]: HiveAccount[] = await withinLookupBudget(getAccount(username), storeDeadlineAt)
         APIError.assert(account, APIError.Code.NoSuchAccount)
         ctx.log.warn('uploading app %s', signedMessage.app)
 
@@ -243,7 +292,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
             ? []
             : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
         if (delegatedTypes.length > 0) {
-            const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
+            const [appAccount]: HiveAccount[] = await withinLookupBudget(getAccount(UPLOAD_LIMITS.app_account), storeDeadlineAt)
             if (appAccount) {
                 // Same authority level only: a posting delegation is not satisfied
                 // by the delegate's active key, and an active delegation is not
@@ -261,7 +310,7 @@ export async function uploadHsHandler(ctx: KoaContext) {
 
         if (redisClient) {
             try {
-                const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+                const limit = await withinLookupBudget(getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration), storeDeadlineAt)
                 APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
             } catch (error) {
                 if (error instanceof APIError) throw error
@@ -271,22 +320,13 @@ export async function uploadHsHandler(ctx: KoaContext) {
         }
 
         // Use get_profile for accurate reputation (get_accounts returns incorrect data)
-        const profile = await getProfile(username, false)
+        const profile = await withinLookupBudget(getProfile(username, false), storeDeadlineAt)
         APIError.assert(profile && profile.reputation >= UPLOAD_LIMITS.reputation, APIError.Code.Deplorable)
 
         const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
         const url = new URL(`${ key }/${ file.name }`, SERVICE_URL)
 
-        if (!(await storeExists(uploadStore, key))) {
-            try {
-                await storeWrite(uploadStore, key, data)
-            } catch (cause) {
-                ctx.log.error({ err: cause, key, uploader: account.name }, 'failed to write uploaded image to storage')
-                throw new APIError({ cause, code: APIError.Code.InternalError, message: 'Failed to store uploaded image' })
-            }
-        } else {
-            ctx.log.debug('key %s already exists in store', key)
-        }
+        await storeUpload(ctx, key, data, account.name, storeDeadlineAt)
 
         ctx.log.info({uploader: account.name, size: data.byteLength}, 'image uploaded')
 
@@ -318,6 +358,8 @@ export async function uploadHandler(ctx: KoaContext) {
         file.name = `image-${Date.now()}.${ext}`
     }
     const data = await readStream(file.stream)
+    // the edge's first-byte timer starts once the body is in
+    const storeDeadlineAt = Date.now() + UPLOAD_DEADLINE_MS
 
     // extra check if client manges to lie about the content-length
     APIError.assert((file.stream as any).truncated !== true,
@@ -332,7 +374,7 @@ export async function uploadHandler(ctx: KoaContext) {
         .update(data)
         .digest()
 
-    const [account]: HiveAccount[] = await getAccount(ctx.params['username'].toLowerCase())
+    const [account]: HiveAccount[] = await withinLookupBudget(getAccount(ctx.params['username'].toLowerCase()), storeDeadlineAt)
     APIError.assert(account, APIError.Code.NoSuchAccount)
 
     let validSignature = false
@@ -394,7 +436,7 @@ export async function uploadHandler(ctx: KoaContext) {
                     ? []
                     : delegatedAuthorityTypes(account, UPLOAD_LIMITS.app_account)
                 if (delegatedTypes.length > 0) {
-                    const [appAccount]: HiveAccount[] = await getAccount(UPLOAD_LIMITS.app_account)
+                    const [appAccount]: HiveAccount[] = await withinLookupBudget(getAccount(UPLOAD_LIMITS.app_account), storeDeadlineAt)
                     if (appAccount) {
                         validSignature = delegatedTypes.some(
                             (type) => authoritySignedBy(appAccount[type], hash, parsedSigns))
@@ -444,7 +486,7 @@ export async function uploadHandler(ctx: KoaContext) {
 
     if (redisClient) {
         try {
-            const limit = await getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration)
+            const limit = await withinLookupBudget(getRatelimit(account.name, UPLOAD_LIMITS.max, UPLOAD_LIMITS.duration), storeDeadlineAt)
             APIError.assert(limit.remaining > 0, APIError.Code.QoutaExceeded)
         } catch (error) {
             if (error instanceof APIError) throw error
@@ -454,22 +496,13 @@ export async function uploadHandler(ctx: KoaContext) {
     }
 
     // Use get_profile for accurate reputation (get_accounts returns incorrect data)
-    const profile = await getProfile(ctx.params['username'].toLowerCase(), false)
+    const profile = await withinLookupBudget(getProfile(ctx.params['username'].toLowerCase(), false), storeDeadlineAt)
     APIError.assert(profile && profile.reputation >= UPLOAD_LIMITS.reputation, APIError.Code.Deplorable)
 
     const key = 'D' + multihash.toB58String(multihash.encode(imageHash, 'sha2-256'))
     const url = new URL(`${ key }/${ file.name }`, SERVICE_URL)
 
-    if (!(await storeExists(uploadStore, key))) {
-        try {
-            await storeWrite(uploadStore, key, data)
-        } catch (cause) {
-            ctx.log.error({ err: cause, key, uploader: account.name }, 'failed to write uploaded image to storage')
-            throw new APIError({ cause, code: APIError.Code.InternalError, message: 'Failed to store uploaded image' })
-        }
-    } else {
-        ctx.log.debug('key %s already exists in store', key)
-    }
+    await storeUpload(ctx, key, data, account.name, storeDeadlineAt)
 
     ctx.log.info({uploader: account.name, size: data.byteLength}, 'image uploaded')
 

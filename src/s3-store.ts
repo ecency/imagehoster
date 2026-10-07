@@ -4,14 +4,18 @@ import { Readable, PassThrough } from 'stream'
 export interface S3StoreOptions {
     client: S3Client
     bucket: string
+    /** Client for PUTs when writes need different floors than reads; defaults to `client`. */
+    writeClient?: S3Client
 }
 
 export class S3BlobStore {
     private s3: S3Client
+    private writeS3: S3Client
     private bucket: string
 
     constructor(opts: S3StoreOptions) {
         this.s3 = opts.client
+        this.writeS3 = opts.writeClient || opts.client
         this.bucket = opts.bucket
     }
 
@@ -45,7 +49,7 @@ export class S3BlobStore {
 
     /** Direct buffer upload — no streaming overhead. */
     async putBuffer(key: string, data: Buffer, signal?: AbortSignal): Promise<void> {
-        await this.s3.send(new PutObjectCommand({
+        await this.writeS3.send(new PutObjectCommand({
             Bucket: this.bucket,
             Key: key,
             Body: data,
@@ -61,7 +65,7 @@ export class S3BlobStore {
             settled = true
             done(err, metadata)
         }
-        this.s3.send(new PutObjectCommand({
+        this.writeS3.send(new PutObjectCommand({
             Bucket: this.bucket,
             Key: key,
             Body: passthrough,

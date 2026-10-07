@@ -96,6 +96,23 @@ describe('S3BlobStore', function() {
         })
     })
 
+    describe('writeClient', function() {
+        it('sends PUTs through the write client and everything else through the read client', async function() {
+            const reads = createMockS3()
+            const writes = createMockS3()
+            const split = new S3BlobStore({ client: reads as any, writeClient: writes as any, bucket: 'b' })
+            await split.putBuffer('k', Buffer.from('v'))
+            assert(writes.store.has('b/k') && !reads.store.has('b/k'), 'putBuffer used the write client')
+            await new Promise<void>((resolve, reject) => {
+                const ws = split.createWriteStream('s', (err) => err ? reject(err) : resolve())
+                ws.end(Buffer.from('w'))
+            })
+            assert(writes.store.has('b/s') && !reads.store.has('b/s'), 'createWriteStream used the write client')
+            reads.store.set('b/r', Buffer.from('r'))
+            assert.equal((await readStream(split.createReadStream('r'))).toString(), 'r', 'reads use the read client')
+        })
+    })
+
     describe('createReadStream', function() {
         it('should read stored data as stream', async function() {
             mockS3.store.set('test-bucket/readkey', Buffer.from('stream data'))

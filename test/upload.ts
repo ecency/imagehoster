@@ -40,6 +40,26 @@ export async function uploadImage(data: Buffer, port: number) {
     })
 }
 
+describe('upload lookup budget', function() {
+    it('answers 503 when a lookup runs into the PUT reserve, and passes results through otherwise', async function() {
+        const {withinLookupBudget} = await import('./../src/upload')
+        const {APIError} = await import('./../src/error')
+        const {UPLOAD_PUT_RESERVE_MS} = await import('./../src/constants')
+        const t0 = Date.now()
+        await assert.rejects(
+            withinLookupBudget(new Promise(() => undefined), Date.now() + UPLOAD_PUT_RESERVE_MS + 60),
+            (err: any) => err.statusCode === 503 && err.code === APIError.Code.LookupTimeout,
+        )
+        const elapsed = Date.now() - t0
+        assert(elapsed >= 40 && elapsed < 1000, `released at the bound, took ${ elapsed }ms`)
+        await assert.rejects(withinLookupBudget(Promise.resolve(1), Date.now() + UPLOAD_PUT_RESERVE_MS - 1),
+            (err: any) => err.statusCode === 503, 'no time above the reserve: fail fast')
+        assert.equal(await withinLookupBudget(Promise.resolve('ok'), Date.now() + UPLOAD_PUT_RESERVE_MS + 5000), 'ok')
+        await assert.rejects(withinLookupBudget(Promise.reject(new Error('rpc down')), Date.now() + UPLOAD_PUT_RESERVE_MS + 5000),
+            /rpc down/, 'a lookup error is not masked')
+    })
+})
+
 describe('upload', function() {
     const port = 63205
     const server = http.createServer(app.callback())
@@ -60,6 +80,30 @@ describe('upload', function() {
         const res = await needle('get', `:${ port }/${ key }/bla.bla`)
         assert.equal(res.statusCode, 200)
         assert(crypto.timingSafeEqual(res.body, data), 'file same')
+    })
+
+    it('still stores the upload when the dedupe lookup stalls', async function() {
+        // the key is the content hash, so a HEAD that never answers must not fail
+        // the upload: it reads as absent after one store budget and the PUT goes ahead
+        const {uploadStore} = await import('./../src/common')
+        const data = Buffer.concat([fs.readFileSync(path.resolve(__dirname, 'test.jpg')), Buffer.from(`stall-${ Date.now() }`)])
+        const realExists = uploadStore.exists
+        let hung = 0
+        ;(uploadStore as any).exists = () => { hung++ } // never calls back
+        const t0 = Date.now()
+        try {
+            const {response, body} = await uploadImage(data, port)
+            assert.equal(response.statusCode, 200)
+            assert(hung >= 1, 'the stalled lookup was attempted')
+            assert(Date.now() - t0 < 4000, 'the stalled lookup costs at most UPLOAD_DEDUPE_TIMEOUT_MS')
+            ;(uploadStore as any).exists = realExists
+            const key = body.url.split('/').slice(-2)[0]
+            const res = await needle('get', `:${ port }/${ key }/x.jpg`)
+            assert.equal(res.statusCode, 200)
+            assert(res.body.equals(data), 'the upload was written')
+        } finally {
+            ;(uploadStore as any).exists = realExists
+        }
     })
 
     it('should reject invalid signature', async function() {

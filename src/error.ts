@@ -23,6 +23,7 @@ enum ErrorCode {
     QoutaExceeded,
     StoreTimeout,
     UpstreamError,
+    LookupTimeout,
 }
 
 const HttpCodes = new Map<ErrorCode, number>([
@@ -44,6 +45,7 @@ const HttpCodes = new Map<ErrorCode, number>([
     [ErrorCode.QoutaExceeded, 429],
     [ErrorCode.StoreTimeout, 504],
     [ErrorCode.UpstreamError, 400],
+    [ErrorCode.LookupTimeout, 503],
 ])
 
 interface APIErrorOptions {

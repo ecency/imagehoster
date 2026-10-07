@@ -308,11 +308,27 @@ export async function getRatelimit(account: string, max: number, duration: numbe
 /** Blob storage — only initialized in worker processes. */
 
 import { S3Client } from '@aws-sdk/client-s3'
-import { S3_MAX_ATTEMPTS, s3RequestHandlerOptions } from './constants'
+import { S3_MAX_ATTEMPTS, s3RequestHandlerOptions, UPLOAD_WRITE_MAX_ATTEMPTS, UPLOAD_WRITE_REQUEST_TIMEOUT_MS } from './constants'
 import { S3BlobStore } from './s3-store'
 import { ShardedFsStore } from './sharded-fs-store'
 
 let s3Client: S3Client | undefined
+let uploadWriteClient: S3Client | undefined
+function newS3Client(requestHandler: ReturnType<typeof s3RequestHandlerOptions>, maxAttempts: number): S3Client {
+    const rawEndpoint = config.get('S3_ENDPOINT') as string
+    const endpoint = rawEndpoint.includes('://') ? rawEndpoint : `https://${rawEndpoint}`
+    return new S3Client({
+        credentials: {
+            accessKeyId: config.get('S3_ACCESS_KEY_ID') as string,
+            secretAccessKey: config.get('S3_SECRET_ACCESS_KEY') as string,
+        },
+        endpoint,
+        region: config.get('S3_REGION') as string,
+        forcePathStyle: true,
+        requestHandler,
+        maxAttempts,
+    })
+}
 function loadStore(key: string): AbstractBlobStore {
     const conf = config.get(key) as any
     if (conf.type === 'fs') {
@@ -333,24 +349,20 @@ function loadStore(key: string): AbstractBlobStore {
         return mem
     } else if (conf.type === 's3') {
         if (!s3Client) {
-            const rawEndpoint = config.get('S3_ENDPOINT') as string
-            const endpoint = rawEndpoint.includes('://') ? rawEndpoint : `https://${rawEndpoint}`
-            s3Client = new S3Client({
-                credentials: {
-                    accessKeyId: config.get('S3_ACCESS_KEY_ID') as string,
-                    secretAccessKey: config.get('S3_SECRET_ACCESS_KEY') as string,
-                },
-                endpoint,
-                region: config.get('S3_REGION') as string,
-                forcePathStyle: true,
-                // Floors for a stalled object store; see s3RequestHandlerOptions in
-                // constants.ts. The SDK builds its NodeHttpHandler from this object.
-                requestHandler: s3RequestHandlerOptions(),
-                maxAttempts: S3_MAX_ATTEMPTS,
-            })
+            // Floors for a stalled object store; see s3RequestHandlerOptions in
+            // constants.ts. The SDK builds its NodeHttpHandler from this object.
+            s3Client = newS3Client(s3RequestHandlerOptions(), S3_MAX_ATTEMPTS)
+        }
+        let writeClient: S3Client | undefined
+        if (key === 'upload_store') {
+            // user uploads get longer PUT floors; see UPLOAD_WRITE_REQUEST_TIMEOUT_MS
+            uploadWriteClient = uploadWriteClient || newS3Client(
+                s3RequestHandlerOptions({requestTimeout: UPLOAD_WRITE_REQUEST_TIMEOUT_MS}), UPLOAD_WRITE_MAX_ATTEMPTS)
+            writeClient = uploadWriteClient
         }
         return new S3BlobStore({
             client: s3Client,
+            writeClient,
             bucket: conf.get('s3_bucket'),
         }) as any
     } else {
