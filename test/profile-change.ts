@@ -242,25 +242,25 @@ describe('clearing caches', () => {
 
     it('keeps the lease on a task that throws, so it runs again when the lease ends', async () => {
         h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
-        h.due.set('refresh|foo|0', T)
+        h.due.set(`refresh|foo|0|${T}`, T)
         const add = queue.add
         queue.add = async (member, at) => {
             if (member.startsWith('clear|')) throw new Error('redis down')
             return add(member, at)
         }
         await runDue(T)
-        assert.deepEqual([...h.due.entries()], [['refresh|foo|0', T + timing.claimLeaseMs]])
+        assert.deepEqual([...h.due.entries()], [[`refresh|foo|0|${T}`, T + timing.claimLeaseMs]])
         // The record did not move, so the retry still sees the change.
         assert.equal(h.records.get('foo')!.avatar, 'https://example.com/old.jpg')
         queue.add = add
         await runDue(T + timing.claimLeaseMs)
-        assert.equal(h.due.has('refresh|foo|0'), false)
+        assert.equal(h.due.has(`refresh|foo|0|${T}`), false)
         assert([...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
     })
 
     it('does not finish a member that was moved while it ran', async () => {
         h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
-        h.due.set('refresh|foo|0', T)
+        h.due.set(`refresh|foo|0|${T}`, T)
         const finish = queue.finish
         queue.finish = async (member, leaseUntil) => {
             // A newer account update re-adds the refresh before this one finishes.
@@ -268,7 +268,7 @@ describe('clearing caches', () => {
             return finish(member, leaseUntil)
         }
         await runDue(T)
-        assert.equal(h.due.get('refresh|foo|0'), T + 999)
+        assert.equal(h.due.get(`refresh|foo|0|${T}`), T + 999)
     })
 
     it('keeps the record unchanged when queueing the clear fails', async () => {
@@ -295,25 +295,27 @@ describe('refresh scheduling', () => {
         h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: '' })
         await scheduleRefresh('foo', T)
         assert.deepEqual([...h.due.entries()], [
-            ['refresh|foo|0', T + REFRESH_DELAYS_MS[0]],
-            ['refresh|foo|1', T + REFRESH_DELAYS_MS[1]],
+            [`refresh|foo|0|${T}`, T + REFRESH_DELAYS_MS[0]],
+            [`refresh|foo|1|${T}`, T + REFRESH_DELAYS_MS[1]],
         ])
     })
 
-    it('restarts the window when another update arrives before it ran', async () => {
+    it('gives a newer update its own full window', async () => {
         h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: '' })
         await scheduleRefresh('foo', T)
         await scheduleRefresh('foo', T + 85_000)
-        assert.equal(h.due.get('refresh|foo|1'), T + 85_000 + REFRESH_DELAYS_MS[1])
+        // The newer update gets its own pair, so its late lookup is not lost.
+        assert.equal(h.due.get(`refresh|foo|1|${T + 85_000}`), T + 85_000 + REFRESH_DELAYS_MS[1])
+        assert.equal(h.due.get(`refresh|foo|1|${T}`), T + REFRESH_DELAYS_MS[1])
     })
 
     it('queues the lookups even without a record, which does not prove nothing is cached', async () => {
         await scheduleRefresh('bar', T)
-        assert.deepEqual([...h.due.keys()], ['refresh|bar|0', 'refresh|bar|1'])
+        assert.deepEqual([...h.due.keys()], [`refresh|bar|0|${T}`, `refresh|bar|1|${T}`])
     })
 
     it('a watcher lookup without a record clears both kinds', async () => {
-        h.due.set('refresh|foo|0', T)
+        h.due.set(`refresh|foo|0|${T}`, T)
         await runDue(T)
         await until(() => [...h.due.keys()].filter((m) => m.startsWith('clear|foo|')).length === 2)
         const kinds = [...h.due.keys()].filter((m) => m.startsWith('clear|foo|')).map((m) => m.split('|')[2]).sort()
@@ -328,23 +330,24 @@ describe('refresh scheduling', () => {
 
     it('a due refresh looks the profile up fresh, which queues the clear', async () => {
         h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
-        h.due.set('refresh|foo|0', T)
+        h.due.set(`refresh|foo|0|${T}`, T)
         await runDue(T)
         await until(() => [...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
-        assert.equal(h.due.has('refresh|foo|0'), false)
+        assert.equal(h.due.has(`refresh|foo|0|${T}`), false)
     })
 
-    it('retries a refresh whose lookup failed while the user still has a record', async () => {
+    it('retries a failed refresh for a recorded user, backing off with time since the update', async () => {
         const orig = rpc.call
         rpc.call = async () => { throw new Error('node down') }
         try {
             h.records.set('nodeisdown', { avatar: 'https://x/a.jpg', cover: '' })
-            h.due.set('refresh|nodeisdown|1', T)
+            h.due.set(`refresh|nodeisdown|1|${T}`, T)
             await runDue(T)
-            assert.deepEqual([...h.due.entries()], [['refresh|nodeisdown|1', T + timing.retryMs]])
-            h.records.delete('nodeisdown')
-            await runDue(T + timing.retryMs)
-            assert.equal(h.due.size, 0)
+            assert.deepEqual([...h.due.entries()], [[`refresh|nodeisdown|1|${T}`, T + timing.retryMs]])
+            const later = T + 20 * 60 * 1000
+            h.due.set(`refresh|nodeisdown|1|${T}`, later)
+            await runDue(later)
+            assert.equal(h.due.get(`refresh|nodeisdown|1|${T}`), later + 10 * 60 * 1000)
         } finally {
             rpc.call = orig
         }
@@ -354,31 +357,47 @@ describe('refresh scheduling', () => {
         const orig = rpc.call
         rpc.call = async () => {
             // A newer account update re-adds this refresh while the lookup runs.
-            h.due.set('refresh|nodeisdown|1', T + 90_000)
+            h.due.set(`refresh|nodeisdown|1|${T}`, T + 90_000)
             throw new Error('node down')
         }
         try {
             h.records.set('nodeisdown', { avatar: 'https://x/a.jpg', cover: '' })
-            h.due.set('refresh|nodeisdown|1', T)
+            h.due.set(`refresh|nodeisdown|1|${T}`, T)
             await runDue(T)
         } finally {
             rpc.call = orig
         }
-        assert.equal(h.due.get('refresh|nodeisdown|1'), T + 90_000)
+        assert.equal(h.due.get(`refresh|nodeisdown|1|${T}`), T + 90_000)
+    })
+
+    it('retries a failed refresh for an unrecorded user too, until the give-up limit', async () => {
+        const orig = rpc.call
+        rpc.call = async () => { throw new Error('node down') }
+        try {
+            h.due.set(`refresh|nobody|0|${T}`, T)
+            await runDue(T)
+            assert.deepEqual([...h.due.entries()], [[`refresh|nobody|0|${T}`, T + timing.retryMs]])
+            const late = T + timing.giveUpMs + 1
+            h.due.set(`refresh|nobody|0|${T}`, late)
+            await runDue(late)
+            assert.equal(h.due.size, 0)
+        } finally {
+            rpc.call = orig
+        }
     })
 
     it('retries a refresh that came back incomplete (legacy lookup failed)', async () => {
         h.records.set('ghostbridge', { avatar: 'https://x/a.jpg', cover: '' })
-        h.due.set('refresh|ghostbridge|0', T)
+        h.due.set(`refresh|ghostbridge|0|${T}`, T)
         await runDue(T)
-        assert.deepEqual([...h.due.entries()], [['refresh|ghostbridge|0', T + timing.retryMs]])
+        assert.deepEqual([...h.due.entries()], [[`refresh|ghostbridge|0|${T}`, T + timing.retryMs]])
     })
 
     it('leaves later refreshes queued for whoever holds the lock next', async () => {
         h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
         await scheduleRefresh('foo', T)
         await runDue(T + REFRESH_DELAYS_MS[0])
-        assert.deepEqual([...h.due.keys()], ['refresh|foo|1'])
+        assert.deepEqual([...h.due.keys()], [`refresh|foo|1|${T}`])
     })
 })
 

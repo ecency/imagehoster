@@ -120,7 +120,7 @@ export async function clearOnce(user: string, kind: ImageKind, cdnOnly = false):
 //
 // Pending refreshes and clears live in one Redis sorted set, scored by when
 // they are due, so a worker restart or a lock handover loses nothing. Members:
-//   refresh|<user>|<n>                    fresh profile lookup number n
+//   refresh|<user>|<n>|<since>            fresh lookup number n after an update seen at <since>
 //   clear|<user>|<kind>|<pass>|<since>|<part>
 //                                         clear pass 1 or 2 of a change seen at <since>;
 //                                         part is `all`, or `cdn` once the ban succeeded
@@ -249,13 +249,13 @@ export const REFRESH_DELAYS_MS = [20_000, 90_000]
 
 /**
  * Queue fresh lookups after an account update, for every account: a missing
- * record does not prove nothing is cached (see noteProfileImages). Another
- * update before they run pushes them back, so the last update always gets the
- * full window. About a dozen updates an hour chain-wide.
+ * record does not prove nothing is cached (see noteProfileImages). Each update
+ * gets its own pair, so the last update always gets the full window. About a
+ * dozen updates an hour chain-wide.
  */
 export async function scheduleRefresh(user: string, now = Date.now()): Promise<void> {
     for (let i = 0; i < REFRESH_DELAYS_MS.length; i++) {
-        await queue.add(`refresh|${user}|${i}`, now + REFRESH_DELAYS_MS[i])
+        await queue.add(`refresh|${user}|${i}|${now}`, now + REFRESH_DELAYS_MS[i])
     }
 }
 
@@ -287,11 +287,13 @@ async function runTask(member: string, now: number, leaseUntil: number): Promise
     const [type, user, kind, pass, sinceRaw, part] = member.split('|')
     if (type === 'refresh') {
         // A fresh lookup that records the result, which queues any clear.
-        // Retry a failed or incomplete lookup while the user still has a
-        // record; the record expires, which bounds the retries. A newer update
-        // that re-added this refresh meanwhile keeps its later time.
-        if (!(await refreshProfile(user)) && await imageRecord.get(user)) {
-            await queue.retry(member, leaseUntil, now + timing.retryMs)
+        // Retry a failed or incomplete lookup, recorded user or not (an
+        // unrecorded one may still have the old image cached), with the same
+        // backoff and limit as a clear: after GIVE_UP every layer has expired
+        // the old image anyway.
+        const since = Number(pass)
+        if (!(await refreshProfile(user)) && Number.isFinite(since) && now - since <= timing.giveUpMs) {
+            await queue.retry(member, leaseUntil, now + retryDelay(now, since))
             return
         }
         await queue.finish(member, leaseUntil)

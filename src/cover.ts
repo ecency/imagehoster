@@ -63,13 +63,13 @@ async function handleCover(ctx: KoaContext) {
   APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
 
-  // A mixed-case or percent-encoded name (or `cover` segment) serves the same
+  // A mixed-case or percent-encoded name (or `u` or `cover` segment) serves the same
   // image, but the CDN purge on a profile change (profile-change.ts) is a
   // case-sensitive prefix of the plain lowercase path. So only that path may
   // cache the image; the redirect never goes stale. Compared on the raw path,
   // which the router has not decoded.
   const segments = ctx.path.split('/')
-  if (segments[2] !== username || segments[3] !== 'cover') {
+  if (segments[1] !== 'u' || segments[2] !== username || segments[3] !== 'cover') {
     ctx.status = 301
     ctx.redirect(['', 'u', username, 'cover', ...segments.slice(4)].join('/') + ctx.search)
     return

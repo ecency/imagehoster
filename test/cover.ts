@@ -83,7 +83,7 @@ describe('cover', function() {
     })
 
     it('redirects a mixed-case cover segment to the lowercase path', async function() {
-        for (const [from, to] of [['/u/foo/Cover', '/u/foo/cover'], ['/u/foo/COVER/?y=1', '/u/foo/cover/?y=1']]) {
+        for (const [from, to] of [['/U/foo/cover', '/u/foo/cover'], ['/u/foo/Cover', '/u/foo/cover'], ['/u/foo/COVER/?y=1', '/u/foo/cover/?y=1']]) {
             const res = await needle('get', `http://localhost:${port}${from}`, { follow_max: 0 })
             assert.equal(res.statusCode, 301, from)
             assert.equal(res.headers['location'], to)

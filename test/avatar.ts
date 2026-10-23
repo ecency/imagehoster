@@ -131,7 +131,7 @@ describe('avatar', function() {
     })
 
     it('redirects a mixed-case avatar segment to the lowercase path', async function() {
-        for (const [from, to] of [['/u/foo/Avatar', '/u/foo/avatar'], ['/u/foo/AVATAR/x?y=1', '/u/foo/avatar/x?y=1']]) {
+        for (const [from, to] of [['/U/foo/avatar', '/u/foo/avatar'], ['/u/foo/Avatar', '/u/foo/avatar'], ['/u/foo/AVATAR/x?y=1', '/u/foo/avatar/x?y=1']]) {
             const res = await needle('get', `http://localhost:${port}${from}`, { follow_max: 0 })
             assert.equal(res.statusCode, 301, from)
             assert.equal(res.headers['location'], to)
