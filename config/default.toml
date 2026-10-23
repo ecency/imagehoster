@@ -98,6 +98,11 @@ redis_url = 'redis://myredis'
 # Clients must send header: X-Invalidate-Key: <invalidate_token>
 # invalidate_token = '' # Set in config/local-development.toml
 
+# Varnish in front of this service, for banning a user's avatar or cover when it
+# changes (see src/profile-change.ts). Unset = no Varnish to clear. Varnish must
+# allow BAN from this service's address (acl banners in config/varnish-user.vcl).
+# varnish_url = 'http://<docker bridge gateway>:6081/'
+
 # dynamic blacklist configuration
 # Fetches blacklists from remote URLs and caches in memory with TTL
 # Falls back to local JSON files (blacklist-images.json, blacklist-accounts.json) if fetch fails

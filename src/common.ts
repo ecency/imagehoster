@@ -8,6 +8,7 @@ import { createClient } from 'redis'
 import {cache} from './cache'
 import {APIError} from './error'
 import {logger} from './logger'
+import {noteProfileImages} from './profile-change'
 
 const numWorkers = Number.parseInt(config.get('num_workers'))
 const isPrimaryOnly = cluster.isPrimary && numWorkers > 1
@@ -224,6 +225,11 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
                 }
             }
             await redisSet(cacheKey, profile, ttl)
+            // Skip the short-ttl case: the avatar may be missing only because the
+            // legacy lookup failed, which would read as a change and back again.
+            if (ttl === 300) {
+                noteProfileImages(user, profile).catch((err) => logger.error({ err, user }, 'profile image check failed'))
+            }
         } else {
             // Null/undefined result — negative cache with short TTL
             await redisSet(cacheKey, null, 30)

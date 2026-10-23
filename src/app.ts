@@ -11,6 +11,7 @@ import './sentry' // Initialize Sentry early
 import {KoaContext} from './common'
 import {APIError, errorMiddleware} from './error'
 import {logger, loggerMiddleware} from './logger'
+import {startProfileWatcher} from './profile-change'
 import {routes} from './routes'
 import {encodeBudget, RESERVED_POOL_SLOTS} from './encode-limit'
 import {getSharpConcurrency, parseBool} from './utils'
@@ -109,6 +110,7 @@ async function main() {
         const port = config.get('port')
         await listen(port)
         logger.info('listening on port %d', port)
+        startProfileWatcher()
         // Both of these have gone wrong silently before, so state them at boot.
         // The allocator line reads /proc/self/maps rather than trusting config:
         // it reports what is actually mapped into this process.

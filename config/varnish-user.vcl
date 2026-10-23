@@ -17,19 +17,44 @@
 vcl 4.1;
 
 backend default {
-    .host = "0.0.0.0";
+    .host = "127.0.0.1";
     .port = "8800";
+    .connect_timeout = 3s;
+    .first_byte_timeout = 20s;
+    .between_bytes_timeout = 10s;
+    .max_connections = 900;
     .probe = {
         .url = "/";
-        .timeout = 40ms;
-        .interval = 1s;
-        .window = 10;
-        .threshold = 8;
+        .timeout = 2s;
+        .interval = 5s;
+        .window = 5;
+        .threshold = 3;
      }
+}
+
+# Dedicated backend lane for uploads (POST). Same origin process as `default`,
+# but Varnish tracks max_connections per backend OBJECT, so uploads get an
+# isolated connection pool and can never be starved by proxy-fetch saturation
+# (the /p/* long tail exhausts `default` and returns 503 "backend busy").
+# Longer first_byte_timeout: an upload is body-read + sharp + S3 PUT, which is
+# legitimately slower than a proxy fetch.
+backend uploads {
+    .host = "127.0.0.1";
+    .port = "8800";
+    .connect_timeout = 3s;
+    .first_byte_timeout = 120s;
+    .between_bytes_timeout = 30s;
+    .max_connections = 40;
 }
 acl purgers {
     "127.0.0.1";
     "78.56.0.0"/16;
+}
+# Who may BAN a user's avatar or cover: the imagehoster container, which reaches
+# Varnish from a Docker bridge network. Deliberately not 127.0.0.1, because
+# public traffic arrives from nginx on loopback.
+acl banners {
+    "172.16.0.0"/12;
 }
 sub vcl_recv {
     if (
@@ -39,6 +64,33 @@ sub vcl_recv {
         req.http.host == "www.images.ecency.com"
     ) {
         set req.backend_hint = default;
+    }
+
+    # Uploads (imagehoster exposes POST only for upload routes: /hs/:token,
+    # /:user/:sig, /webp/hs/:token) go to the isolated `uploads` backend so a
+    # saturated proxy pool cannot 503 them. Always pass — never cacheable.
+    if (req.method == "POST") {
+        set req.backend_hint = uploads;
+        return (pass);
+    }
+    # Profile image change: imagehoster asks to drop every cached size, route
+    # (/u and /webp/u) and hostname of one user's avatar or cover. Varnish
+    # builds the ban itself from two validated headers, so the caller cannot
+    # ban anything else. A dot in a username matches any character here, which
+    # can only over-ban a similar name: a cache miss, never a stale image.
+    # Case-insensitive because the handlers lowercase the name, so /u/Alice
+    # serves alice. The ban tests obj.http.x-url (set below) rather than
+    # req.url so the ban lurker can retire it instead of it piling up.
+    if (req.method == "BAN") {
+        if (!client.ip ~ banners) {
+            return (synth(405, "Banning not allowed for " + client.ip));
+        }
+        if (req.http.X-Ban-User !~ "^[a-z0-9][a-z0-9.-]{1,15}$" ||
+            req.http.X-Ban-Kind !~ "^(avatar|cover)$") {
+            return (synth(400, "Bad ban request"));
+        }
+        ban("obj.http.x-url ~ (?i)^(/webp)?/u/" + req.http.X-Ban-User + "/" + req.http.X-Ban-Kind + "(/|\?|$)");
+        return (synth(200, "Banned"));
     }
     if (req.method == "PURGE"){
        if (!client.ip ~ purgers) {
@@ -77,6 +129,9 @@ sub vcl_recv {
 }
 
 sub vcl_backend_response {
+    # Stored with the object for the lurker-friendly BAN above; removed in vcl_deliver.
+    set beresp.http.x-url = bereq.url;
+
     # Default: generous grace and keep for stale-serving during backend issues.
     set beresp.grace = 24h;
     set beresp.keep = 7d;
@@ -127,6 +182,7 @@ sub vcl_synth {
     }
 }
 sub vcl_deliver {
+    unset resp.http.x-url;
     unset resp.http.X-Varnish;
     unset resp.http.Via;
 }
