@@ -21,9 +21,9 @@
 
 import config from 'config'
 import { FETCH_DEADLINE_MS } from './constants'
-import { HiveProfile, redisClient, redisReady, redisSet, refreshProfile, rpc } from './common'
+import { HiveProfile, redisClient, redisReady, refreshProfile, rpc, servedImageUrl } from './common'
 import { logger } from './logger'
-import { purgeCache } from './utils'
+import { purgeCachePrefixes } from './utils'
 
 export type ImageKind = 'avatar' | 'cover'
 
@@ -52,21 +52,24 @@ export const imageRecord = {
         const raw = await redisClient.get(`profile:images:${user}`)
         return raw ? JSON.parse(raw) as ServedImages : undefined
     },
-    set: async (user: string, value: ServedImages): Promise<void> => redisSet(`profile:images:${user}`, value, RECORD_TTL),
+    /** Throws on a failed write too, so a change is not taken as recorded when it was not. */
+    set: async (user: string, value: ServedImages): Promise<void> => {
+        if (!redisClient) return
+        if (redisReady) await redisReady
+        if (!redisClient.isReady) throw new Error('redis not ready, image record not written')
+        await redisClient.setEx(`profile:images:${user}`, RECORD_TTL, JSON.stringify(value))
+    },
 }
 
-const httpOrEmpty = (value: any): string =>
-    typeof value === 'string' && /^https?:\/\//.test(value) ? value : ''
 
 /**
- * Every path that serves a user's avatar or cover. The `/webp/u/...` routes only
- * redirect to these, so their cached responses never go stale.
+ * The CDN path prefix under which every URL serving a user's avatar or cover
+ * lives: any size, trailing slash, query string or request-header variant. The
+ * `/webp/u/...` routes only redirect here, so their cached responses never go
+ * stale; mixed-case and encoded names redirect to this plain lowercase path.
  */
-export function imagePaths(user: string, kind: ImageKind): string[] {
-    const tails = kind === 'avatar'
-        ? ['avatar', 'avatar/', 'avatar/small', 'avatar/medium', 'avatar/large']
-        : ['cover', 'cover/']
-    return tails.map((tail) => `/u/${user}/${tail}`)
+export function imagePrefix(user: string, kind: ImageKind): string {
+    return `/u/${user}/${kind}`
 }
 
 /**
@@ -98,8 +101,8 @@ export const invalidators = {
         const url = config.has('varnish_url') ? config.get('varnish_url') as string : ''
         return url ? banVarnish(url, user, kind) : true
     },
-    /** purgeCache expands each URL to both service hostnames. */
-    purgeCdn: (urls: string[]): Promise<boolean> => purgeCache(urls),
+    /** Prefix purge on both service hostnames. */
+    purgeCdn: (prefixes: string[]): Promise<boolean> => purgeCachePrefixes(prefixes),
 }
 
 /**
@@ -108,9 +111,8 @@ export const invalidators = {
  * expired. `cdnOnly` retries just the purge after a ban that already succeeded.
  */
 export async function clearOnce(user: string, kind: ImageKind, cdnOnly = false): Promise<{ banned: boolean, purged: boolean }> {
-    const origin = new URL(config.get('service_url') as string).origin
     const banned = cdnOnly ? true : await invalidators.banVarnish(user, kind)
-    const purged = await invalidators.purgeCdn(imagePaths(user, kind).map((path) => `${origin}${path}`))
+    const purged = await invalidators.purgeCdn([imagePrefix(user, kind)])
     return { banned, purged }
 }
 
@@ -215,13 +217,22 @@ const retryDelay = (now: number, since: number) =>
  * queues a clear for whichever image differs from the last record. The record
  * moves on at once; the queued clear is what stays pending until it succeeds.
  */
-export async function noteProfileImages(user: string, profile: HiveProfile, now = Date.now()): Promise<void> {
+export async function noteProfileImages(
+    user: string, profile: HiveProfile, now = Date.now(), unrecordedIsChange = false,
+): Promise<void> {
     const p = (profile.metadata && profile.metadata.profile) || {}
-    const next: ServedImages = { avatar: httpOrEmpty(p.profile_image), cover: httpOrEmpty(p.cover_image) }
+    const next: ServedImages = { avatar: servedImageUrl(p.profile_image), cover: servedImageUrl(p.cover_image) }
     const prev = await imageRecord.get(user)
     const changed: ImageKind[] = []
-    if (prev && prev.avatar !== next.avatar) changed.push('avatar')
-    if (prev && prev.cover !== next.cover) changed.push('cover')
+    if (prev) {
+        if (prev.avatar !== next.avatar) changed.push('avatar')
+        if (prev.cover !== next.cover) changed.push('cover')
+    } else if (unrecordedIsChange) {
+        // The watcher looks after an account update. Without a record we cannot
+        // tell what is cached (a lookup during hivemind lag, or a lost record,
+        // may have cached the old image), so clear both: one ban and one purge.
+        changed.push('avatar', 'cover')
+    }
     // Queue before moving the record: if queueing fails, the record still holds
     // the old value and the next fresh lookup sees the change again.
     for (const kind of changed) {
@@ -237,14 +248,12 @@ export async function noteProfileImages(user: string, profile: HiveProfile, now 
 export const REFRESH_DELAYS_MS = [20_000, 90_000]
 
 /**
- * Queue fresh lookups for a recorded user after an account update. Another
- * update before they run pushes them back, so the last update always gets
- * the full window.
+ * Queue fresh lookups after an account update, for every account: a missing
+ * record does not prove nothing is cached (see noteProfileImages). Another
+ * update before they run pushes them back, so the last update always gets the
+ * full window. About a dozen updates an hour chain-wide.
  */
 export async function scheduleRefresh(user: string, now = Date.now()): Promise<void> {
-    if (!(await imageRecord.get(user))) {
-        return
-    }
     for (let i = 0; i < REFRESH_DELAYS_MS.length; i++) {
         await queue.add(`refresh|${user}|${i}`, now + REFRESH_DELAYS_MS[i])
     }
@@ -371,7 +380,11 @@ export const cursorStore = {
         if (!redisClient || !redisClient.isReady) throw new Error('redis not ready, cursor unreadable')
         return Number(await redisClient.get(CURSOR_KEY)) || 0
     },
-    set: async (block: number): Promise<void> => redisSet(CURSOR_KEY, block, 24 * 60 * 60),
+    /** No expiry: a cursor that vanished during an outage would skip the blocks after it. */
+    set: async (block: number): Promise<void> => {
+        if (!redisClient || !redisClient.isReady) return
+        await redisClient.set(CURSOR_KEY, String(block))
+    },
 }
 
 /**
@@ -386,11 +399,10 @@ export async function poll(): Promise<void> {
         return
     }
     let cursor = await cursorStore.get()
-    if (!cursor) {
-        cursor = head
-    } else if (head - cursor > MAX_LAG_BLOCKS) {
-        // Older changes concern records that have expired since, but anyone
-        // seen within the record lifetime may have changed an image meanwhile.
+    if (!cursor || head - cursor > MAX_LAG_BLOCKS) {
+        // No cursor (first start, or lost) or a long outage: replay the record
+        // lifetime. Older changes concern records that have expired since, but
+        // anyone seen within it may have changed an image meanwhile.
         cursor = head - MAX_LAG_BLOCKS
     }
     if (cursor > head) {

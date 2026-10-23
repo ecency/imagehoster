@@ -82,12 +82,12 @@ describe('cover', function() {
         assert.equal(res.headers['location'], '/u/alice/cover')
     })
 
-    it('caches the default briefly when the account has not set a cover', async function() {
-        this.slow(3000)
-        this.timeout(10000)
-        const res = await needle('get', `http://localhost:${port}/u/noavatar/cover`)
-        assert.equal(res.statusCode, 200)
-        assert.equal(res.headers['cache-control'], 'public,max-age=120')
+    it('redirects a mixed-case cover segment to the lowercase path', async function() {
+        for (const [from, to] of [['/u/foo/Cover', '/u/foo/cover'], ['/u/foo/COVER/?y=1', '/u/foo/cover/?y=1']]) {
+            const res = await needle('get', `http://localhost:${port}${from}`, { follow_max: 0 })
+            assert.equal(res.statusCode, 301, from)
+            assert.equal(res.headers['location'], to)
+        }
     })
 
     it('should reject short usernames', async function() {
@@ -152,16 +152,6 @@ describe('cover', function() {
         assert(first.headers['etag'], 'response should have etag')
         assert.equal(first.headers['last-modified'], undefined,
             'no Last-Modified: it carried the profile timestamp, which says nothing about the stored bytes')
-    })
-
-    it('caches both purged paths for an hour and a query variant briefly', async function() {
-        this.slow(3000)
-        this.timeout(10000)
-        for (const [suffix, policy] of [['', 'public,max-age=3600'], ['/', 'public,max-age=3600'], ['?x=1', 'public,max-age=120']]) {
-            const res = await needle('get', `http://localhost:${port}/u/healthy/cover${suffix}`)
-            assert.equal(res.statusCode, 200, `suffix ${suffix || '(none)'}`)
-            assert.equal(res.headers['cache-control'], policy, `suffix ${suffix || '(none)'}`)
-        }
     })
 
     it('answers 304 for conditional revalidation of a healthy cover', async function() {

@@ -109,23 +109,15 @@ describe('avatar', function() {
         assert.equal(res.statusCode, 404)
     })
 
-    it('caches purged paths for an hour and every other variant briefly', async function() {
+    it('serves every size and query variant with the normal policy (the CDN purge is by prefix)', async function() {
         this.slow(3000)
         this.timeout(10000)
-        for (const [size, policy] of [
-            ['', 'public,max-age=3600'], ['/', 'public,max-age=3600'], ['/medium', 'public,max-age=3600'],
-            ['/64', 'public,max-age=120'], ['/%73mall', 'public,max-age=120'], ['/small/', 'public,max-age=120'],
-            ['?x=1', 'public,max-age=120'], ['/small?v=2', 'public,max-age=120'],
-        ]) {
-            const res = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
-            assert.equal(res.statusCode, 200)
-            assert.equal(res.headers['cache-control'], policy, `size ${size || '(none)'}`)
-            // and again from the stored variant
-            const again = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
-            assert.equal(again.headers['cache-control'], policy, `stored size ${size || '(none)'}`)
+        for (const suffix of ['', '/', '/medium', '/64', '/small/', '?x=1']) {
+            const res = await needle('get', `http://localhost:${port}/u/healthy/avatar${suffix}`)
+            assert.equal(res.statusCode, 200, `suffix ${suffix || '(none)'}`)
+            assert.equal(res.headers['cache-control'], 'public,max-age=3600', `suffix ${suffix || '(none)'}`)
         }
     })
-
     it('redirects a percent-encoded name to the plain lowercase URL', async function() {
         const res = await needle('get', `http://localhost:${port}/u/%41lice/avatar/small?x=1`, { follow_max: 0 })
         assert.equal(res.statusCode, 301)
@@ -138,12 +130,12 @@ describe('avatar', function() {
         assert.equal(res.headers['location'], '/u/alice/avatar')
     })
 
-    it('caches the default briefly when the account has not set a avatar', async function() {
-        this.slow(3000)
-        this.timeout(10000)
-        const res = await needle('get', `http://localhost:${port}/u/noavatar/avatar`)
-        assert.equal(res.statusCode, 200)
-        assert.equal(res.headers['cache-control'], 'public,max-age=120')
+    it('redirects a mixed-case avatar segment to the lowercase path', async function() {
+        for (const [from, to] of [['/u/foo/Avatar', '/u/foo/avatar'], ['/u/foo/AVATAR/x?y=1', '/u/foo/avatar/x?y=1']]) {
+            const res = await needle('get', `http://localhost:${port}${from}`, { follow_max: 0 })
+            assert.equal(res.statusCode, 301, from)
+            assert.equal(res.headers['location'], to)
+        }
     })
 
     it('should reject short usernames', async function() {

@@ -10,7 +10,6 @@ import {resizeImageWithOptions} from './image-resizer'
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
 import { budgetSignal, FETCH_DEADLINE_MS, STORE_OP_TIMEOUT_MS } from './constants'
 import { APIError } from './error'
-import { imagePaths } from './profile-change'
 import {
   cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
   storeImage, worstOf,
@@ -40,7 +39,6 @@ import {
 
 /** A real avatar is fresh for an hour so profile changes propagate. */
 const REAL_CACHE_CONTROL = 'public,max-age=3600'
-const SHORT_CACHE_CONTROL = 'public,max-age=120'
 const DefaultAvatar = config.get('default_avatar') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -65,24 +63,17 @@ async function handleAvatar(ctx: KoaContext) {
   APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
 
-  // A mixed-case or percent-encoded name serves the same image, but the CDN
-  // purge on a profile change (profile-change.ts) is exact and lists the plain
-  // lowercase URLs. So only that URL may cache the image; the redirect never
-  // goes stale. Compared on the raw path, which the router has not decoded.
+  // A mixed-case or percent-encoded name (or `avatar` segment) serves the same
+  // image, but the CDN purge on a profile change (profile-change.ts) is a
+  // case-sensitive prefix of the plain lowercase path. So only that path may
+  // cache the image; the redirect never goes stale. Compared on the raw path,
+  // which the router has not decoded.
   const segments = ctx.path.split('/')
-  if (segments[2] !== username) {
+  if (segments[2] !== username || segments[3] !== 'avatar') {
     ctx.status = 301
-    ctx.redirect(`/u/${username}/${segments.slice(3).join('/')}${ctx.search}`)
+    ctx.redirect(['', 'u', username, 'avatar', ...segments.slice(4)].join('/') + ctx.search)
     return
   }
-
-  // The CDN purge on a profile change lists exact URLs, and the CDN cache key
-  // includes the query string. Any other URL (another size, an encoded or
-  // trailing-slash variant, any query) may only be cached briefly, so it cannot
-  // hold an old image for an hour. max-age=120 is also the short branch in the
-  // Varnish VCL.
-  let realCacheControl = !ctx.querystring && imagePaths(username, 'avatar').includes(ctx.path)
-    ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
   const query = ctx.request.query
@@ -125,11 +116,6 @@ async function handleAvatar(ctx: KoaContext) {
     avatarUrl = profile.metadata.profile.profile_image
   } else if (!profile) {
     isProfileFallback = true
-  } else {
-    // No avatar set yet: the default stands in. Keep it short-lived, so a first
-    // avatar shows within minutes everywhere, including the browser cache that
-    // no purge can reach.
-    realCacheControl = SHORT_CACHE_CONTROL
   }
 
   if (isBlacklistedUrl(avatarUrl)) {
@@ -214,7 +200,7 @@ async function handleAvatar(ctx: KoaContext) {
     }
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', cacheControlFor(served, realCacheControl))
+    ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
     ctx.body = stream
     return
   }
@@ -362,7 +348,7 @@ async function handleAvatar(ctx: KoaContext) {
   if (shouldBypassCache) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
-    ctx.set('Cache-Control', cacheControlFor(response, realCacheControl))
+    ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
   }
   ctx.set('ETag', etagFor(response, imageKey, response.bytes, response.bytes.length))
   ctx.body = response.bytes

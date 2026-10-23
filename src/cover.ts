@@ -6,7 +6,6 @@ import {URL} from 'url'
 
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
 import { APIError } from './error'
-import { imagePaths } from './profile-change'
 import {
   cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
   storeImage, worstOf,
@@ -39,7 +38,6 @@ import {
 
 /** A real cover is fresh for an hour so profile changes propagate. */
 const REAL_CACHE_CONTROL = 'public,max-age=3600'
-const SHORT_CACHE_CONTROL = 'public,max-age=120'
 const DefaultCover = config.get('default_cover') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -65,21 +63,17 @@ async function handleCover(ctx: KoaContext) {
   APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
 
-  // A mixed-case or percent-encoded name serves the same image, but the CDN
-  // purge on a profile change (profile-change.ts) is exact and lists the plain
-  // lowercase URLs. So only that URL may cache the image; the redirect never
-  // goes stale. Compared on the raw path, which the router has not decoded.
+  // A mixed-case or percent-encoded name (or `cover` segment) serves the same
+  // image, but the CDN purge on a profile change (profile-change.ts) is a
+  // case-sensitive prefix of the plain lowercase path. So only that path may
+  // cache the image; the redirect never goes stale. Compared on the raw path,
+  // which the router has not decoded.
   const segments = ctx.path.split('/')
-  if (segments[2] !== username) {
+  if (segments[2] !== username || segments[3] !== 'cover') {
     ctx.status = 301
-    ctx.redirect(`/u/${username}/${segments.slice(3).join('/')}${ctx.search}`)
+    ctx.redirect(['', 'u', username, 'cover', ...segments.slice(4)].join('/') + ctx.search)
     return
   }
-
-  // The CDN purge on a profile change lists exact URLs without a query. Any
-  // other URL may only be cached briefly, as in avatar.ts.
-  let realCacheControl = !ctx.querystring && imagePaths(username, 'cover').includes(ctx.path)
-    ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
   const query = ctx.request.query
@@ -122,9 +116,6 @@ async function handleCover(ctx: KoaContext) {
     coverUrl = profile.metadata.profile.cover_image
   } else if (!profile) {
     isProfileFallback = true
-  } else {
-    // No cover set yet: short-lived, as for a missing avatar in avatar.ts.
-    realCacheControl = SHORT_CACHE_CONTROL
   }
 
   if (isBlacklistedUrl(coverUrl)) {
@@ -208,7 +199,7 @@ async function handleCover(ctx: KoaContext) {
     }
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', cacheControlFor(served, realCacheControl))
+    ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
     ctx.body = stream
     return
   }
@@ -349,7 +340,7 @@ async function handleCover(ctx: KoaContext) {
   if (shouldBypassCache) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
-    ctx.set('Cache-Control', cacheControlFor(response, realCacheControl))
+    ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
   }
   ctx.set('ETag', etagFor(response, imageKey, response.bytes, response.bytes.length))
   ctx.body = response.bytes

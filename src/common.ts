@@ -8,7 +8,7 @@ import { createClient } from 'redis'
 import {cache} from './cache'
 import {APIError} from './error'
 import {logger} from './logger'
-import {noteProfileImages} from './profile-change'
+import {imageRecord, noteProfileImages} from './profile-change'
 
 const numWorkers = Number.parseInt(config.get('num_workers'))
 const isPrimaryOnly = cluster.isPrimary && numWorkers > 1
@@ -145,6 +145,13 @@ export interface HiveProfile {
     }}
 }
 
+/**
+ * The image URL the avatar and cover handlers serve for a profile field, or ''
+ * for the default. Same test as theirs, so the record matches what was served.
+ */
+export const servedImageUrl = (v: unknown): string =>
+    typeof v === 'string' && v.startsWith('http') ? v : ''
+
 const isHttpUrl = (v: unknown): v is string =>
     typeof v === 'string' &&
     (v.startsWith('http://') || v.startsWith('https://')) &&
@@ -183,6 +190,39 @@ function legacyProfileImage(
     return undefined
 }
 
+/**
+ * The images an account resolves to, by the same rule as the bridge lookup plus
+ * its legacy fallback in loadProfile: the posting profile, and json_metadata
+ * only for an image the posting profile lacks; the legacy cover only when the
+ * avatar is legacy too. The same rule matters: verifying must not change what
+ * is served, or every unverified lookup would differ from the record.
+ */
+function imagesFromAccount(account: HiveAccount): { avatar: string, cover: string } {
+    const posting = parseProfile(account.posting_json_metadata) || {}
+    const legacy = parseProfile(account.json_metadata) || {}
+    const postingAvatar = isHttpUrl(posting.profile_image) ? posting.profile_image : ''
+    const avatar = postingAvatar || (isHttpUrl(legacy.profile_image) ? legacy.profile_image : '')
+    const cover = isHttpUrl(posting.cover_image) ? posting.cover_image
+        : !postingAvatar && isHttpUrl(legacy.cover_image) ? legacy.cover_image : ''
+    return { avatar, cover }
+}
+
+/**
+ * Whether a bridge profile's images differ from the record of what was served.
+ * An unreadable record counts as unchanged here: on the request path a Redis
+ * outage must not double the RPCs, and the record could not be written anyway.
+ * The watcher verifies regardless.
+ */
+async function differsFromRecord(user: string, p: Record<string, any>): Promise<boolean> {
+    try {
+        const record = await imageRecord.get(user)
+        if (!record) return false
+        return record.avatar !== servedImageUrl(p.profile_image) || record.cover !== servedImageUrl(p.cover_image)
+    } catch {
+        return false
+    }
+}
+
 /** Get account profile (simplified data for avatar/cover, no JSON parsing needed) */
 export const getProfile = async (user: string, isCached= true): Promise<HiveProfile | undefined> => {
     const cacheKey = `profile:hive:${user}`
@@ -193,7 +233,7 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
             return cached === null ? undefined : cached as HiveProfile
         }
     }
-    const { profile, complete } = await loadProfile(user, isCached)
+    const { profile, complete } = await loadProfile(user, isCached, false)
     if (profile && complete) {
         noteProfileImages(user, profile).catch((err) => logger.error({ err, user }, 'profile image check failed'))
     }
@@ -206,20 +246,26 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
  * should retry. Throws when recording failed, which also means retry.
  */
 export async function refreshProfile(user: string): Promise<boolean> {
-    const { profile, complete } = await loadProfile(user, false)
+    const { profile, complete } = await loadProfile(user, false, true)
     if (!profile || !complete) {
         return false
     }
-    await noteProfileImages(user, profile)
+    await noteProfileImages(user, profile, Date.now(), true)
     return true
 }
 
 /**
  * Fetch a profile from the chain and cache it. `complete` is false for the
- * short-ttl result of a failed legacy lookup: its avatar may be missing only
+ * short-ttl result of a failed account lookup: its images may be wrong only
  * because that lookup failed, which would read as a change and back again.
+ *
+ * bridge (hivemind) can trail the chain, and RPC failover can land on a node
+ * that trails further. Right after a change that would cache, and record, the
+ * old image. So when the images may have changed (`verify`, or they differ from
+ * the record) they are taken from hived's account object instead, which is
+ * current: posting_json_metadata.profile, then json_metadata.profile.
  */
-async function loadProfile(user: string, isCached: boolean): Promise<{ profile?: HiveProfile, complete: boolean }> {
+async function loadProfile(user: string, isCached: boolean, verify: boolean): Promise<{ profile?: HiveProfile, complete: boolean }> {
     if (user.length > 16) return { complete: false }
     const cacheKey = `profile:hive:${user}`
     let profile: HiveProfile | undefined
@@ -238,8 +284,10 @@ async function loadProfile(user: string, isCached: boolean): Promise<{ profile?:
             // the same lookup, so the common broken case (posting profile-less, both images
             // only in json_metadata) is fully healed; the rare "working posting avatar +
             // legacy-only cover" case intentionally keeps the default cover.
+            // Fetched at most once per lookup, shared with the verification below.
+            let account: HiveAccount | undefined
             if (p && !isHttpUrl(p.profile_image)) {
-                const account = (await getAccount(user, isCached))[0]
+                account = (await getAccount(user, isCached && !verify))[0]
                 if (account) {
                     const avatar = legacyProfileImage(account, 'profile_image')
                     if (avatar) p.profile_image = avatar
@@ -250,6 +298,18 @@ async function loadProfile(user: string, isCached: boolean): Promise<{ profile?:
                 } else {
                     // bridge said the account exists, so an empty getAccount result means a
                     // transient get_accounts failure — cache briefly so we retry the merge soon.
+                    ttl = 30
+                }
+            }
+            if (p && ttl === 300 && (verify || await differsFromRecord(user, p))) {
+                // A cached account object can be as stale as bridge, so fetch it fresh
+                // unless this lookup already did.
+                if (!account || isCached) account = (await getAccount(user, false))[0]
+                if (account) {
+                    const images = imagesFromAccount(account)
+                    p.profile_image = images.avatar
+                    p.cover_image = images.cover
+                } else {
                     ttl = 30
                 }
             }

@@ -54,7 +54,9 @@ acl purgers {
 # Varnish from a Docker bridge network. Deliberately not 127.0.0.1, because
 # public traffic arrives from nginx on loopback.
 acl banners {
-    "172.16.0.0"/12;
+    # The Docker network the imagehoster container runs on. Widen it if the
+    # container moves to another network; a BAN from elsewhere gets 405.
+    "172.18.0.0"/16;
 }
 sub vcl_recv {
     if (
@@ -157,7 +159,7 @@ sub vcl_backend_response {
     # Backend sends max-age=3600 for success, max-age=120 for fallback.
     # A revalidated object brings back the header set below, which also
     # contains "max-age=120", so the s-maxage test keeps it in the success branch.
-    else if (bereq.url ~ "avatar" || bereq.url ~ "cover") {
+    else if (bereq.url ~ "(?i)avatar" || bereq.url ~ "(?i)cover") {
         if (beresp.http.Cache-Control ~ "max-age=120" && beresp.http.Cache-Control !~ "s-maxage") {
             # Fallback avatar/cover — cache 2 minutes, short grace
             set beresp.ttl = 120s;
@@ -187,18 +189,6 @@ sub vcl_synth {
 }
 sub vcl_deliver {
     unset resp.http.x-url;
-    # Cloudflare's default cache key includes these request headers (excluding
-    # them needs an Enterprise plan), and the purge on a profile change
-    # (profile-change.ts) lists bare URLs. So an avatar or cover requested with
-    # any of them may only be cached briefly. Browsers loading an <img> send
-    # none of them. Changes only the header sent, not the stored object.
-    if (req.url ~ "^/u/" && resp.http.Cache-Control ~ "s-maxage=3600" && (
-        req.http.Origin || req.http.X-HTTP-Method || req.http.X-HTTP-Method-Override ||
-        req.http.X-Method-Override || req.http.X-Forwarded-Host || req.http.X-Host ||
-        req.http.X-Forwarded-Scheme || req.http.X-Original-URL || req.http.X-Rewrite-URL ||
-        req.http.Forwarded)) {
-        set resp.http.Cache-Control = "public,max-age=120";
-    }
     unset resp.http.X-Varnish;
     unset resp.http.Via;
 }
