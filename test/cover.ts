@@ -146,6 +146,16 @@ describe('cover', function() {
             'no Last-Modified: it carried the profile timestamp, which says nothing about the stored bytes')
     })
 
+    it('caches both purged paths, with and without the trailing slash, for an hour', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        for (const [suffix, policy] of [['', 'public,max-age=3600'], ['/', 'public,max-age=3600']]) {
+            const res = await needle('get', `http://localhost:${port}/u/healthy/cover${suffix}`)
+            assert.equal(res.statusCode, 200, `suffix ${suffix || '(none)'}`)
+            assert.equal(res.headers['cache-control'], policy, `suffix ${suffix || '(none)'}`)
+        }
+    })
+
     it('answers 304 for conditional revalidation of a healthy cover', async function() {
         this.slow(3000)
         this.timeout(15000)

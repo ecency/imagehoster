@@ -6,6 +6,7 @@ import {URL} from 'url'
 
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
 import { APIError } from './error'
+import { imagePaths } from './profile-change'
 import {
   cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
   storeImage, worstOf,
@@ -38,6 +39,7 @@ import {
 
 /** A real cover is fresh for an hour so profile changes propagate. */
 const REAL_CACHE_CONTROL = 'public,max-age=3600'
+const SHORT_CACHE_CONTROL = 'public,max-age=120'
 const DefaultCover = config.get('default_cover') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -73,6 +75,11 @@ async function handleCover(ctx: KoaContext) {
     ctx.redirect(`/u/${username}/${segments.slice(3).join('/')}${ctx.search}`)
     return
   }
+
+  // The CDN purge on a profile change lists exact raw paths. Any other path
+  // may only be cached briefly, as in avatar.ts.
+  const realCacheControl = imagePaths(username, 'cover').includes(ctx.path)
+    ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
   const query = ctx.request.query
@@ -198,7 +205,7 @@ async function handleCover(ctx: KoaContext) {
     }
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
+    ctx.set('Cache-Control', cacheControlFor(served, realCacheControl))
     ctx.body = stream
     return
   }
@@ -339,7 +346,7 @@ async function handleCover(ctx: KoaContext) {
   if (shouldBypassCache) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
-    ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
+    ctx.set('Cache-Control', cacheControlFor(response, realCacheControl))
   }
   ctx.set('ETag', etagFor(response, imageKey, response.bytes, response.bytes.length))
   ctx.body = response.bytes

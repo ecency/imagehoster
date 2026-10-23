@@ -52,7 +52,7 @@ const httpOrEmpty = (value: any): string =>
 export function imagePaths(user: string, kind: ImageKind): string[] {
     const tails = kind === 'avatar'
         ? ['avatar', 'avatar/', 'avatar/small', 'avatar/medium', 'avatar/large']
-        : ['cover']
+        : ['cover', 'cover/']
     return tails.map((tail) => `/u/${user}/${tail}`)
 }
 

@@ -10,6 +10,7 @@ import {resizeImageWithOptions} from './image-resizer'
 import { getProfile, KoaContext, proxyStore, retentionStore, uploadStore } from './common'
 import { budgetSignal, FETCH_DEADLINE_MS, STORE_OP_TIMEOUT_MS } from './constants'
 import { APIError } from './error'
+import { imagePaths } from './profile-change'
 import {
   cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, realImage, ServedImage,
   storeImage, worstOf,
@@ -40,8 +41,6 @@ import {
 /** A real avatar is fresh for an hour so profile changes propagate. */
 const REAL_CACHE_CONTROL = 'public,max-age=3600'
 const SHORT_CACHE_CONTROL = 'public,max-age=120'
-/** The sizes profile-change.ts purges at the CDN. */
-const PURGED_SIZES = new Set(['small', 'medium', 'large'])
 const DefaultAvatar = config.get('default_avatar') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -77,10 +76,11 @@ async function handleAvatar(ctx: KoaContext) {
     return
   }
 
-  // The CDN purge on a profile change lists the named sizes clients request.
-  // Any other size may only be cached briefly, so it cannot hold an old image
-  // for an hour. max-age=120 is also the short branch in the Varnish VCL.
-  const realCacheControl = ctx.params['size'] === undefined || PURGED_SIZES.has(ctx.params['size'])
+  // The CDN purge on a profile change lists exact raw paths. Any other path
+  // (another size, an encoded or trailing-slash variant) may only be cached
+  // briefly, so it cannot hold an old image for an hour. max-age=120 is also
+  // the short branch in the Varnish VCL.
+  const realCacheControl = imagePaths(username, 'avatar').includes(ctx.path)
     ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters

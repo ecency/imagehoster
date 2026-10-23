@@ -77,7 +77,7 @@ describe('profile image change detection', () => {
         assert.deepEqual(imagePaths('esie', 'avatar'), [
             '/u/esie/avatar', '/u/esie/avatar/', '/u/esie/avatar/small', '/u/esie/avatar/medium', '/u/esie/avatar/large',
         ])
-        assert.deepEqual(imagePaths('esie', 'cover'), ['/u/esie/cover'])
+        assert.deepEqual(imagePaths('esie', 'cover'), ['/u/esie/cover', '/u/esie/cover/'])
     })
 
     it('records a first sighting without queueing anything', async () => {

@@ -109,10 +109,13 @@ describe('avatar', function() {
         assert.equal(res.statusCode, 404)
     })
 
-    it('caches named sizes for an hour and other sizes briefly', async function() {
+    it('caches purged paths for an hour and every other variant briefly', async function() {
         this.slow(3000)
         this.timeout(10000)
-        for (const [size, policy] of [['', 'public,max-age=3600'], ['/medium', 'public,max-age=3600'], ['/64', 'public,max-age=120']]) {
+        for (const [size, policy] of [
+            ['', 'public,max-age=3600'], ['/', 'public,max-age=3600'], ['/medium', 'public,max-age=3600'],
+            ['/64', 'public,max-age=120'], ['/%73mall', 'public,max-age=120'], ['/small/', 'public,max-age=120'],
+        ]) {
             const res = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
             assert.equal(res.statusCode, 200)
             assert.equal(res.headers['cache-control'], policy, `size ${size || '(none)'}`)
