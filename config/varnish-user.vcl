@@ -76,8 +76,7 @@ sub vcl_recv {
     # Profile image change: imagehoster asks to drop every cached size, route
     # (/u and /webp/u) and hostname of one user's avatar or cover. Varnish
     # builds the ban itself from two validated headers, so the caller cannot
-    # ban anything else. A dot in a username matches any character here, which
-    # can only over-ban a similar name: a cache miss, never a stale image.
+    # ban anything else. Dots in the name are escaped so a.b cannot match axb.
     # Case-insensitive because the handlers lowercase the name, so /u/Alice
     # serves alice. The ban tests obj.http.x-url (set below) rather than
     # req.url so the ban lurker can retire it instead of it piling up.
@@ -89,7 +88,7 @@ sub vcl_recv {
             req.http.X-Ban-Kind !~ "^(avatar|cover)$") {
             return (synth(400, "Bad ban request"));
         }
-        ban("obj.http.x-url ~ (?i)^(/webp)?/u/" + req.http.X-Ban-User + "/" + req.http.X-Ban-Kind + "(/|\?|$)");
+        ban("obj.http.x-url ~ (?i)^(/webp)?/u/" + regsuball(req.http.X-Ban-User, "\.", "\\.") + "/" + req.http.X-Ban-Kind + "(/|\?|$)");
         return (synth(200, "Banned"));
     }
     if (req.method == "PURGE"){

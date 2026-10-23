@@ -6,11 +6,14 @@
  * old bytes until they expire. This module:
  *
  * 1. Records which avatar and cover URL each fresh profile lookup resolved to.
- *    When the next fresh lookup resolves to a different URL, it bans the user's
- *    paths in Varnish and then purges them at the CDN. Varnish goes first, or
- *    the CDN would refill from Varnish's stale copy.
+ *    When the next fresh lookup resolves to a different URL, it queues a clear:
+ *    ban the user's paths in Varnish, then purge them at the CDN. Varnish goes
+ *    first, or the CDN would refill from Varnish's stale copy. A clear stays
+ *    queued until both layers confirm, then runs once more for in-flight renders.
  * 2. Follows the chain so that a fresh lookup happens soon after an
  *    `account_update`, instead of whenever a request happens to reach the origin.
+ *
+ * Pending work is a Redis sorted set, so a restart or lock handover loses none.
  *
  * The record lives for longer than every cache layer holds a response. A user
  * with no record has nothing cached in our layers, so their updates are skipped.
@@ -83,55 +86,156 @@ export const invalidators = {
         return url ? banVarnish(url, user, kind) : true
     },
     /** purgeCache expands each URL to both service hostnames. */
-    purgeCdn: (urls: string[]) => purgeCache(urls),
+    purgeCdn: (urls: string[]): Promise<boolean> => purgeCache(urls),
+}
+
+/**
+ * Varnish first, then the CDN, since a CDN miss refills from Varnish. The CDN
+ * is purged even after a failed ban, because the Varnish copy may already have
+ * expired. `cdnOnly` retries just the purge after a ban that already succeeded.
+ */
+export async function clearOnce(user: string, kind: ImageKind, cdnOnly = false): Promise<{ banned: boolean, purged: boolean }> {
+    const origin = new URL(config.get('service_url') as string).origin
+    const banned = cdnOnly ? true : await invalidators.banVarnish(user, kind)
+    const purged = await invalidators.purgeCdn(imagePaths(user, kind).map((path) => `${origin}${path}`))
+    return { banned, purged }
+}
+
+// --- Durable work queue ------------------------------------------------------
+//
+// Pending refreshes and clears live in one Redis sorted set, scored by when
+// they are due, so a worker restart or a lock handover loses nothing. Members:
+//   refresh|<user>|<n>                    fresh profile lookup number n
+//   clear|<user>|<kind>|<pass>|<since>|<part>
+//                                         clear pass 1 or 2 of a change seen at <since>;
+//                                         part is `all`, or `cdn` once the ban succeeded
+// Adding a member that already exists only moves its due time. A worker claims
+// a member by removing it, so two lock holders never run the same one, and puts
+// it back if the work did not finish.
+
+const DUE_KEY = 'profile-watch:due'
+
+/** Mockable queue. Tests replace these with an in-memory version. */
+export const queue = {
+    add: async (member: string, dueAt: number): Promise<void> => {
+        if (!redisClient) return
+        if (redisReady) await redisReady
+        await redisClient.zAdd(DUE_KEY, { score: dueAt, value: member })
+    },
+    due: async (now: number, limit: number): Promise<string[]> => {
+        if (!redisClient) return []
+        if (redisReady) await redisReady
+        return redisClient.zRangeByScore(DUE_KEY, 0, now, { LIMIT: { offset: 0, count: limit } })
+    },
+    /** True when this caller removed the member, so the work is theirs. */
+    claim: async (member: string): Promise<boolean> => {
+        if (!redisClient) return false
+        if (redisReady) await redisReady
+        return (await redisClient.zRem(DUE_KEY, member)) === 1
+    },
 }
 
 /**
  * A render that read the old profile before the change can finish after the
- * first ban and be cached again. Renders are bounded by the fetch deadline, so a
- * second pass after it catches those.
+ * first clear and be cached again. Renders are bounded by the fetch deadline, so
+ * a second pass after it catches those. A failed pass retries until GIVE_UP,
+ * by when every cache layer has expired the old image on its own.
  */
-export const timing = { secondPassMs: FETCH_DEADLINE_MS + 15_000 }
-
-/** Clear the given kinds for a user now, and once more after the slowest render. */
-export async function invalidateUserImages(user: string, kinds: ImageKind[]): Promise<void> {
-    await clearOnce(user, kinds)
-    setTimeout(() => {
-        clearOnce(user, kinds).catch((err) => logger.error({ err, user }, 'second cache clear failed'))
-    }, timing.secondPassMs).unref()
-    logger.info({ user, kinds }, 'profile image changed, caches cleared')
+export const timing = {
+    secondPassMs: FETCH_DEADLINE_MS + 15_000,
+    /** First retry delay. Later ones back off to half the time since the change. */
+    retryMs: 30_000,
+    maxRetryMs: 15 * 60 * 1000,
+    giveUpMs: 2 * 60 * 60 * 1000,
+    /** One drain stops starting work after this, well inside the 30s lock lease. */
+    runBudgetMs: 15_000,
 }
 
-/** Varnish first, then the CDN, since a CDN miss refills from Varnish. */
-async function clearOnce(user: string, kinds: ImageKind[]): Promise<void> {
-    const origin = new URL(config.get('service_url') as string).origin
-    const urls: string[] = []
-    for (const kind of kinds) {
-        // A failed ban is logged and the CDN is purged anyway: the Varnish copy
-        // may already have expired, and the purge costs nothing if it has not.
-        await invalidators.banVarnish(user, kind)
-        urls.push(...imagePaths(user, kind).map((path) => `${origin}${path}`))
-    }
-    invalidators.purgeCdn(urls)
-}
+const retryDelay = (now: number, since: number) =>
+    Math.min(timing.maxRetryMs, Math.max(timing.retryMs, (now - since) / 2))
 
 /**
  * Called with each freshly fetched profile. Records what it resolves to and
- * clears the caches for whichever image differs from the last record.
+ * queues a clear for whichever image differs from the last record. The record
+ * moves on at once; the queued clear is what stays pending until it succeeds.
  */
-export async function noteProfileImages(user: string, profile: HiveProfile): Promise<void> {
+export async function noteProfileImages(user: string, profile: HiveProfile, now = Date.now()): Promise<void> {
     const p = (profile.metadata && profile.metadata.profile) || {}
     const next: ServedImages = { avatar: httpOrEmpty(p.profile_image), cover: httpOrEmpty(p.cover_image) }
     const prev = await imageRecord.get(user)
+    const changed: ImageKind[] = []
+    if (prev && prev.avatar !== next.avatar) changed.push('avatar')
+    if (prev && prev.cover !== next.cover) changed.push('cover')
+    // Queue before moving the record: if queueing fails, the record still holds
+    // the old value and the next fresh lookup sees the change again.
+    for (const kind of changed) {
+        await queue.add(`clear|${user}|${kind}|1|${now}|all`, now)
+    }
     await imageRecord.set(user, next)
-    if (!prev) {
+    if (changed.length > 0) {
+        logger.info({ user, kinds: changed }, 'profile image changed, cache clear queued')
+    }
+}
+
+/** hivemind trails the chain by a few blocks. Look twice to ride that out. */
+export const REFRESH_DELAYS_MS = [20_000, 90_000]
+
+/**
+ * Queue fresh lookups for a recorded user after an account update. Another
+ * update before they run pushes them back, so the last update always gets
+ * the full window.
+ */
+export async function scheduleRefresh(user: string, now = Date.now()): Promise<void> {
+    if (!(await imageRecord.get(user))) {
         return
     }
-    const changed: ImageKind[] = []
-    if (prev.avatar !== next.avatar) changed.push('avatar')
-    if (prev.cover !== next.cover) changed.push('cover')
-    if (changed.length > 0) {
-        await invalidateUserImages(user, changed)
+    for (let i = 0; i < REFRESH_DELAYS_MS.length; i++) {
+        await queue.add(`refresh|${user}|${i}`, now + REFRESH_DELAYS_MS[i])
+    }
+}
+
+/**
+ * Run whatever is due, claiming each member first. Unfinished work goes back
+ * on the queue. Stops starting new work once the time budget is spent, so a
+ * drain stays inside the lock lease.
+ */
+export async function runDue(now = Date.now(), limit = 50): Promise<void> {
+    const stopAt = Date.now() + timing.runBudgetMs
+    for (const member of await queue.due(now, limit)) {
+        if (Date.now() > stopAt) {
+            break
+        }
+        if (!(await queue.claim(member))) {
+            continue
+        }
+        const [type, user, kind, pass, sinceRaw, part] = member.split('|')
+        if (type === 'refresh') {
+            // getProfile with the cache off rewrites the profile cache, then calls
+            // noteProfileImages, which compares and queues any clear. It never
+            // throws; undefined means the lookup failed, so try again while the
+            // user still has a record (it expires, which bounds the retries).
+            if (!(await getProfile(user, false)) && await imageRecord.get(user)) {
+                await queue.add(member, now + timing.retryMs)
+            }
+            continue
+        }
+        const since = Number(sinceRaw)
+        if (type !== 'clear' || (kind !== 'avatar' && kind !== 'cover') || !Number.isFinite(since)) {
+            continue
+        }
+        const { banned, purged } = await clearOnce(user, kind, part === 'cdn')
+        if (banned && purged) {
+            if (pass === '1') {
+                await queue.add(`clear|${user}|${kind}|2|${since}|all`, now + timing.secondPassMs)
+            }
+        } else if (now - since > timing.giveUpMs) {
+            logger.error({ user, kind }, 'cache clear still failing, giving up; caches expire on their own')
+        } else {
+            // A failed ban retries both, since the purge must follow it. A failed
+            // purge after a good ban retries only the purge.
+            const retry = `clear|${user}|${kind}|${pass}|${since}|${banned ? 'cdn' : 'all'}`
+            await queue.add(retry, now + retryDelay(now, since))
+        }
     }
 }
 
@@ -141,18 +245,17 @@ const LOCK_KEY = 'profile-watch:lock'
 const CURSOR_KEY = 'profile-watch:block'
 const LOCK_TTL = 30
 const POLL_MS = 3000
+const ERROR_PAUSE_MS = 30_000
 const MAX_BLOCKS_PER_POLL = 50
 /** Beyond this lag (3h, the record TTL) the records have expired, so restart at head. */
 const MAX_LAG_BLOCKS = 3600
-/** hivemind trails the chain by a few blocks. Refresh twice to ride that out. */
-export const REFRESH_DELAYS_MS = [20_000, 90_000]
 
 /**
- * Accounts whose profile an op may have changed. bridge reads the profile from
- * `posting_json_metadata`, so any write to it counts, even one without a
- * profile, since that drops the avatar. `json_metadata` is only the legacy
- * fallback and other apps write unrelated keys to it, so there only a
- * `profile` object counts.
+ * Accounts whose profile an op may have changed: any write to either metadata
+ * field. bridge reads `posting_json_metadata` and falls back to `json_metadata`,
+ * and a write without a profile can still remove one. Empty strings mean "leave
+ * unchanged" on chain, so those are skipped. Only recorded users are looked up,
+ * so the breadth costs little.
  */
 export function profileUpdates(block: any): string[] {
     const users = new Set<string>()
@@ -163,33 +266,13 @@ export function profileUpdates(block: any): string[] {
                 continue
             }
             const value = op.value || {}
-            const posting = typeof value.posting_json_metadata === 'string' && value.posting_json_metadata !== ''
-            const legacy = typeof value.json_metadata === 'string' && value.json_metadata.includes('"profile"')
-            if (typeof value.account === 'string' && (posting || legacy)) {
+            const written = (field: any) => typeof field === 'string' && field !== ''
+            if (typeof value.account === 'string' && (written(value.posting_json_metadata) || written(value.json_metadata))) {
                 users.add(value.account)
             }
         }
     }
     return [...users]
-}
-
-const scheduled = new Set<string>()
-
-/** Refresh a recorded user's profile after the chain change reaches hivemind. */
-export async function scheduleRefresh(user: string, delays = REFRESH_DELAYS_MS): Promise<void> {
-    if (scheduled.has(user) || !(await imageRecord.get(user))) {
-        return
-    }
-    scheduled.add(user)
-    delays.forEach((delay, i) => {
-        setTimeout(() => {
-            // getProfile with the cache off rewrites the profile cache, then calls
-            // noteProfileImages, which does the comparison and the clearing.
-            getProfile(user, false)
-                .catch((err) => logger.error({ err, user }, 'profile refresh failed'))
-                .finally(() => { if (i === delays.length - 1) scheduled.delete(user) })
-        }, delay).unref()
-    })
 }
 
 async function holdLock(id: string): Promise<boolean> {
@@ -206,6 +289,11 @@ async function holdLock(id: string): Promise<boolean> {
     return false
 }
 
+/**
+ * Read new blocks and queue lookups. The cursor advances only after the queue
+ * writes for those blocks succeeded, so a crash replays them (harmless: queueing
+ * twice only moves the due time) rather than skipping them.
+ */
 async function poll(): Promise<void> {
     const props = await rpc.call<any>('condenser_api.get_dynamic_global_properties', [])
     const head = Number(props && props.head_block_number)
@@ -235,7 +323,8 @@ async function poll(): Promise<void> {
 
 /**
  * Start following the chain in this process. Every worker calls this; a Redis
- * lock lets one of them do the work and another take over if it dies.
+ * lock lets one of them do the work and another take over if it dies. The
+ * queue is in Redis, so the new holder picks up whatever was pending.
  * Without Redis there is no record to compare against, so it does nothing.
  */
 export function startProfileWatcher(): void {
@@ -244,16 +333,33 @@ export function startProfileWatcher(): void {
     }
     const id = `${process.pid}-${Math.random().toString(36).slice(2)}`
     let running = false
+    let pausedUntil = 0
     const tick = async () => {
         if (running) return
         running = true
         try {
             if (redisReady) await redisReady
-            if (await holdLock(id)) {
-                await poll()
+            if (!(await holdLock(id))) {
+                return
+            }
+            // Drain first and on its own: queued clears must not wait on a
+            // failing chain node.
+            try {
+                await runDue()
+            } catch (err) {
+                logger.warn({ err }, 'profile watcher drain failed')
+            }
+            if (Date.now() >= pausedUntil) {
+                try {
+                    await poll()
+                } catch (err) {
+                    // Back off instead of retrying a failing node every 3 seconds.
+                    pausedUntil = Date.now() + ERROR_PAUSE_MS
+                    logger.warn({ err }, 'profile watcher poll failed, pausing')
+                }
             }
         } catch (err) {
-            logger.warn({ err }, 'profile watcher poll failed')
+            logger.warn({ err }, 'profile watcher tick failed')
         } finally {
             running = false
         }
