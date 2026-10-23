@@ -182,6 +182,13 @@ sub vcl_synth {
 }
 sub vcl_deliver {
     unset resp.http.x-url;
+    # Cloudflare keys its cache on the Origin header (excluding it needs an
+    # Enterprise plan), and the purge on a profile change (profile-change.ts)
+    # lists URLs without one. So a CORS request's avatar or cover may only be
+    # cached briefly. Changes only the header sent, not the stored object.
+    if (req.http.Origin && req.url ~ "^/u/" && resp.http.Cache-Control ~ "max-age=3600") {
+        set resp.http.Cache-Control = "public,max-age=120";
+    }
     unset resp.http.X-Varnish;
     unset resp.http.Via;
 }
