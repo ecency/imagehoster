@@ -81,7 +81,7 @@ async function handleAvatar(ctx: KoaContext) {
   // trailing-slash variant, any query) may only be cached briefly, so it cannot
   // hold an old image for an hour. max-age=120 is also the short branch in the
   // Varnish VCL.
-  const realCacheControl = !ctx.querystring && imagePaths(username, 'avatar').includes(ctx.path)
+  let realCacheControl = !ctx.querystring && imagePaths(username, 'avatar').includes(ctx.path)
     ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
@@ -125,6 +125,11 @@ async function handleAvatar(ctx: KoaContext) {
     avatarUrl = profile.metadata.profile.profile_image
   } else if (!profile) {
     isProfileFallback = true
+  } else {
+    // No avatar set yet: the default stands in. Keep it short-lived, so a first
+    // avatar shows within minutes everywhere, including the browser cache that
+    // no purge can reach.
+    realCacheControl = SHORT_CACHE_CONTROL
   }
 
   if (isBlacklistedUrl(avatarUrl)) {

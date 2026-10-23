@@ -138,6 +138,14 @@ describe('avatar', function() {
         assert.equal(res.headers['location'], '/u/alice/avatar')
     })
 
+    it('caches the default briefly when the account has not set a avatar', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        const res = await needle('get', `http://localhost:${port}/u/noavatar/avatar`)
+        assert.equal(res.statusCode, 200)
+        assert.equal(res.headers['cache-control'], 'public,max-age=120')
+    })
+
     it('should reject short usernames', async function() {
         const res = await needle('get', `http://localhost:${port}/u/ab/avatar`)
         assert.equal(res.statusCode, 404)

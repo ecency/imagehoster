@@ -78,7 +78,7 @@ async function handleCover(ctx: KoaContext) {
 
   // The CDN purge on a profile change lists exact URLs without a query. Any
   // other URL may only be cached briefly, as in avatar.ts.
-  const realCacheControl = !ctx.querystring && imagePaths(username, 'cover').includes(ctx.path)
+  let realCacheControl = !ctx.querystring && imagePaths(username, 'cover').includes(ctx.path)
     ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
@@ -122,6 +122,9 @@ async function handleCover(ctx: KoaContext) {
     coverUrl = profile.metadata.profile.cover_image
   } else if (!profile) {
     isProfileFallback = true
+  } else {
+    // No cover set yet: short-lived, as for a missing avatar in avatar.ts.
+    realCacheControl = SHORT_CACHE_CONTROL
   }
 
   if (isBlacklistedUrl(coverUrl)) {
