@@ -98,6 +98,42 @@ describe('avatar', function() {
             'default avatar bytes were stored as the user variant')
     })
 
+    it('redirects a mixed-case name to the lowercase URL, keeping size and query', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/Foo/avatar/small?x=1`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/foo/avatar/small?x=1')
+    })
+
+    it('still rejects an invalid mixed-case name instead of redirecting it', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/Fo!o/avatar`, { follow_max: 0 })
+        assert.equal(res.statusCode, 404)
+    })
+
+    it('caches named sizes for an hour and other sizes briefly', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        for (const [size, policy] of [['', 'public,max-age=3600'], ['/medium', 'public,max-age=3600'], ['/64', 'public,max-age=120']]) {
+            const res = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
+            assert.equal(res.statusCode, 200)
+            assert.equal(res.headers['cache-control'], policy, `size ${size || '(none)'}`)
+            // and again from the stored variant
+            const again = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
+            assert.equal(again.headers['cache-control'], policy, `stored size ${size || '(none)'}`)
+        }
+    })
+
+    it('redirects a percent-encoded name to the plain lowercase URL', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/%41lice/avatar/small?x=1`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/alice/avatar/small?x=1')
+    })
+
+    it('redirects an encoded name even when it decodes to lowercase', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/%61lice/avatar`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/alice/avatar')
+    })
+
     it('should reject short usernames', async function() {
         const res = await needle('get', `http://localhost:${port}/u/ab/avatar`)
         assert.equal(res.statusCode, 404)

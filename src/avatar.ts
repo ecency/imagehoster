@@ -39,6 +39,9 @@ import {
 
 /** A real avatar is fresh for an hour so profile changes propagate. */
 const REAL_CACHE_CONTROL = 'public,max-age=3600'
+const SHORT_CACHE_CONTROL = 'public,max-age=120'
+/** The sizes profile-change.ts purges at the CDN. */
+const PURGED_SIZES = new Set(['small', 'medium', 'large'])
 const DefaultAvatar = config.get('default_avatar') as string
 const REGEX = /^[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*(?:\.[a-z](-[a-z0-9](-[a-z0-9])*)?(-[a-z0-9]|[a-z0-9])*)*$/
 
@@ -62,6 +65,23 @@ async function handleAvatar(ctx: KoaContext) {
   const username = ctx.params['username'].toLowerCase()
   APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
+
+  // A mixed-case or percent-encoded name serves the same image, but the CDN
+  // purge on a profile change (profile-change.ts) is exact and lists the plain
+  // lowercase URLs. So only that URL may cache the image; the redirect never
+  // goes stale. Compared on the raw path, which the router has not decoded.
+  const segments = ctx.path.split('/')
+  if (segments[2] !== username) {
+    ctx.status = 301
+    ctx.redirect(`/u/${username}/${segments.slice(3).join('/')}${ctx.search}`)
+    return
+  }
+
+  // The CDN purge on a profile change lists the named sizes clients request.
+  // Any other size may only be cached briefly, so it cannot hold an old image
+  // for an hour. max-age=120 is also the short branch in the Varnish VCL.
+  const realCacheControl = ctx.params['size'] === undefined || PURGED_SIZES.has(ctx.params['size'])
+    ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
   const query = ctx.request.query
@@ -188,7 +208,7 @@ async function handleAvatar(ctx: KoaContext) {
     }
     ctx.set('Content-Type', await mimeMagic(head))
     ctx.set('Vary', 'Accept')
-    ctx.set('Cache-Control', cacheControlFor(served, REAL_CACHE_CONTROL))
+    ctx.set('Cache-Control', cacheControlFor(served, realCacheControl))
     ctx.body = stream
     return
   }
@@ -336,7 +356,7 @@ async function handleAvatar(ctx: KoaContext) {
   if (shouldBypassCache) {
     ctx.set('Cache-Control', 'no-cache,must-revalidate')
   } else {
-    ctx.set('Cache-Control', cacheControlFor(response, REAL_CACHE_CONTROL))
+    ctx.set('Cache-Control', cacheControlFor(response, realCacheControl))
   }
   ctx.set('ETag', etagFor(response, imageKey, response.bytes, response.bytes.length))
   ctx.body = response.bytes

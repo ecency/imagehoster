@@ -21,7 +21,7 @@
 
 import config from 'config'
 import { FETCH_DEADLINE_MS } from './constants'
-import { getProfile, HiveProfile, redisClient, redisGet, redisReady, redisSet, rpc } from './common'
+import { HiveProfile, redisClient, redisGet, redisReady, redisSet, refreshProfile, rpc } from './common'
 import { logger } from './logger'
 import { purgeCache } from './utils'
 
@@ -109,11 +109,37 @@ export async function clearOnce(user: string, kind: ImageKind, cdnOnly = false):
 //   clear|<user>|<kind>|<pass>|<since>|<part>
 //                                         clear pass 1 or 2 of a change seen at <since>;
 //                                         part is `all`, or `cdn` once the ban succeeded
-// Adding a member that already exists only moves its due time. A worker claims
-// a member by removing it, so two lock holders never run the same one, and puts
-// it back if the work did not finish.
+// Adding a member that already exists only moves its due time.
+//
+// A worker claims a due member by moving its due time to the end of a lease,
+// atomically, so two lock holders never run the same one. Finishing removes
+// it, but only if nobody moved it since (a newer update re-adding a refresh, or
+// a retry). A worker that dies mid-task leaves the member to come due again
+// when the lease ends, so claimed work is never lost.
 
 const DUE_KEY = 'profile-watch:due'
+
+const CLAIM_SCRIPT = `
+local due = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if due and tonumber(due) <= tonumber(ARGV[2]) then
+  redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+  return 1
+end
+return 0`
+
+const RETRY_SCRIPT = `
+local due = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if due and tonumber(due) == tonumber(ARGV[2]) then
+  redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+end
+return 0`
+
+const FINISH_SCRIPT = `
+local due = redis.call('ZSCORE', KEYS[1], ARGV[1])
+if due and tonumber(due) == tonumber(ARGV[2]) then
+  redis.call('ZREM', KEYS[1], ARGV[1])
+end
+return 0`
 
 /** Mockable queue. Tests replace these with an in-memory version. */
 export const queue = {
@@ -127,11 +153,26 @@ export const queue = {
         if (redisReady) await redisReady
         return redisClient.zRangeByScore(DUE_KEY, 0, now, { LIMIT: { offset: 0, count: limit } })
     },
-    /** True when this caller removed the member, so the work is theirs. */
-    claim: async (member: string): Promise<boolean> => {
+    /** Lease a due member until `leaseUntil`. True when the work is this caller's. */
+    claim: async (member: string, now: number, leaseUntil: number): Promise<boolean> => {
         if (!redisClient) return false
         if (redisReady) await redisReady
-        return (await redisClient.zRem(DUE_KEY, member)) === 1
+        const claimed = await redisClient.eval(CLAIM_SCRIPT, {
+            keys: [DUE_KEY], arguments: [member, String(now), String(leaseUntil)],
+        })
+        return claimed === 1
+    },
+    /** Move a claimed member to a retry time, unless it was moved since the claim. */
+    retry: async (member: string, leaseUntil: number, dueAt: number): Promise<void> => {
+        if (!redisClient) return
+        if (redisReady) await redisReady
+        await redisClient.eval(RETRY_SCRIPT, { keys: [DUE_KEY], arguments: [member, String(leaseUntil), String(dueAt)] })
+    },
+    /** Remove a finished member, unless it was moved since the claim. */
+    finish: async (member: string, leaseUntil: number): Promise<void> => {
+        if (!redisClient) return
+        if (redisReady) await redisReady
+        await redisClient.eval(FINISH_SCRIPT, { keys: [DUE_KEY], arguments: [member, String(leaseUntil)] })
     },
 }
 
@@ -149,6 +190,8 @@ export const timing = {
     giveUpMs: 2 * 60 * 60 * 1000,
     /** One drain stops starting work after this, well inside the 30s lock lease. */
     runBudgetMs: 15_000,
+    /** Longer than any single task (RPC retries, ban and purge timeouts). */
+    claimLeaseMs: 2 * 60 * 1000,
 }
 
 const retryDelay = (now: number, since: number) =>
@@ -195,48 +238,65 @@ export async function scheduleRefresh(user: string, now = Date.now()): Promise<v
 }
 
 /**
- * Run whatever is due, claiming each member first. Unfinished work goes back
- * on the queue. Stops starting new work once the time budget is spent, so a
- * drain stays inside the lock lease.
+ * Run whatever is due. Each member is leased first and removed only once its
+ * work is done; a retry re-adds it with a later due time instead. A task that
+ * throws keeps its lease and comes due again when it ends. Stops starting new
+ * work once the time budget is spent, so a drain stays inside the lock lease.
  */
 export async function runDue(now = Date.now(), limit = 50): Promise<void> {
     const stopAt = Date.now() + timing.runBudgetMs
+    const leaseUntil = now + timing.claimLeaseMs
     for (const member of await queue.due(now, limit)) {
         if (Date.now() > stopAt) {
             break
         }
-        if (!(await queue.claim(member))) {
+        if (!(await queue.claim(member, now, leaseUntil))) {
             continue
         }
-        const [type, user, kind, pass, sinceRaw, part] = member.split('|')
-        if (type === 'refresh') {
-            // getProfile with the cache off rewrites the profile cache, then calls
-            // noteProfileImages, which compares and queues any clear. It never
-            // throws; undefined means the lookup failed, so try again while the
-            // user still has a record (it expires, which bounds the retries).
-            if (!(await getProfile(user, false)) && await imageRecord.get(user)) {
-                await queue.add(member, now + timing.retryMs)
-            }
-            continue
-        }
-        const since = Number(sinceRaw)
-        if (type !== 'clear' || (kind !== 'avatar' && kind !== 'cover') || !Number.isFinite(since)) {
-            continue
-        }
-        const { banned, purged } = await clearOnce(user, kind, part === 'cdn')
-        if (banned && purged) {
-            if (pass === '1') {
-                await queue.add(`clear|${user}|${kind}|2|${since}|all`, now + timing.secondPassMs)
-            }
-        } else if (now - since > timing.giveUpMs) {
-            logger.error({ user, kind }, 'cache clear still failing, giving up; caches expire on their own')
-        } else {
-            // A failed ban retries both, since the purge must follow it. A failed
-            // purge after a good ban retries only the purge.
-            const retry = `clear|${user}|${kind}|${pass}|${since}|${banned ? 'cdn' : 'all'}`
-            await queue.add(retry, now + retryDelay(now, since))
+        try {
+            await runTask(member, now, leaseUntil)
+        } catch (err) {
+            logger.warn({ err, member }, 'profile watcher task failed, retrying after its lease')
         }
     }
+}
+
+async function runTask(member: string, now: number, leaseUntil: number): Promise<void> {
+    const [type, user, kind, pass, sinceRaw, part] = member.split('|')
+    if (type === 'refresh') {
+        // A fresh lookup that records the result, which queues any clear.
+        // Retry a failed or incomplete lookup while the user still has a
+        // record; the record expires, which bounds the retries. A newer update
+        // that re-added this refresh meanwhile keeps its later time.
+        if (!(await refreshProfile(user)) && await imageRecord.get(user)) {
+            await queue.retry(member, leaseUntil, now + timing.retryMs)
+            return
+        }
+        await queue.finish(member, leaseUntil)
+        return
+    }
+    const since = Number(sinceRaw)
+    if (type !== 'clear' || (kind !== 'avatar' && kind !== 'cover') || !Number.isFinite(since)) {
+        await queue.finish(member, leaseUntil)
+        return
+    }
+    const { banned, purged } = await clearOnce(user, kind, part === 'cdn')
+    if (banned && purged) {
+        if (pass === '1') {
+            await queue.add(`clear|${user}|${kind}|2|${since}|all`, now + timing.secondPassMs)
+        }
+    } else if (now - since > timing.giveUpMs) {
+        logger.error({ user, kind }, 'cache clear still failing, giving up; caches expire on their own')
+    } else {
+        // A failed ban retries both, since the purge must follow it. A failed
+        // purge after a good ban retries only the purge.
+        const retry = `clear|${user}|${kind}|${pass}|${since}|${banned ? 'cdn' : 'all'}`
+        await queue.add(retry, now + retryDelay(now, since))
+        if (retry === member) {
+            return
+        }
+    }
+    await queue.finish(member, leaseUntil)
 }
 
 // --- Chain watcher -----------------------------------------------------------

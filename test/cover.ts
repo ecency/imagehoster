@@ -70,6 +70,18 @@ describe('cover', function() {
             'default cover bytes were stored as the user variant')
     })
 
+    it('redirects a mixed-case name to the lowercase URL', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/FOO/cover`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/foo/cover')
+    })
+
+    it('redirects a percent-encoded name to the plain lowercase URL', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/%61lice/cover`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/alice/cover')
+    })
+
     it('should reject short usernames', async function() {
         const res = await needle('get', `http://localhost:${port}/u/ab/cover`)
         assert.equal(res.statusCode, 404)

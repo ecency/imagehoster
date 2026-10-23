@@ -632,7 +632,8 @@ export function purgeCache(value: string | string[]): Promise<boolean> {
             signal: AbortSignal.timeout(10_000),
         }).then(async (res) => {
             const body = await res.json().catch(() => null) as any
-            if (!res.ok || (body && !body.success)) {
+            // Success means Cloudflare said so: an unreadable body is unconfirmed.
+            if (!res.ok || !body || body.success !== true) {
                 logger.error({ status: res.status, body, files }, 'Cloudflare cache purge failed')
                 return false
             }

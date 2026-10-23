@@ -37,7 +37,14 @@ function harness() {
     queue.add = async (member, at) => { due.set(member, at) }
     queue.due = async (now, limit) => [...due.entries()]
         .filter(([, at]) => at <= now).sort((a, b) => a[1] - b[1]).slice(0, limit).map(([m]) => m)
-    queue.claim = async (member) => due.delete(member)
+    queue.claim = async (member, now, leaseUntil) => {
+        const at = due.get(member)
+        if (at === undefined || at > now) return false
+        due.set(member, leaseUntil)
+        return true
+    }
+    queue.finish = async (member, leaseUntil) => { if (due.get(member) === leaseUntil) due.delete(member) }
+    queue.retry = async (member, leaseUntil, at) => { if (due.get(member) === leaseUntil) due.set(member, at) }
     invalidators.banVarnish = async (user: string, kind: ImageKind) => { calls.push(`ban ${user} ${kind}`); return result.ban }
     invalidators.purgeCdn = async (urls: string[]) => { calls.push('purge'); purged.push(urls); return result.purge }
     const restore = () => {
@@ -233,6 +240,37 @@ describe('clearing caches', () => {
         assert.deepEqual([...h.due.keys()], [])
     })
 
+    it('keeps the lease on a task that throws, so it runs again when the lease ends', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        h.due.set('refresh|foo|0', T)
+        const add = queue.add
+        queue.add = async (member, at) => {
+            if (member.startsWith('clear|')) throw new Error('redis down')
+            return add(member, at)
+        }
+        await runDue(T)
+        assert.deepEqual([...h.due.entries()], [['refresh|foo|0', T + timing.claimLeaseMs]])
+        // The record did not move, so the retry still sees the change.
+        assert.equal(h.records.get('foo')!.avatar, 'https://example.com/old.jpg')
+        queue.add = add
+        await runDue(T + timing.claimLeaseMs)
+        assert.equal(h.due.has('refresh|foo|0'), false)
+        assert([...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
+    })
+
+    it('does not finish a member that was moved while it ran', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
+        h.due.set('refresh|foo|0', T)
+        const finish = queue.finish
+        queue.finish = async (member, leaseUntil) => {
+            // A newer account update re-adds the refresh before this one finishes.
+            h.due.set(member, T + 999)
+            return finish(member, leaseUntil)
+        }
+        await runDue(T)
+        assert.equal(h.due.get('refresh|foo|0'), T + 999)
+    })
+
     it('keeps the record unchanged when queueing the clear fails', async () => {
         h.records.set('esie', { avatar: 'https://x/old.jpg', cover: '' })
         queue.add = async () => { throw new Error('redis down') }
@@ -306,6 +344,30 @@ describe('refresh scheduling', () => {
         }
     })
 
+    it('a failed refresh does not pull a newer update\'s later lookup earlier', async () => {
+        const orig = rpc.call
+        rpc.call = async () => {
+            // A newer account update re-adds this refresh while the lookup runs.
+            h.due.set('refresh|nodeisdown|1', T + 90_000)
+            throw new Error('node down')
+        }
+        try {
+            h.records.set('nodeisdown', { avatar: 'https://x/a.jpg', cover: '' })
+            h.due.set('refresh|nodeisdown|1', T)
+            await runDue(T)
+        } finally {
+            rpc.call = orig
+        }
+        assert.equal(h.due.get('refresh|nodeisdown|1'), T + 90_000)
+    })
+
+    it('retries a refresh that came back incomplete (legacy lookup failed)', async () => {
+        h.records.set('ghostbridge', { avatar: 'https://x/a.jpg', cover: '' })
+        h.due.set('refresh|ghostbridge|0', T)
+        await runDue(T)
+        assert.deepEqual([...h.due.entries()], [['refresh|ghostbridge|0', T + timing.retryMs]])
+    })
+
     it('leaves later refreshes queued for whoever holds the lock next', async () => {
         h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
         await scheduleRefresh('foo', T)
@@ -354,6 +416,7 @@ describe('purgeCache result', () => {
         ['accepted', { ok: true, body: { success: true } }, true],
         ['rejected', { ok: true, body: { success: false } }, false],
         ['an HTTP error', { ok: false, body: null }, false],
+        ['unreadable', { ok: true, body: null }, false],
         ['a network error', 'throw', false],
     ] as const) {
         it(`resolves ${expected} when the purge is ${name}`, async () => {

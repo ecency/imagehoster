@@ -193,8 +193,37 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
             return cached === null ? undefined : cached as HiveProfile
         }
     }
-    if (user.length > 16) return undefined
+    const { profile, complete } = await loadProfile(user, isCached)
+    if (profile && complete) {
+        noteProfileImages(user, profile).catch((err) => logger.error({ err, user }, 'profile image check failed'))
+    }
+    return profile
+}
+
+/**
+ * A fresh lookup for the profile watcher. Resolves true once the result was
+ * recorded, false when the lookup failed or came back incomplete so the caller
+ * should retry. Throws when recording failed, which also means retry.
+ */
+export async function refreshProfile(user: string): Promise<boolean> {
+    const { profile, complete } = await loadProfile(user, false)
+    if (!profile || !complete) {
+        return false
+    }
+    await noteProfileImages(user, profile)
+    return true
+}
+
+/**
+ * Fetch a profile from the chain and cache it. `complete` is false for the
+ * short-ttl result of a failed legacy lookup: its avatar may be missing only
+ * because that lookup failed, which would read as a change and back again.
+ */
+async function loadProfile(user: string, isCached: boolean): Promise<{ profile?: HiveProfile, complete: boolean }> {
+    if (user.length > 16) return { complete: false }
+    const cacheKey = `profile:hive:${user}`
     let profile: HiveProfile | undefined
+    let complete = false
     try {
         profile = await rpc.call<HiveProfile>('bridge.get_profile', {account: user})
         if (profile) {
@@ -225,11 +254,7 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
                 }
             }
             await redisSet(cacheKey, profile, ttl)
-            // Skip the short-ttl case: the avatar may be missing only because the
-            // legacy lookup failed, which would read as a change and back again.
-            if (ttl === 300) {
-                noteProfileImages(user, profile).catch((err) => logger.error({ err, user }, 'profile image check failed'))
-            }
+            complete = ttl === 300
         } else {
             // Null/undefined result — negative cache with short TTL
             await redisSet(cacheKey, null, 30)
@@ -239,7 +264,7 @@ export const getProfile = async (user: string, isCached= true): Promise<HiveProf
         // Cache the failure for 30s to prevent thundering herd on RPC outages
         await redisSet(cacheKey, null, 30)
     }
-    return profile
+    return { profile, complete }
 }
 
 /** Redis client — only created in worker processes. */

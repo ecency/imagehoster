@@ -63,6 +63,17 @@ async function handleCover(ctx: KoaContext) {
   APIError.assert(username.length >= 3, APIError.Code.NoSuchAccount)
   APIError.assert(REGEX.test(username), APIError.Code.NoSuchAccount)
 
+  // A mixed-case or percent-encoded name serves the same image, but the CDN
+  // purge on a profile change (profile-change.ts) is exact and lists the plain
+  // lowercase URLs. So only that URL may cache the image; the redirect never
+  // goes stale. Compared on the raw path, which the router has not decoded.
+  const segments = ctx.path.split('/')
+  if (segments[2] !== username) {
+    ctx.status = 301
+    ctx.redirect(`/u/${username}/${segments.slice(3).join('/')}${ctx.search}`)
+    return
+  }
+
   // Check for cache bypass parameters
   const query = ctx.request.query
   let ignorecache = Number.parseInt(query['ignorecache'] as string) || undefined
