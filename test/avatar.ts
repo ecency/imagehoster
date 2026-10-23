@@ -115,6 +115,7 @@ describe('avatar', function() {
         for (const [size, policy] of [
             ['', 'public,max-age=3600'], ['/', 'public,max-age=3600'], ['/medium', 'public,max-age=3600'],
             ['/64', 'public,max-age=120'], ['/%73mall', 'public,max-age=120'], ['/small/', 'public,max-age=120'],
+            ['?x=1', 'public,max-age=120'], ['/small?v=2', 'public,max-age=120'],
         ]) {
             const res = await needle('get', `http://localhost:${port}/u/healthy/avatar${size}`)
             assert.equal(res.statusCode, 200)

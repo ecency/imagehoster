@@ -76,9 +76,9 @@ async function handleCover(ctx: KoaContext) {
     return
   }
 
-  // The CDN purge on a profile change lists exact raw paths. Any other path
-  // may only be cached briefly, as in avatar.ts.
-  const realCacheControl = imagePaths(username, 'cover').includes(ctx.path)
+  // The CDN purge on a profile change lists exact URLs without a query. Any
+  // other URL may only be cached briefly, as in avatar.ts.
+  const realCacheControl = !ctx.querystring && imagePaths(username, 'cover').includes(ctx.path)
     ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters

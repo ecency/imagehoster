@@ -76,11 +76,12 @@ async function handleAvatar(ctx: KoaContext) {
     return
   }
 
-  // The CDN purge on a profile change lists exact raw paths. Any other path
-  // (another size, an encoded or trailing-slash variant) may only be cached
-  // briefly, so it cannot hold an old image for an hour. max-age=120 is also
-  // the short branch in the Varnish VCL.
-  const realCacheControl = imagePaths(username, 'avatar').includes(ctx.path)
+  // The CDN purge on a profile change lists exact URLs, and the CDN cache key
+  // includes the query string. Any other URL (another size, an encoded or
+  // trailing-slash variant, any query) may only be cached briefly, so it cannot
+  // hold an old image for an hour. max-age=120 is also the short branch in the
+  // Varnish VCL.
+  const realCacheControl = !ctx.querystring && imagePaths(username, 'avatar').includes(ctx.path)
     ? REAL_CACHE_CONTROL : SHORT_CACHE_CONTROL
 
   // Check for cache bypass parameters
