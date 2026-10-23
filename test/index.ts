@@ -23,9 +23,16 @@ export const testKeys = {
 export const APP_ACCOUNT = 'ecency.app'
 
 export const mockAccounts: any = {
+    legacycover: {
+        name: 'legacycover',
+        posting_json_metadata: '{"profile":{"profile_image":"https://example.com/posting-avatar.jpg"}}',
+        json_metadata: '{"profile":{"cover_image":"https://example.com/legacy-cover.jpg"}}',
+    },
     foo: {
         name: 'foo',
         reputation: '10525900772718',
+        // Same images as the bridge profile, which the profile watcher confirms against.
+        posting_json_metadata: '{"profile":{"profile_image":"https://example.com/avatar.jpg","cover_image":"https://example.com/cover.jpg"}}',
         posting: {
             weight_threshold: 1,
             account_auths: [],
@@ -318,6 +325,19 @@ export const mockProfiles: any = {
             profile_image: BROKEN_AVATAR_URL,
             cover_image: BROKEN_COVER_URL,
         } }
+    },
+    // Posting avatar, cover only in legacy json_metadata: the request path keeps
+    // the default cover, and verification must agree.
+    legacycover: {
+        name: 'legacycover',
+        active: '2024-01-01T00:00:00',
+        created: '2016-01-01T00:00:00',
+        id: 10,
+        post_count: 1,
+        reputation: 25,
+        blacklists: [],
+        stats: { followers: 0, following: 0, rank: 0 },
+        metadata: { profile: { name: '', profile_image: 'https://example.com/posting-avatar.jpg', cover_image: '' } }
     },
     // bridge returns an empty avatar; deliberately has NO mockAccounts entry so
     // condenser_api.get_accounts resolves to [undefined] — simulating a transient

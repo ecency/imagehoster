@@ -589,42 +589,83 @@ export function redactUrlForLog(value: string | undefined | null): string {
     return `${parsed.origin}${parsed.pathname}` + (params > 0 ? `?<${params} param(s) redacted>` : '')
 }
 
-export function purgeCache(value: string | string[]) {
-    if (!config.has('cloudflare_token') || !config.has('cloudflare_zone')) {
+/** Mockable CDN credentials. Tests replace `get`. */
+export const cdnSettings = {
+    get: (): { token: string, zone: string } | undefined =>
+        config.has('cloudflare_token') && config.has('cloudflare_zone')
+            ? { token: config.get('cloudflare_token') as string, zone: config.get('cloudflare_zone') as string }
+            : undefined,
+}
+
+/** Purge exact URLs at the CDN, on every service hostname. See sendPurge for the result. */
+export function purgeCache(value: string | string[]): Promise<boolean> {
+    return sendPurge('files', expandPurgeUrls(value), PURGE_BATCH_SIZE)
+}
+
+/**
+ * Purge every cached URL under each path prefix, on every service hostname.
+ * Unlike a URL purge this also clears the variants a URL purge cannot name:
+ * any query string, and copies keyed on request headers such as Origin.
+ * Prefixes are case-sensitive and must not contain a query.
+ */
+export function purgeCachePrefixes(paths: string[]): Promise<boolean> {
+    const prefixes: string[] = []
+    for (const path of paths) {
+        for (const origin of INTERNAL_SERVICE_ORIGINS) {
+            prefixes.push(`${new URL(origin).host}${path}`)
+        }
+    }
+    return sendPurge('prefixes', prefixes, PREFIX_BATCH_SIZE)
+}
+
+/** Cloudflare accepts at most 100 prefixes per purge request. */
+const PREFIX_BATCH_SIZE = 100
+
+/**
+ * Send a purge in batches. Resolves to whether Cloudflare confirmed every batch
+ * with success: true; it never rejects, so callers that do not need the answer
+ * can leave it unawaited. Unconfigured counts as success: no CDN to clear.
+ */
+function sendPurge(kind: 'files' | 'prefixes', items: string[], batchSize: number): Promise<boolean> {
+    const cdn = cdnSettings.get()
+    if (!cdn) {
         // Warn once rather than per call: a missing config is otherwise
         // indistinguishable from a successful purge, in the logs and everywhere else.
         if (!purgeUnconfiguredWarned) {
             purgeUnconfiguredWarned = true
             logger.warn('cloudflare_token/cloudflare_zone not configured, CDN purges are being skipped')
         }
-        return
+        return Promise.resolve(true)
     }
-    const CF_KEY = config.get('cloudflare_token') as string
-    const CF_ZONE = config.get('cloudflare_zone') as string
-    const expanded = expandPurgeUrls(value)
-    if (expanded.length === 0) {
-        return
+    if (items.length === 0) {
+        return Promise.resolve(true)
     }
-    for (let i = 0; i < expanded.length; i += PURGE_BATCH_SIZE) {
-        const files = expanded.slice(i, i + PURGE_BATCH_SIZE)
-        fetch(`https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache`, {
+    const batches: Array<Promise<boolean>> = []
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize)
+        batches.push(fetch(`https://api.cloudflare.com/client/v4/zones/${cdn.zone}/purge_cache`, {
             method: 'POST',
             headers: {
-                'Authorization': `Bearer ${CF_KEY}`,
+                'Authorization': `Bearer ${cdn.token}`,
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ files }),
+            body: JSON.stringify({ [kind]: batch }),
+            signal: AbortSignal.timeout(10_000),
         }).then(async (res) => {
             const body = await res.json().catch(() => null) as any
-            if (!res.ok || (body && !body.success)) {
-                logger.error({ status: res.status, body, files }, 'Cloudflare cache purge failed')
-            } else {
-                logger.info({ files }, 'Cloudflare cache purged')
+            // Success means Cloudflare said so: an unreadable body is unconfirmed.
+            if (!res.ok || !body || body.success !== true) {
+                logger.error({ status: res.status, body, [kind]: batch }, 'Cloudflare cache purge failed')
+                return false
             }
+            logger.info({ [kind]: batch }, 'Cloudflare cache purged')
+            return true
         }).catch((err) => {
-            logger.error({ err, files }, 'Cloudflare cache purge network error')
-        })
+            logger.error({ err, [kind]: batch }, 'Cloudflare cache purge network error')
+            return false
+        }))
     }
+    return Promise.all(batches).then((results) => results.every(Boolean))
 }
 
 export function stripWebpOrPng(value: string): string {

@@ -1,0 +1,695 @@
+import 'mocha'
+import assert from 'assert'
+import config from 'config'
+import net, { AddressInfo } from 'net'
+
+import { getProfile, refreshProfile, rpc } from './../src/common'
+import {
+    banVarnish,
+    clearOnce,
+    cursorStore,
+    ImageKind,
+    imagePrefix,
+    imageRecord,
+    invalidators,
+    noteProfileImages,
+    poll,
+    profileUpdates,
+    queue,
+    REFRESH_DELAYS_MS,
+    runDue,
+    scheduleRefresh,
+    ServedImages,
+    timing,
+} from './../src/profile-change'
+import { cdnSettings, purgeCache, purgeCachePrefixes } from './../src/utils'
+
+const ORIGIN = new URL(config.get('service_url') as string).origin
+
+/** In-memory record store and queue, plus a log of every ban and purge in call order. */
+function harness() {
+    const records = new Map<string, ServedImages>()
+    const due = new Map<string, number>()
+    const calls: string[] = []
+    const purged: string[][] = []
+    const result = { ban: true, purge: true }
+    const orig = { record: { ...imageRecord }, queue: { ...queue }, inv: { ...invalidators } }
+    imageRecord.get = async (user) => records.get(user)
+    imageRecord.set = async (user, value) => { records.set(user, value) }
+    queue.add = async (member, at) => { due.set(member, at) }
+    queue.due = async (now, limit) => [...due.entries()]
+        .filter(([, at]) => at <= now).sort((a, b) => a[1] - b[1]).slice(0, limit).map(([m]) => m)
+    queue.claim = async (member, now, leaseUntil) => {
+        const at = due.get(member)
+        if (at === undefined || at > now) return false
+        due.set(member, leaseUntil)
+        return true
+    }
+    queue.finish = async (member, leaseUntil) => { if (due.get(member) === leaseUntil) due.delete(member) }
+    queue.retry = async (member, leaseUntil, at) => { if (due.get(member) === leaseUntil) due.set(member, at) }
+    invalidators.banVarnish = async (user: string, kind: ImageKind) => { calls.push(`ban ${user} ${kind}`); return result.ban }
+    invalidators.purgeCdn = async (urls: string[]) => { calls.push('purge'); purged.push(urls); return result.purge }
+    const restore = () => {
+        Object.assign(imageRecord, orig.record)
+        Object.assign(queue, orig.queue)
+        Object.assign(invalidators, orig.inv)
+    }
+    return { records, due, calls, purged, result, restore }
+}
+
+const profileWith = (avatar: string, cover = '') =>
+    ({ name: 'u', active: '', metadata: { profile: { profile_image: avatar, cover_image: cover } } } as any)
+
+const until = async (check: () => boolean, ms = 1000) => {
+    const end = Date.now() + ms
+    while (!check()) {
+        if (Date.now() > end) throw new Error('timed out')
+        await new Promise((r) => setTimeout(r, 5))
+    }
+}
+
+const T = 1_000_000
+
+describe('profile image change detection', () => {
+    let h: ReturnType<typeof harness>
+    beforeEach(() => { h = harness() })
+    afterEach(() => h.restore())
+
+    it('purges one prefix per user and kind', () => {
+        assert.equal(imagePrefix('esie', 'avatar'), '/u/esie/avatar')
+        assert.equal(imagePrefix('esie', 'cover'), '/u/esie/cover')
+    })
+
+    it('records a first sighting without queueing anything', async () => {
+        await noteProfileImages('esie', profileWith('https://x/a.jpg'), T)
+        assert.deepEqual(h.records.get('esie'), { avatar: 'https://x/a.jpg', cover: '' })
+        assert.deepEqual([...h.due.keys()], [])
+    })
+
+    it('queues nothing when the images are unchanged', async () => {
+        h.records.set('esie', { avatar: 'https://x/a.jpg', cover: '' })
+        await noteProfileImages('esie', profileWith('https://x/a.jpg'), T)
+        assert.deepEqual([...h.due.keys()], [])
+    })
+
+    it('queues a clear, due now, for a changed avatar', async () => {
+        h.records.set('esie', { avatar: 'https://x/old.jpg', cover: 'https://x/c.jpg' })
+        await noteProfileImages('esie', profileWith('https://x/new.jpg', 'https://x/c.jpg'), T)
+        assert.deepEqual([...h.due.entries()], [[`clear|esie|avatar|1|${T}|all`, T]])
+        assert.deepEqual(h.records.get('esie'), { avatar: 'https://x/new.jpg', cover: 'https://x/c.jpg' })
+    })
+
+    it('treats a first avatar on a new account as a change from the default', async () => {
+        h.records.set('newbie', { avatar: '', cover: '' })
+        await noteProfileImages('newbie', profileWith('https://x/first.jpg'), T)
+        assert.deepEqual([...h.due.keys()], [`clear|newbie|avatar|1|${T}|all`])
+    })
+
+    it('queues both kinds when both change', async () => {
+        h.records.set('esie', { avatar: 'https://x/a.jpg', cover: 'https://x/c.jpg' })
+        await noteProfileImages('esie', profileWith('https://x/a2.jpg', ''), T)
+        assert.deepEqual([...h.due.keys()], [`clear|esie|avatar|1|${T}|all`, `clear|esie|cover|1|${T}|all`])
+    })
+
+    it('ignores a non-http value, the same as the avatar handler does', async () => {
+        h.records.set('esie', { avatar: '', cover: '' })
+        await noteProfileImages('esie', profileWith('ipfs://whatever'), T)
+        assert.deepEqual([...h.due.keys()], [])
+    })
+
+    it('notes a fresh getProfile and queues on change', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        await getProfile('foo', false)
+        await until(() => h.due.size === 1)
+        assert.match([...h.due.keys()][0], /^clear\|foo\|avatar\|1\|\d+\|all$/)
+    })
+
+    it('does not note the short-ttl profile from a failed legacy lookup', async () => {
+        h.records.set('ghostbridge', { avatar: 'https://x/a.jpg', cover: '' })
+        await getProfile('ghostbridge', false)
+        await new Promise((r) => setTimeout(r, 30))
+        assert.deepEqual([...h.due.keys()], [])
+        assert.deepEqual(h.records.get('ghostbridge'), { avatar: 'https://x/a.jpg', cover: '' })
+    })
+})
+
+describe('clearing caches', () => {
+    let h: ReturnType<typeof harness>
+    beforeEach(() => { h = harness() })
+    afterEach(() => h.restore())
+
+    it('bans Varnish before purging the CDN, for the right URLs', async () => {
+        assert.deepEqual(await clearOnce('esie', 'avatar'), { banned: true, purged: true })
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge'])
+        assert.deepEqual(h.purged[0], ['/u/esie/avatar'])
+    })
+
+    it('still purges the CDN when the ban fails, and reports failure', async () => {
+        h.result.ban = false
+        assert.deepEqual(await clearOnce('esie', 'avatar'), { banned: false, purged: true })
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge'])
+    })
+
+    it('skips the ban when only the purge is left', async () => {
+        assert.deepEqual(await clearOnce('esie', 'avatar', true), { banned: true, purged: true })
+        assert.deepEqual(h.calls, ['purge'])
+    })
+
+    it('runs pass 1, then queues pass 2 after the slowest render', async () => {
+        h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+        await runDue(T)
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge'])
+        assert.deepEqual([...h.due.entries()], [[`clear|esie|avatar|2|${T}|all`, T + timing.secondPassMs]])
+        await runDue(T + timing.secondPassMs)
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge', 'ban esie avatar', 'purge'])
+        assert.deepEqual([...h.due.keys()], [])
+    })
+
+    it('does not run work that is not due yet', async () => {
+        h.due.set(`clear|esie|avatar|2|${T}|all`, T + 10)
+        await runDue(T)
+        assert.deepEqual(h.calls, [])
+        assert.equal(h.due.size, 1)
+    })
+
+    it('retries both after a failed ban, since the purge must follow it', async () => {
+        h.result.ban = false
+        h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+        await runDue(T)
+        assert.deepEqual([...h.due.entries()], [[`clear|esie|avatar|1|${T}|all`, T + timing.retryMs]])
+        h.result.ban = true
+        await runDue(T + timing.retryMs)
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge', 'ban esie avatar', 'purge'])
+        assert.deepEqual([...h.due.keys()], [`clear|esie|avatar|2|${T}|all`])
+    })
+
+    it('retries only the purge when the ban already succeeded', async () => {
+        h.result.purge = false
+        h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+        await runDue(T)
+        assert.deepEqual([...h.due.keys()], [`clear|esie|avatar|1|${T}|cdn`])
+        h.result.purge = true
+        await runDue(T + timing.retryMs)
+        assert.deepEqual(h.calls, ['ban esie avatar', 'purge', 'purge'])
+        assert.deepEqual([...h.due.keys()], [`clear|esie|avatar|2|${T}|all`])
+    })
+
+    it('backs off to half the time since the change, up to a cap', async () => {
+        h.result.ban = false
+        const late = T + 20 * 60 * 1000
+        h.due.set(`clear|esie|avatar|1|${T}|all`, late)
+        await runDue(late)
+        assert.equal(h.due.get(`clear|esie|avatar|1|${T}|all`), late + 10 * 60 * 1000)
+        const later = T + 100 * 60 * 1000
+        await runDue(later)
+        assert.equal(h.due.get(`clear|esie|avatar|1|${T}|all`), later + timing.maxRetryMs)
+    })
+
+    it('skips a member another holder already claimed', async () => {
+        h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+        queue.claim = async () => false
+        await runDue(T)
+        assert.deepEqual(h.calls, [])
+    })
+
+    it('stops starting work once the time budget is spent', async () => {
+        const orig = timing.runBudgetMs
+        timing.runBudgetMs = -1
+        try {
+            h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+            await runDue(T)
+        } finally {
+            timing.runBudgetMs = orig
+        }
+        assert.deepEqual(h.calls, [])
+        assert.equal(h.due.size, 1)
+    })
+
+    it('drops a clear with a malformed timestamp instead of retrying it forever', async () => {
+        h.result.ban = false
+        h.due.set('clear|esie|avatar|1|nope|all', T)
+        await runDue(T)
+        assert.equal(h.due.size, 0)
+        assert.deepEqual(h.calls, [])
+    })
+
+    it('gives up once every cache layer has expired the old image anyway', async () => {
+        h.result.ban = false
+        h.due.set(`clear|esie|avatar|1|${T}|all`, T)
+        await runDue(T + timing.giveUpMs + 1)
+        assert.deepEqual([...h.due.keys()], [])
+    })
+
+    it('keeps the lease on a task that throws, so it runs again when the lease ends', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        h.due.set(`refresh|foo|0|${T}`, T)
+        const add = queue.add
+        queue.add = async (member, at) => {
+            if (member.startsWith('clear|')) throw new Error('redis down')
+            return add(member, at)
+        }
+        await runDue(T)
+        assert.deepEqual([...h.due.entries()], [[`refresh|foo|0|${T}`, T + timing.claimLeaseMs]])
+        // The record did not move, so the retry still sees the change.
+        assert.equal(h.records.get('foo')!.avatar, 'https://example.com/old.jpg')
+        queue.add = add
+        await runDue(T + timing.claimLeaseMs)
+        assert.equal(h.due.has(`refresh|foo|0|${T}`), false)
+        assert([...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
+    })
+
+    it('does not finish a member that was moved while it ran', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
+        h.due.set(`refresh|foo|0|${T}`, T)
+        const finish = queue.finish
+        queue.finish = async (member, leaseUntil) => {
+            // A newer account update re-adds the refresh before this one finishes.
+            h.due.set(member, T + 999)
+            return finish(member, leaseUntil)
+        }
+        await runDue(T)
+        assert.equal(h.due.get(`refresh|foo|0|${T}`), T + 999)
+    })
+
+    it('keeps the record unchanged when queueing the clear fails', async () => {
+        h.records.set('esie', { avatar: 'https://x/old.jpg', cover: '' })
+        queue.add = async () => { throw new Error('redis down') }
+        await assert.rejects(noteProfileImages('esie', profileWith('https://x/new.jpg'), T))
+        assert.deepEqual(h.records.get('esie'), { avatar: 'https://x/old.jpg', cover: '' })
+    })
+
+    it('drops a member it does not understand', async () => {
+        h.due.set('bogus|x', T)
+        await runDue(T)
+        assert.equal(h.due.size, 0)
+        assert.deepEqual(h.calls, [])
+    })
+})
+
+describe('refresh scheduling', () => {
+    let h: ReturnType<typeof harness>
+    beforeEach(() => { h = harness() })
+    afterEach(() => h.restore())
+
+    it('queues the delayed lookups for a recorded user', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: '' })
+        await scheduleRefresh('foo', T)
+        assert.deepEqual([...h.due.entries()], [
+            [`refresh|foo|0|${T}`, T + REFRESH_DELAYS_MS[0]],
+            [`refresh|foo|1|${T}`, T + REFRESH_DELAYS_MS[1]],
+        ])
+    })
+
+    it('gives a newer update its own full window', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: '' })
+        await scheduleRefresh('foo', T)
+        await scheduleRefresh('foo', T + 85_000)
+        // The newer update gets its own pair, so its late lookup is not lost.
+        assert.equal(h.due.get(`refresh|foo|1|${T + 85_000}`), T + 85_000 + REFRESH_DELAYS_MS[1])
+        assert.equal(h.due.get(`refresh|foo|1|${T}`), T + REFRESH_DELAYS_MS[1])
+    })
+
+    it('queues the lookups even without a record, which does not prove nothing is cached', async () => {
+        await scheduleRefresh('bar', T)
+        assert.deepEqual([...h.due.keys()], [`refresh|bar|0|${T}`, `refresh|bar|1|${T}`])
+    })
+
+    it('a watcher lookup without a record clears both kinds', async () => {
+        h.due.set(`refresh|foo|0|${T}`, T)
+        await runDue(T)
+        await until(() => [...h.due.keys()].filter((m) => m.startsWith('clear|foo|')).length === 2)
+        const kinds = [...h.due.keys()].filter((m) => m.startsWith('clear|foo|')).map((m) => m.split('|')[2]).sort()
+        assert.deepEqual(kinds, ['avatar', 'cover'])
+        assert.deepEqual(h.records.get('foo'), { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
+    })
+
+    it('a request lookup without a record clears nothing (it only records)', async () => {
+        await noteProfileImages('foo', profileWith('https://example.com/avatar.jpg'), T)
+        assert.equal(h.due.size, 0)
+    })
+
+    it('a due refresh looks the profile up fresh, which queues the clear', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        h.due.set(`refresh|foo|0|${T}`, T)
+        await runDue(T)
+        await until(() => [...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
+        assert.equal(h.due.has(`refresh|foo|0|${T}`), false)
+    })
+
+    it('retries a failed refresh for a recorded user, backing off with time since the update', async () => {
+        const orig = rpc.call
+        rpc.call = async () => { throw new Error('node down') }
+        try {
+            h.records.set('nodeisdown', { avatar: 'https://x/a.jpg', cover: '' })
+            h.due.set(`refresh|nodeisdown|1|${T}`, T)
+            await runDue(T)
+            assert.deepEqual([...h.due.entries()], [[`refresh|nodeisdown|1|${T}`, T + timing.retryMs]])
+            const later = T + 20 * 60 * 1000
+            h.due.set(`refresh|nodeisdown|1|${T}`, later)
+            await runDue(later)
+            assert.equal(h.due.get(`refresh|nodeisdown|1|${T}`), later + 10 * 60 * 1000)
+        } finally {
+            rpc.call = orig
+        }
+    })
+
+    it('a failed refresh does not pull a newer update\'s later lookup earlier', async () => {
+        const orig = rpc.call
+        rpc.call = async () => {
+            // A newer account update re-adds this refresh while the lookup runs.
+            h.due.set(`refresh|nodeisdown|1|${T}`, T + 90_000)
+            throw new Error('node down')
+        }
+        try {
+            h.records.set('nodeisdown', { avatar: 'https://x/a.jpg', cover: '' })
+            h.due.set(`refresh|nodeisdown|1|${T}`, T)
+            await runDue(T)
+        } finally {
+            rpc.call = orig
+        }
+        assert.equal(h.due.get(`refresh|nodeisdown|1|${T}`), T + 90_000)
+    })
+
+    it('retries a failed refresh for an unrecorded user too, until the give-up limit', async () => {
+        const orig = rpc.call
+        rpc.call = async () => { throw new Error('node down') }
+        try {
+            h.due.set(`refresh|nobody|0|${T}`, T)
+            await runDue(T)
+            assert.deepEqual([...h.due.entries()], [[`refresh|nobody|0|${T}`, T + timing.retryMs]])
+            const late = T + timing.giveUpMs + 1
+            h.due.set(`refresh|nobody|0|${T}`, late)
+            await runDue(late)
+            assert.equal(h.due.size, 0)
+        } finally {
+            rpc.call = orig
+        }
+    })
+
+    it('retries a refresh that came back incomplete (legacy lookup failed)', async () => {
+        h.records.set('ghostbridge', { avatar: 'https://x/a.jpg', cover: '' })
+        h.due.set(`refresh|ghostbridge|0|${T}`, T)
+        await runDue(T)
+        assert.deepEqual([...h.due.entries()], [[`refresh|ghostbridge|0|${T}`, T + timing.retryMs]])
+    })
+
+    it('leaves later refreshes queued for whoever holds the lock next', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
+        await scheduleRefresh('foo', T)
+        await runDue(T + REFRESH_DELAYS_MS[0])
+        assert.deepEqual([...h.due.keys()], [`refresh|foo|1|${T}`])
+    })
+})
+
+describe('unreadable state', () => {
+    let h: ReturnType<typeof harness>
+    beforeEach(() => { h = harness() })
+    afterEach(() => h.restore())
+
+    it('a record read error fails the note instead of passing as a first sighting', async () => {
+        imageRecord.get = async () => { throw new Error('redis down') }
+        await assert.rejects(noteProfileImages('esie', profileWith('https://x/new.jpg'), T))
+        assert.equal(h.records.size, 0)
+        assert.equal(h.due.size, 0)
+    })
+
+    it('a queue write error fails scheduling, so the poll does not advance past it', async () => {
+        queue.add = async () => { throw new Error('redis down') }
+        await assert.rejects(scheduleRefresh('esie', T))
+    })
+
+    it('a record write error fails the note, so the change is not taken as recorded', async () => {
+        h.records.set('esie', { avatar: 'https://x/old.jpg', cover: '' })
+        imageRecord.set = async () => { throw new Error('redis down') }
+        await assert.rejects(noteProfileImages('esie', profileWith('https://x/new.jpg'), T))
+    })
+})
+
+describe('confirming images against hived', () => {
+    let h: ReturnType<typeof harness>
+    let origRpc: typeof rpc.call
+    let calls: string[]
+    let accountsFail: boolean
+    beforeEach(() => {
+        h = harness()
+        calls = []
+        accountsFail = false
+        origRpc = rpc.call
+        // bridge trails the chain: it still has the old avatar; hived has the new one.
+        rpc.call = async (method: string, params?: any): Promise<any> => {
+            calls.push(method)
+            if (method === 'condenser_api.get_accounts' && accountsFail) throw new Error('node down')
+            const res: any = await origRpc(method, params)
+            if (method === 'bridge.get_profile' && res) res.metadata.profile.profile_image = 'https://example.com/old.jpg'
+            return res
+        }
+    })
+    afterEach(() => { rpc.call = origRpc; h.restore() })
+
+    it('the watcher takes the images from hived, so a lagging bridge cannot record the old one', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        assert.equal(await refreshProfile('foo'), true)
+        assert.equal(h.records.get('foo')!.avatar, 'https://example.com/avatar.jpg')
+        assert(calls.includes('condenser_api.get_accounts'))
+        assert([...h.due.keys()].some((m) => m.startsWith('clear|foo|avatar|1|')))
+    })
+
+    it('a request lookup that differs from the record is confirmed, so a lagging node cannot flip it back', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/avatar.jpg', cover: 'https://example.com/cover.jpg' })
+        const p = await getProfile('foo', false)
+        assert.equal(p!.metadata.profile.profile_image, 'https://example.com/avatar.jpg')
+        await new Promise((r) => setTimeout(r, 30))
+        assert.equal(h.due.size, 0)
+        assert.equal(h.records.get('foo')!.avatar, 'https://example.com/avatar.jpg')
+    })
+
+    it('a request lookup that matches the record makes no extra call', async () => {
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: 'https://example.com/cover.jpg' })
+        await getProfile('foo', false)
+        assert.deepEqual(calls, ['bridge.get_profile'])
+    })
+
+    it('an unreadable record skips the check on a request lookup, which still succeeds', async () => {
+        imageRecord.get = async () => { throw new Error('redis down') }
+        const p = await getProfile('foo', false)
+        assert(p, 'the lookup still answers')
+        assert.deepEqual(calls, ['bridge.get_profile'])
+    })
+
+    it('a failed hived lookup makes the watcher lookup incomplete, so it retries', async () => {
+        accountsFail = true
+        h.records.set('foo', { avatar: 'https://example.com/old.jpg', cover: '' })
+        assert.equal(await refreshProfile('foo'), false)
+        assert.equal(h.records.get('foo')!.avatar, 'https://example.com/old.jpg')
+    })
+})
+
+describe('verification agrees with the request path', () => {
+    let h: ReturnType<typeof harness>
+    let origRpc: typeof rpc.call
+    let calls: string[]
+    beforeEach(() => {
+        h = harness()
+        calls = []
+        origRpc = rpc.call
+        rpc.call = async (method: string, params?: any): Promise<any> => { calls.push(method); return origRpc(method, params) }
+    })
+    afterEach(() => { rpc.call = origRpc; h.restore() })
+
+    it('keeps the default cover for a posting avatar with a legacy-only cover, as the request path does', async () => {
+        assert.equal(await refreshProfile('legacycover'), true)
+        assert.deepEqual(h.records.get('legacycover'), { avatar: 'https://example.com/posting-avatar.jpg', cover: '' })
+        // so a later request lookup matches the record and makes no extra call
+        calls = []
+        await getProfile('legacycover', false)
+        assert.deepEqual(calls, ['bridge.get_profile'])
+    })
+
+    it('recovers legacy-only images and fetches the account once', async () => {
+        assert.equal(await refreshProfile('legacyonly'), true)
+        assert.deepEqual(h.records.get('legacyonly'), {
+            avatar: 'https://cdn.steemitimages.com/legacy/Kozmos.jpg', cover: 'https://cdn.steemitimages.com/legacy/cover.jpg',
+        })
+        assert.equal(calls.filter((m) => m === 'condenser_api.get_accounts').length, 1)
+    })
+})
+
+describe('poll cursor', () => {
+    let origRpc: typeof rpc.call
+    const origCursor = { ...cursorStore }
+    let ranges: Array<{ starting_block_num: number, count: number }>
+    let cursor: number | 'throw'
+    let saved: number[]
+    beforeEach(() => {
+        ranges = []
+        saved = []
+        // Saved here, not at load: the shared RPC mock is installed in a root before().
+        origRpc = rpc.call
+        rpc.call = async (method: string, params?: any): Promise<any> => {
+            if (method === 'condenser_api.get_dynamic_global_properties') return { head_block_number: 10_000 }
+            if (method === 'block_api.get_block_range') { ranges.push(params); return { blocks: [{}] } }
+            throw new Error(`unexpected ${method}`)
+        }
+        cursorStore.get = async () => { if (cursor === 'throw') throw new Error('redis down'); return cursor }
+        cursorStore.set = async (block) => { saved.push(block) }
+    })
+    afterEach(() => {
+        rpc.call = origRpc
+        Object.assign(cursorStore, origCursor)
+    })
+
+    it('without a cursor (first start or lost) replays the record lifetime', async () => {
+        cursor = 0
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 10_000 - 3_600)
+        assert.deepEqual(saved, [10_000 - 3_600 + 1])
+    })
+
+    it('continues from the cursor', async () => {
+        cursor = 9_990
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 9_990)
+    })
+
+    it('after a long outage replays the record lifetime instead of jumping to head', async () => {
+        cursor = 1_000
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 10_000 - 3_600)
+    })
+
+    it('an unreadable cursor fails the poll instead of restarting at head', async () => {
+        cursor = 'throw'
+        await assert.rejects(poll())
+        assert.deepEqual(ranges, [])
+        assert.deepEqual(saved, [])
+    })
+})
+
+describe('profileUpdates', () => {
+    const block = (ops: any[]) => ({ transactions: [{ operations: ops }] })
+
+    it('counts any metadata write, once per account', () => {
+        const users = profileUpdates(block([
+            { type: 'account_update2_operation', value: { account: 'a', posting_json_metadata: '{"profile":{"profile_image":"x"}}' } },
+            { type: 'account_update_operation', value: { account: 'b', json_metadata: '{}' } },
+            { type: 'account_update2_operation', value: { account: 'a', posting_json_metadata: '{"version":2}' } },
+            { type: 'account_update2_operation', value: { account: 'd', json_metadata: '{"beneficiaries":[]}', posting_json_metadata: '' } },
+        ]))
+        assert.deepEqual(users, ['a', 'b', 'd'])
+    })
+
+    it('skips other ops and updates that leave both fields unchanged', () => {
+        const users = profileUpdates(block([
+            { type: 'account_update2_operation', value: { account: 'c', json_metadata: '', posting_json_metadata: '' } },
+            { type: 'account_update_operation', value: { account: 'e', memo_key: 'STM...' } },
+            { type: 'custom_json_operation', value: { id: 'profile', json: '{"profile":{}}' } },
+        ]))
+        assert.deepEqual(users, [])
+        assert.deepEqual(profileUpdates(undefined), [])
+        assert.deepEqual(profileUpdates({}), [])
+    })
+})
+
+describe('purgeCachePrefixes', () => {
+    it('sends host-and-path prefixes for both service hostnames, without a scheme', async () => {
+        const origSettings = cdnSettings.get
+        const origFetch = globalThis.fetch
+        const bodies: any[] = []
+        cdnSettings.get = () => ({ token: 't', zone: 'z' })
+        globalThis.fetch = (async (_url: any, init: any) => {
+            bodies.push(JSON.parse(init.body))
+            return { ok: true, status: 200, json: async () => ({ success: true }) } as any
+        }) as any
+        try {
+            assert.equal(await purgeCachePrefixes(['/u/esie/avatar']), true)
+        } finally {
+            cdnSettings.get = origSettings
+            globalThis.fetch = origFetch
+        }
+        assert.equal(bodies.length, 1)
+        assert.deepEqual(Object.keys(bodies[0]), ['prefixes'])
+        assert(bodies[0].prefixes.includes('images.ecency.com/u/esie/avatar'))
+        assert(bodies[0].prefixes.includes(`${new URL(ORIGIN).host}/u/esie/avatar`))
+        assert(bodies[0].prefixes.every((p: string) => !p.includes('://')))
+    })
+})
+
+describe('purgeCache result', () => {
+    it('resolves true when no CDN is configured, as there is nothing to clear', async () => {
+        const orig = cdnSettings.get
+        cdnSettings.get = () => undefined
+        try {
+            assert.equal(await purgeCache(`${ORIGIN}/u/esie/avatar`), true)
+        } finally {
+            cdnSettings.get = orig
+        }
+    })
+
+    for (const [name, reply, expected] of [
+        ['accepted', { ok: true, body: { success: true } }, true],
+        ['rejected', { ok: true, body: { success: false } }, false],
+        ['an HTTP error', { ok: false, body: null }, false],
+        ['unreadable', { ok: true, body: null }, false],
+        ['a network error', 'throw', false],
+    ] as const) {
+        it(`resolves ${expected} when the purge is ${name}`, async () => {
+            const origSettings = cdnSettings.get
+            const origFetch = globalThis.fetch
+            cdnSettings.get = () => ({ token: 't', zone: 'z' })
+            globalThis.fetch = (async () => {
+                if (reply === 'throw') throw new Error('down')
+                return { ok: reply.ok, status: reply.ok ? 200 : 500, json: async () => reply.body } as any
+            }) as any
+            try {
+                assert.equal(await purgeCache(`${ORIGIN}/u/esie/avatar`), expected)
+            } finally {
+                cdnSettings.get = origSettings
+                globalThis.fetch = origFetch
+            }
+        })
+    }
+})
+
+describe('banVarnish', () => {
+    // A raw TCP server: Node's HTTP parser rejects the BAN method with a 400
+    // before any handler runs. Varnish accepts any method token.
+    let server: net.Server
+    let url: string
+    let seen: Array<{ method?: string, user?: string, kind?: string }>
+    let status = 200
+
+    before(async () => {
+        server = net.createServer((socket) => {
+            let raw = ''
+            socket.on('data', (chunk) => {
+                raw += chunk.toString()
+                if (!raw.includes('\r\n\r\n')) return
+                const [requestLine, ...headerLines] = raw.split('\r\n\r\n')[0].split('\r\n')
+                const header = (name: string) => {
+                    const line = headerLines.find((l) => l.toLowerCase().startsWith(`${name}:`))
+                    return line && line.slice(name.length + 1).trim()
+                }
+                seen.push({ method: requestLine.split(' ')[0], user: header('x-ban-user'), kind: header('x-ban-kind') })
+                socket.end(`HTTP/1.1 ${status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`)
+            })
+        })
+        await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+        url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`
+    })
+    after(() => server.close())
+    beforeEach(() => { seen = []; status = 200 })
+
+    it('sends a BAN with the user and kind headers', async () => {
+        assert.equal(await banVarnish(url, 'esie', 'avatar'), true)
+        assert.deepEqual(seen, [{ method: 'BAN', user: 'esie', kind: 'avatar' }])
+    })
+
+    it('reports a refused ban', async () => {
+        status = 405
+        assert.equal(await banVarnish(url, 'esie', 'cover'), false)
+    })
+
+    it('reports an unreachable Varnish without throwing', async () => {
+        assert.equal(await banVarnish('http://127.0.0.1:1/', 'esie', 'avatar'), false)
+    })
+})

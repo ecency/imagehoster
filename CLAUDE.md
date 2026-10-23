@@ -162,6 +162,7 @@ Key configuration sections:
 - `sentry_dsn` - Optional Sentry DSN for error tracking
 - `invalidate_token` - Optional token for cache invalidation API
 - `cloudflare_token`, `cloudflare_zone` - Cloudflare cache purging
+- `varnish_url` - Optional Varnish address for banning a changed avatar or cover
 
 Environment variables can override TOML values (see config module docs).
 
@@ -174,11 +175,26 @@ Multi-stage Dockerfile with vips/heif/aom dependencies for image processing:
 - Healthcheck: GET /healthcheck every 20s
 - Default port: 8800
 
+### Avatar and cover changes
+`src/profile-change.ts`. Every fresh profile lookup records the avatar and cover URL it served (Redis `profile:images:<user>`, 3h, longer than Varnish ttl + grace and the CDN max-age). When the next fresh lookup resolves to something else, a clear is queued: ban the user's paths in Varnish, then prefix-purge them at the CDN, in that order, since a CDN miss refills from Varnish. The short-ttl profile from a failed account lookup is never recorded, as its images may be wrong only because that lookup failed.
+- **Truth comes from hived.** bridge (hivemind) trails the chain, and RPC failover can land on a node that trails further. Whenever the images may have changed (every watcher lookup, and any request lookup that differs from the record) `loadProfile` takes them from a fresh `condenser_api.get_accounts` (`imagesFromAccount`: the same merge as the bridge lookup plus its legacy fallback, so verifying never changes what is served). A failed account lookup makes the result incomplete, so the watcher retries. On the request path an unreadable record skips the check, so a Redis outage does not double the RPCs. A mixed-case `u`, `avatar` or `cover` segment also 301s to the lowercase path.
+- Pending work is one Redis sorted set, `profile-watch:due`, scored by due time, so a restart or lock handover loses nothing. Members: `refresh|<user>|<n>|<since>` and `clear|<user>|<kind>|<pass>|<since>|<part>` (part `all`, or `cdn` once the ban succeeded). A worker claims a due member by moving its due time to the end of a 2 min lease (Lua, atomic), so two lock holders never run the same one, and a worker that dies mid-task leaves it to come due again. Finishing removes it, and a refresh retry moves it, only if its score still equals the lease, so a member re-added meanwhile by a newer update keeps its later time. A drain stops starting work after 15s, inside the 30s lock lease. The clear is queued before the record moves, so a failed queue write is seen again on the next lookup.
+- A clear leaves the queue only when both the ban and the purge confirmed (`success: true`). A failed ban retries both; a failed purge after a good ban retries only the purge. Retries back off from 30s to half the time since the change (max 15 min) and give up after 2h, when every layer has expired the old image anyway. Pass 1 queues pass 2 for after the fetch deadline plus 15s, for renders that read the old profile and landed after pass 1.
+- One worker holds a Redis lock, drains the queue, then follows the chain. The drain runs first and on its own, so queued clears never wait on a failing chain node; a failed chain poll pauses polling for 30s. Any `account_update`/`account_update2` write to either metadata field queues lookups 20s and 90s later for that account, recorded or not (about a dozen an hour chain-wide). Each update gets its own pair, so the newest always gets the full window. A failed or incomplete lookup retries with the clears' backoff until 2h after the update, recorded or not. A watcher lookup with no record clears both kinds, since a missing record (lost, or a lookup during hivemind lag that cached the old image) does not prove nothing is cached. The cursor advances only after those queue writes succeeded, never expires, and after a lag longer than the record lifetime (or when missing) replays the last 3600 blocks. Record and cursor reads and record writes throw on a Redis error rather than reading as missing; callers retry.
+- Every cache layer, and what clears it on a change:
+  - Browser: no purge can reach it, so the VCL sends successful avatars and covers as `public,max-age=120,s-maxage=3600`. Browsers revalidate after 2 minutes (mostly a 304 from the CDN edge); the CDN keeps an hour and is purged.
+  - Cloudflare: key = scheme + host + path + query + `Origin` and other request headers (Pro cannot exclude them; `Accept` is not in the key). Cleared by a prefix purge of `<host>/u/<user>/<kind>` on both hostnames, which (verified live 10-23) clears every size, trailing slash, query and header-keyed copy. Prefixes are case-sensitive, so a mixed-case or percent-encoded name (checked on the raw path) 301s to the plain lowercase path.
+  - nginx: no cache, proxies to Varnish with `Host`.
+  - Varnish: key = URL + Host, `Vary: Accept`. Cleared by the `BAN`, which matches every size, route, hostname, case and query.
+  - imagehoster stores: resized variants and originals are keyed by the source URL, so a new avatar URL is a new key. A different image published at the SAME URL is not detected (only `?invalidate=1` clears it).
+  - Redis profile cache (`profile:hive:`, `profile:account:`): rewritten by the watcher's fresh lookup. Redis here has `maxmemory 0`, `noeviction`, RDB snapshots but no volume: recreating the container loses the records and queue, which the no-record clear makes harmless.
+
 ### Varnish
 VCL template at `config/varnish-user.vcl`.
 - Caches only /u/* (avatars/covers) and ?blur= URLs
 - Passes proxy images and uploads through (cached by Cloudflare instead)
 - Fallback avatars detected by max-age=120, cached only 2 minutes. This is a header-level contract: the handlers still emit max-age=120 for every fallback render, so the VCL branch is unaffected by the fact that fallbacks are no longer written to the blob store
+- `BAN` with `X-Ban-User` and `X-Ban-Kind` (avatar|cover) drops every cached size, route, hostname and letter case of one user's image. It matches `obj.http.x-url`, which `vcl_backend_response` stores and `vcl_deliver` strips, so the ban lurker can retire it. Objects cached before that VCL have no `x-url`, so ban `^/u/` once after loading it. Only the `banners` ACL (the imagehoster container's Docker network, 172.18.0.0/16) may send it; loopback is excluded because public traffic arrives from nginx there
 - After deploys: ban avatar cache. Note the original reason for this (fallback bytes persisted in the proxy store under a user's key, outliving the 120s response) no longer applies — those are never stored now, so a ban only clears edge-cached responses
 
 ### Cloudflare
@@ -197,6 +213,7 @@ Tests in `test/` directory use Mocha + ts-node. Key test files:
 - `test/proxy-formats.ts` - Format conversion (AVIF, WebP, JPEG, PNG)
 - `test/animated.ts` - Animated sources keep their frames (fixture GIF generated by `test/animated-gif-fixture.ts`, since this sharp cannot write an animation)
 - `test/avatar.ts` - Avatar endpoint
+- `test/profile-change.ts` - Avatar/cover change detection, Varnish ban, chain op filter
 - `test/cover.ts` - Cover image endpoint
 - `test/serve.ts` - Direct image serving
 - `test/legacy-proxy.ts` - Legacy proxy redirect behavior
