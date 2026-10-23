@@ -21,7 +21,7 @@
 
 import config from 'config'
 import { FETCH_DEADLINE_MS } from './constants'
-import { HiveProfile, redisClient, redisGet, redisReady, redisSet, refreshProfile, rpc } from './common'
+import { HiveProfile, redisClient, redisReady, redisSet, refreshProfile, rpc } from './common'
 import { logger } from './logger'
 import { purgeCache } from './utils'
 
@@ -36,9 +36,22 @@ export interface ServedImages {
 /** Longer than Varnish ttl + grace (2h) and the CDN max-age (1h). */
 const RECORD_TTL = 3 * 60 * 60
 
-/** Mockable record store. Tests replace `get`/`set`. */
+/**
+ * Mockable record store. Tests replace `get`/`set`.
+ *
+ * `get` throws when Redis is configured but unreadable, instead of answering
+ * "no record" like redisGet: a missing record means "nothing cached", so a
+ * read error mistaken for one would skip a change for good. The callers retry.
+ * Without Redis at all (local development) there is no record to compare.
+ */
 export const imageRecord = {
-    get: async (user: string): Promise<ServedImages | undefined> => redisGet(`profile:images:${user}`),
+    get: async (user: string): Promise<ServedImages | undefined> => {
+        if (!redisClient) return undefined
+        if (redisReady) await redisReady
+        if (!redisClient.isReady) throw new Error('redis not ready, image record unreadable')
+        const raw = await redisClient.get(`profile:images:${user}`)
+        return raw ? JSON.parse(raw) as ServedImages : undefined
+    },
     set: async (user: string, value: ServedImages): Promise<void> => redisSet(`profile:images:${user}`, value, RECORD_TTL),
 }
 
@@ -307,7 +320,7 @@ const LOCK_TTL = 30
 const POLL_MS = 3000
 const ERROR_PAUSE_MS = 30_000
 const MAX_BLOCKS_PER_POLL = 50
-/** Beyond this lag (3h, the record TTL) the records have expired, so restart at head. */
+/** The record TTL (3h) in blocks. After a longer outage, replay this much. */
 const MAX_LAG_BLOCKS = 3600
 
 /**
@@ -350,19 +363,35 @@ async function holdLock(id: string): Promise<boolean> {
 }
 
 /**
+ * Mockable cursor store. A read error throws rather than reading as "no
+ * cursor", which would restart at head and skip the blocks in between.
+ */
+export const cursorStore = {
+    get: async (): Promise<number> => {
+        if (!redisClient || !redisClient.isReady) throw new Error('redis not ready, cursor unreadable')
+        return Number(await redisClient.get(CURSOR_KEY)) || 0
+    },
+    set: async (block: number): Promise<void> => redisSet(CURSOR_KEY, block, 24 * 60 * 60),
+}
+
+/**
  * Read new blocks and queue lookups. The cursor advances only after the queue
  * writes for those blocks succeeded, so a crash replays them (harmless: queueing
  * twice only moves the due time) rather than skipping them.
  */
-async function poll(): Promise<void> {
+export async function poll(): Promise<void> {
     const props = await rpc.call<any>('condenser_api.get_dynamic_global_properties', [])
     const head = Number(props && props.head_block_number)
     if (!head) {
         return
     }
-    let cursor = Number(await redisGet(CURSOR_KEY)) || 0
-    if (!cursor || head - cursor > MAX_LAG_BLOCKS) {
+    let cursor = await cursorStore.get()
+    if (!cursor) {
         cursor = head
+    } else if (head - cursor > MAX_LAG_BLOCKS) {
+        // Older changes concern records that have expired since, but anyone
+        // seen within the record lifetime may have changed an image meanwhile.
+        cursor = head - MAX_LAG_BLOCKS
     }
     if (cursor > head) {
         return
@@ -377,7 +406,7 @@ async function poll(): Promise<void> {
     }
     // An empty range means the node is not there yet: retry the same block.
     if (blocks.length > 0) {
-        await redisSet(CURSOR_KEY, cursor + blocks.length, 24 * 60 * 60)
+        await cursorStore.set(cursor + blocks.length)
     }
 }
 

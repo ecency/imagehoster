@@ -7,11 +7,13 @@ import { getProfile, rpc } from './../src/common'
 import {
     banVarnish,
     clearOnce,
+    cursorStore,
     ImageKind,
     imagePaths,
     imageRecord,
     invalidators,
     noteProfileImages,
+    poll,
     profileUpdates,
     queue,
     REFRESH_DELAYS_MS,
@@ -373,6 +375,75 @@ describe('refresh scheduling', () => {
         await scheduleRefresh('foo', T)
         await runDue(T + REFRESH_DELAYS_MS[0])
         assert.deepEqual([...h.due.keys()], ['refresh|foo|1'])
+    })
+})
+
+describe('unreadable state', () => {
+    let h: ReturnType<typeof harness>
+    beforeEach(() => { h = harness() })
+    afterEach(() => h.restore())
+
+    it('a record read error fails the note instead of passing as a first sighting', async () => {
+        imageRecord.get = async () => { throw new Error('redis down') }
+        await assert.rejects(noteProfileImages('esie', profileWith('https://x/new.jpg'), T))
+        assert.equal(h.records.size, 0)
+        assert.equal(h.due.size, 0)
+    })
+
+    it('a record read error fails scheduling, so the poll does not advance past it', async () => {
+        imageRecord.get = async () => { throw new Error('redis down') }
+        await assert.rejects(scheduleRefresh('esie', T))
+    })
+})
+
+describe('poll cursor', () => {
+    let origRpc: typeof rpc.call
+    const origCursor = { ...cursorStore }
+    let ranges: Array<{ starting_block_num: number, count: number }>
+    let cursor: number | 'throw'
+    let saved: number[]
+    beforeEach(() => {
+        ranges = []
+        saved = []
+        // Saved here, not at load: the shared RPC mock is installed in a root before().
+        origRpc = rpc.call
+        rpc.call = async (method: string, params?: any): Promise<any> => {
+            if (method === 'condenser_api.get_dynamic_global_properties') return { head_block_number: 10_000 }
+            if (method === 'block_api.get_block_range') { ranges.push(params); return { blocks: [{}] } }
+            throw new Error(`unexpected ${method}`)
+        }
+        cursorStore.get = async () => { if (cursor === 'throw') throw new Error('redis down'); return cursor }
+        cursorStore.set = async (block) => { saved.push(block) }
+    })
+    afterEach(() => {
+        rpc.call = origRpc
+        Object.assign(cursorStore, origCursor)
+    })
+
+    it('starts at head when there is no cursor yet', async () => {
+        cursor = 0
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 10_000)
+        assert.deepEqual(saved, [10_001])
+    })
+
+    it('continues from the cursor', async () => {
+        cursor = 9_990
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 9_990)
+    })
+
+    it('after a long outage replays the record lifetime instead of jumping to head', async () => {
+        cursor = 1_000
+        await poll()
+        assert.equal(ranges[0].starting_block_num, 10_000 - 3_600)
+    })
+
+    it('an unreadable cursor fails the poll instead of restarting at head', async () => {
+        cursor = 'throw'
+        await assert.rejects(poll())
+        assert.deepEqual(ranges, [])
+        assert.deepEqual(saved, [])
     })
 })
 

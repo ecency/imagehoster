@@ -155,17 +155,22 @@ sub vcl_backend_response {
     # Avatars and covers: shorter TTL so updates propagate, but keep grace
     # so stale content is served if backend is slow/down.
     # Backend sends max-age=3600 for success, max-age=120 for fallback.
+    # A revalidated object brings back the header set below, which also
+    # contains "max-age=120", so the s-maxage test keeps it in the success branch.
     else if (bereq.url ~ "avatar" || bereq.url ~ "cover") {
-        if (beresp.http.Cache-Control ~ "max-age=120") {
+        if (beresp.http.Cache-Control ~ "max-age=120" && beresp.http.Cache-Control !~ "s-maxage") {
             # Fallback avatar/cover — cache 2 minutes, short grace
             set beresp.ttl = 120s;
             set beresp.grace = 120s;
             set beresp.http.Cache-Control = "public,max-age=120";
         } else {
-            # Successful avatar/cover — cache 1 hour, moderate grace
+            # Successful avatar/cover — cache 1 hour, moderate grace.
+            # The CDN keeps it an hour (s-maxage) and is purged on a profile
+            # change. Browsers keep it 2 minutes, because no purge reaches a
+            # browser; their revalidation is mostly a 304 from the CDN edge.
             set beresp.ttl = 3600s;
             set beresp.grace = 1h;
-            set beresp.http.Cache-Control = "public,max-age=3600";
+            set beresp.http.Cache-Control = "public,max-age=120,s-maxage=3600";
         }
     }
     # Everything else (blur placeholders, etc): cache for 24h.
@@ -187,7 +192,7 @@ sub vcl_deliver {
     # (profile-change.ts) lists bare URLs. So an avatar or cover requested with
     # any of them may only be cached briefly. Browsers loading an <img> send
     # none of them. Changes only the header sent, not the stored object.
-    if (req.url ~ "^/u/" && resp.http.Cache-Control ~ "max-age=3600" && (
+    if (req.url ~ "^/u/" && resp.http.Cache-Control ~ "s-maxage=3600" && (
         req.http.Origin || req.http.X-HTTP-Method || req.http.X-HTTP-Method-Override ||
         req.http.X-Method-Override || req.http.X-Forwarded-Host || req.http.X-Host ||
         req.http.X-Forwarded-Scheme || req.http.X-Original-URL || req.http.X-Rewrite-URL ||
