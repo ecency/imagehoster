@@ -4,7 +4,7 @@ import { runEncode } from './encode-limit'
 import { AVIF_EFFORT } from './constants'
 import { APIError } from './error'
 import {
-    buildSharpPipeline, getProxyImageLimits, isAnimatedSource, mimeMagic,
+    applyOrientation, buildSharpPipeline, getProxyImageLimits, isAnimatedSource, mimeMagic,
     OutputFormat, primaryPageOf, ProxyOptions, safeParseInt, ScalingMode,
 } from './utils'
 
@@ -79,12 +79,13 @@ export async function resizeImageWithOptions(
         height = Math.min(meta.height, maxHeight)
     }
 
+    applyOrientation(image, meta)
     switch (options.mode) {
         case ScalingMode.Cover:
-            image.rotate().resize(width, height, { fit: 'cover' })
+            image.resize(width, height, { fit: 'cover' })
             break
         case ScalingMode.Fit:
-            image.rotate().resize(width || maxWidth, height || maxHeight, {
+            image.resize(width || maxWidth, height || maxHeight, {
                 fit: 'inside',
                 withoutEnlargement: true,
             })
