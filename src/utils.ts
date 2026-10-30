@@ -1065,12 +1065,67 @@ export function resolveOutputBox(
 
 export function applyProxyResize(
     image: Sharp.Sharp,
-    metadata: {width?: number, height?: number},
+    metadata: {width?: number, height?: number, orientation?: number, exif?: Buffer},
     options: ProxyOptions,
     animated: boolean = false,
 ): void {
     const {width, height, fit, withoutEnlargement} = resolveProxyResize(metadata, options, animated)
-    image.rotate().resize(width, height, {fit, withoutEnlargement})
+    applyOrientation(image, animated ? {} : metadata)
+    image.resize(width, height, {fit, withoutEnlargement})
+}
+
+/**
+ * The EXIF Orientation tag (1-8) from IFD0 of a raw EXIF block, as sharp hands
+ * it back in `metadata.exif` (with or without the "Exif\0\0" prefix).
+ * Undefined when the block is missing, malformed or holds no valid value.
+ */
+export function readExifOrientation(exif?: Buffer): number | undefined {
+    if (!exif) { return undefined }
+    const tiff = exif.subarray(0, 6).toString('latin1') === 'Exif\0\0' ? exif.subarray(6) : exif
+    if (tiff.length < 8) { return undefined }
+    const order = tiff.subarray(0, 2).toString('latin1')
+    if (order !== 'II' && order !== 'MM') { return undefined }
+    const le = order === 'II'
+    const u16 = (o: number) => le ? tiff.readUInt16LE(o) : tiff.readUInt16BE(o)
+    const u32 = (o: number) => le ? tiff.readUInt32LE(o) : tiff.readUInt32BE(o)
+    if (u16(2) !== 42) { return undefined }
+    const ifd = u32(4)
+    if (ifd + 2 > tiff.length) { return undefined }
+    const count = u16(ifd)
+    for (let i = 0; i < count; i++) {
+        const entry = ifd + 2 + i * 12
+        if (entry + 12 > tiff.length) { return undefined }
+        if (u16(entry) !== 0x0112) { continue }
+        // A SHORT value sits left-justified in the 4-byte value field
+        const value = u16(entry + 2) === 3 ? u16(entry + 8) : undefined
+        return value !== undefined && value >= 1 && value <= 8 ? value : undefined
+    }
+    return undefined
+}
+
+/**
+ * Upright an image from its EXIF orientation. libvips reads the tag itself, but
+ * libexif drops the whole of IFD0 when it also holds an out-of-range thumbnail
+ * pointer, which some phone uploads write. libvips then reports no orientation
+ * and `.rotate()` does nothing, while the re-encode strips the EXIF block, so the
+ * photo is served on its side. In that case the tag is read here and applied
+ * explicitly. sharp mirrors before it rotates, which the pairs below allow for.
+ */
+export function applyOrientation(
+    image: Sharp.Sharp,
+    metadata: {orientation?: number, exif?: Buffer},
+): void {
+    const fallback = metadata.orientation === undefined ? readExifOrientation(metadata.exif) : undefined
+    switch (fallback) {
+        case 2: image.flop(); break
+        case 3: image.rotate(180); break
+        case 4: image.flip(); break
+        case 5: image.rotate(90).flip(); break
+        case 6: image.rotate(90); break
+        case 7: image.rotate(270).flip(); break
+        case 8: image.rotate(270); break
+        default: image.rotate()
+    }
 }
 
 export function buildSharpPipeline(buffer: Buffer, animated: boolean = false, page?: number) {
