@@ -132,8 +132,14 @@ describe('EXIF orientation', function() {
             const zeroCount = Buffer.from(full)
             zeroCount.writeUInt16BE(0, 6 + 8)
             const outOfRange = exifApp1(9, false).subarray(4)
+            // Orientation is one SHORT; any other count leaves the value field unreliable
+            const countOf = (count: number) => {
+                const b = Buffer.from(exifApp1(6, false).subarray(4))
+                b.writeUInt32BE(count, 6 + 10 + 4)
+                return b
+            }
             for (const input of [undefined, Buffer.alloc(0), Buffer.from('Exif\0\0XX'), full.subarray(0, 20),
-                pastEnd, zeroCount, outOfRange]) {
+                pastEnd, zeroCount, outOfRange, countOf(0), countOf(2)]) {
                 assert.strictEqual(readExifOrientation(input), undefined)
             }
         })

@@ -1096,8 +1096,8 @@ export function readExifOrientation(exif?: Buffer): number | undefined {
         const entry = ifd + 2 + i * 12
         if (entry + 12 > tiff.length) { return undefined }
         if (u16(entry) !== 0x0112) { continue }
-        // A SHORT value sits left-justified in the 4-byte value field
-        const value = u16(entry + 2) === 3 ? u16(entry + 8) : undefined
+        // Exactly one SHORT, which sits left-justified in the 4-byte value field
+        const value = u16(entry + 2) === 3 && u32(entry + 4) === 1 ? u16(entry + 8) : undefined
         return value !== undefined && value >= 1 && value <= 8 ? value : undefined
     }
     return undefined
