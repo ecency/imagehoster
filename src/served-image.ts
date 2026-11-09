@@ -18,7 +18,7 @@ import {storeWrite} from './utils'
  * the store helper refuses anything that is not real, so no call site needs to
  * remember the check.
  */
-export type Provenance = 'real' | 'fallback' | 'passthrough'
+export type Provenance = 'real' | 'fallback' | 'passthrough' | 'busy'
 
 export interface RealImage<T = Buffer> {
     readonly kind: 'real'
@@ -47,7 +47,17 @@ export interface PassthroughImage<T = Buffer> {
     readonly reason: string
 }
 
-export type ServedImage<T = Buffer> = RealImage<T> | FallbackImage<T> | PassthroughImage<T>
+/**
+ * The source's own bytes standing in for a variant because the encoder was
+ * busy (see encode-limit.ts, max_queued_encodes). Never stored; cached only
+ * briefly, so the real variant is rendered once the encoder recovers.
+ */
+export interface BusyImage<T = Buffer> {
+    readonly kind: 'busy'
+    readonly bytes: T
+    readonly reason: string
+}
+export type ServedImage<T = Buffer> = RealImage<T> | FallbackImage<T> | PassthroughImage<T> | BusyImage<T>
 
 export function realImage<T>(bytes: T): RealImage<T> {
     return {kind: 'real', bytes}
@@ -61,6 +71,9 @@ export function passthroughImage<T>(bytes: T, reason: string): PassthroughImage<
     return {kind: 'passthrough', bytes, reason}
 }
 
+export function busyImage<T>(bytes: T, reason: string): BusyImage<T> {
+    return {kind: 'busy', bytes, reason}
+}
 export function isFallbackImage<T>(image: ServedImage<T>): image is FallbackImage<T> {
     return image.kind === 'fallback'
 }
@@ -77,6 +90,7 @@ export function derive<T, U>(from: ServedImage<T>, bytes: U, reason?: string): S
     switch (from.kind) {
         case 'fallback': return fallbackImage(bytes, reason || from.reason)
         case 'passthrough': return passthroughImage(bytes, reason || from.reason)
+        case 'busy': return busyImage(bytes, reason || from.reason)
         default: return realImage(bytes)
     }
 }
@@ -99,11 +113,20 @@ export const FALLBACK_CACHE_CONTROL = 'public,max-age=120'
  * year of immutability would pin the degraded bytes.
  */
 export const PASSTHROUGH_CACHE_CONTROL = 'public,max-age=3600'
+/**
+ * A busy stand-in is cached for a minute: the CDN absorbs a flood's repeats,
+ * and the real variant is rendered soon after. Never the variant's year: under
+ * the variant URL a full-size original would replace the thumbnail at the edge.
+ * Safe to share at the CDN only because a stand-in never depends on the
+ * request's Accept header (see canServeUnresized).
+ */
+export const BUSY_CACHE_CONTROL = 'public,max-age=60'
 
 export function cacheControlFor(image: {kind: Provenance}, realPolicy: string): string {
     switch (image.kind) {
         case 'fallback': return FALLBACK_CACHE_CONTROL
         case 'passthrough': return PASSTHROUGH_CACHE_CONTROL
+        case 'busy': return BUSY_CACHE_CONTROL
         default: return realPolicy
     }
 }
@@ -122,6 +145,9 @@ export function fallbackEtag(imageKey: string): string {
 
 export function passthroughEtag(imageKey: string): string {
     return etag(imageKey + '|passthrough')
+}
+export function busyEtag(imageKey: string): string {
+    return etag(imageKey + '|busy')
 }
 
 /**
@@ -163,6 +189,7 @@ export function etagFor(image: {kind: Provenance}, imageKey: string, head?: Buff
     switch (image.kind) {
         case 'fallback': return fallbackEtag(imageKey)
         case 'passthrough': return passthroughEtag(imageKey)
+        case 'busy': return busyEtag(imageKey)
         default:
             if (!head || size === undefined) { throw new Error('a real variant needs its leading bytes and size for a validator') }
             return realEtag(imageKey, head, size)
