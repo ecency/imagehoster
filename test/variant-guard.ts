@@ -11,7 +11,7 @@ import {clearDeadUrl, markDeadUrl} from './../src/fetch-image'
 import {base58Enc} from './../src/utils'
 import {
     acceptableFormats, clientKeyFor, EXTRA_KINDS, hasEdgeToken, memberFor, memoryLedger, parseMember, pickFallback,
-    settleReservation, testLedger, variantKind, variantQuery,
+    reserveWithin, settleReservation, testLedger, variantKind, variantQuery,
 } from './../src/variant-guard'
 
 const AVIF_WEBP = 'image/avif,image/webp,image/apng,*/*;q=0.8'
@@ -187,6 +187,37 @@ describe('variant guard', function() {
             assert.ok(!(await slotFree()), 'legacy')
             await settleReservation(ctx, await take(), false, false)
             assert.ok(await slotFree(), 'unstored')
+        })
+    })
+
+    describe('slow ledger', function() {
+        const ctx: any = {log: {warn: () => undefined}}
+        const later = <T>(p: Promise<T>, ms: number) => new Promise<T>((resolve, reject) => setTimeout(() => p.then(resolve, reject), ms))
+
+        it('lets the request through, then settles the hold the late answer took', async function() {
+            testLedger.clear()
+            const slow = later(testLedger.reserve('slow-k', 'a#1', 'a', 1, 1, 60), 60)
+            const reserved = await reserveWithin(slow, 10, 'slow-k', 'a#1')
+            assert.strictEqual(reserved.result, undefined, 'timed out: the request goes ahead')
+            const hold = await reserved.hold
+            assert.ok(hold, 'the late answer took a hold')
+            assert.ok(Array.isArray(await testLedger.reserve('slow-k', 'a#2', 'a', 1, 1, 60)), 'slot taken meanwhile')
+            await settleReservation(ctx, hold, false, false)   // the render failed
+            assert.ok(!Array.isArray(await testLedger.reserve('slow-k', 'a#2', 'a', 1, 1, 60)), 'slot given back')
+        })
+        it('has no hold when the late answer refused or failed', async function() {
+            testLedger.clear()
+            await testLedger.reserve('slow-r', 'a#1', 'a', 1, 1, 60)
+            const refused = await reserveWithin(later(testLedger.reserve('slow-r', 'a#2', 'a', 1, 1, 60), 30), 5, 'slow-r', 'a#2')
+            assert.strictEqual(await refused.hold, undefined)
+            const failed = await reserveWithin(later(Promise.reject(new Error('down')), 30), 5, 'x', 'y')
+            assert.strictEqual(await failed.hold, undefined)
+        })
+        it('answers in time when the ledger is quick', async function() {
+            testLedger.clear()
+            const reserved = await reserveWithin(testLedger.reserve('quick-k', 'a#1', 'a', 1, 1, 60), 100, 'quick-k', 'a#1')
+            assert.ok(reserved.result && !Array.isArray(reserved.result))
+            assert.ok(await reserved.hold)
         })
     })
 

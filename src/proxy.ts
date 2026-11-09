@@ -212,7 +212,7 @@ async function convertCachedMatchVariant(
 }
 
 interface GuardState {
-    variantGuard?: {reservation: Reservation, stored: boolean, legacy: boolean}
+    variantGuard?: {hold: Promise<Reservation | undefined>, stored: boolean, legacy: boolean}
 }
 
 /**
@@ -224,7 +224,8 @@ export async function proxyHandler(ctx: KoaContext) {
         await handleProxy(ctx)
     } finally {
         const vg = (ctx.state as GuardState).variantGuard
-        if (vg) { void settleReservation(ctx, vg.reservation, vg.stored, vg.legacy) }
+        // the hold may resolve only now on a slow ledger; `stored` is final by then
+        if (vg) { void vg.hold.then((r) => settleReservation(ctx, r, vg.stored, vg.legacy)) }
     }
 }
 
@@ -555,8 +556,8 @@ async function handleProxy(ctx: KoaContext) {
     if (applyGuardDecision(ctx, guard)) {
         return
     }
-    if (guard.action === 'allow' && guard.reservation) {
-        (ctx.state as GuardState).variantGuard = {reservation: guard.reservation, stored: false, legacy: isLegacy}
+    if (guard.action === 'allow' && guard.hold) {
+        (ctx.state as GuardState).variantGuard = {hold: guard.hold, stored: false, legacy: isLegacy}
     }
 
     // check if we have the original

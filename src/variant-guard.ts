@@ -76,7 +76,7 @@ export interface Reservation {
 }
 
 export type GuardDecision =
-    | {action: 'allow', reservation?: Reservation}
+    | {action: 'allow', hold?: Promise<Reservation | undefined>}
     | {action: 'redirect', query: string}
     | {action: 'reject'}
 
@@ -352,6 +352,29 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
     return Promise.race([p, timeout]).finally(() => { if (timer) { clearTimeout(timer) } })
 }
 
+export interface Reserved {
+    /** the ledger's answer, or undefined when it did not come within the timeout */
+    result?: ReserveResult
+    /** the hold this request took, settled once the request ends; resolves later on a slow ledger */
+    hold: Promise<Reservation | undefined>
+}
+
+/**
+ * Wait up to `ms` for a reserve. A slow answer is not abandoned: the pending
+ * reserve may still take a hold after the request was let through, and if
+ * nobody settled that hold, a failed render would keep its slot until the
+ * window expired. The returned `hold` follows the pending answer, so the
+ * request settles it whenever it arrives.
+ */
+export async function reserveWithin(pending: Promise<ReserveResult>, ms: number, key: string, member: string): Promise<Reserved> {
+    const hold: Promise<Reservation | undefined> = pending.then(
+        (r) => Array.isArray(r) ? undefined : {key, member, gen: r.gen},
+        () => undefined,
+    )
+    const result = await withTimeout(pending, ms)
+    return {result: result === 'timeout' ? undefined : result, hold}
+}
+
 export interface GuardInput {
     /** The variant about to be rendered, with the NEGOTIATED output format. */
     variant: RenderedVariant
@@ -377,18 +400,20 @@ export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Prom
 
     const key = 'vg:' + createHash('sha1').update(client + '|' + input.sourceKey).digest('base64url').slice(0, 22)
     const member = memberFor(input.variant)
-    let result: ReserveResult | 'timeout'
+    let reserved: Reserved
     try {
-        result = await withTimeout(
+        reserved = await reserveWithin(
             ledger.reserve(key, member, variantKind(input.variant), MAX_VARIANTS, MAX_VARIANTS + EXTRA_KINDS, WINDOW_SECONDS),
-            LEDGER_TIMEOUT_MS)
+            LEDGER_TIMEOUT_MS, key, member)
     } catch (err) {
         ctx.log.warn({err}, 'variant guard ledger failed, allowing')
         return {action: 'allow'}
     }
-    if (result === 'timeout') { return {action: 'allow'} }
-    if (!Array.isArray(result)) { return {action: 'allow', reservation: {key, member, gen: result.gen}} }
-    const members = result
+    // Slow ledger: let the request through, but keep the hold the late answer may
+    // still take, so the request settles it like any other when it ends.
+    if (reserved.result === undefined) { return {action: 'allow', hold: reserved.hold} }
+    if (!Array.isArray(reserved.result)) { return {action: 'allow', hold: reserved.hold} }
+    const members = reserved.result
 
     if (input.legacy) { return {action: 'reject'} }
     const fallback = pickFallback(members, input.variant, ctx.get('accept') || '')
