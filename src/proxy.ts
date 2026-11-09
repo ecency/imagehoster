@@ -30,6 +30,7 @@ import {renderAnimatedVariant} from './animated'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
+import {applyGuardDecision, checkVariantWalk, requestedVariantOf} from './variant-guard'
 import {
     AcceptedContentTypes,
     applyMatchFallbackFormat,
@@ -516,6 +517,17 @@ export async function proxyHandler(ctx: KoaContext) {
         ctx.body = served.bytes
         return
         } // end healthy cached variant
+    }
+
+    // Past this point the variant has to be rendered. A client walking every
+    // srcset variant of the same image is held to a few renders; see
+    // variant-guard.ts. Cache hits above never reach this.
+    const guard = await checkVariantWalk(ctx, origKey, requestedVariantOf(ctx.query), {
+        blur: options.blur,
+        bypass: shouldBypassCache,
+    })
+    if (applyGuardDecision(ctx, guard)) {
+        return
     }
 
     // check if we have the original

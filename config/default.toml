@@ -17,6 +17,13 @@ num_workers = 0
 # cached-variant reads and oversubscribe the CPU. 0/unset = auto (cpus/workers).
 max_concurrent_encodes = 0
 
+# Variant-walk guard (src/variant-guard.ts): how many DIFFERENT variants of one
+# source image a single client address may have rendered within the window.
+# Past that, the client is redirected to a variant it already got, or answered
+# 429. Cache hits are never counted. 0 disables the guard.
+variant_guard_max_variants = 4
+variant_guard_window_seconds = 300
+
 # url to hive node used for verifying signatures
 rpc_node = 'https://api.hive.blog'
 

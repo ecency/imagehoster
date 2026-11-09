@@ -159,6 +159,7 @@ Key configuration sections:
 - `max_animated_input_pixels` - Frames x source width x height an animated source may be READ at (default 300M)
 - `max_animated_output_pixels_webp`, `max_animated_output_pixels_gif` - Frames x output width x height an animated render may WRITE, per output encoder (defaults 50M and 15M). Two numbers because GIF has to quantise every frame to 256 colours and WebP does not: measured over 144 renders of 13 real post GIFs, GIF costs 1.7x WebP at the median, 8x at p95 and ~18x on the same source at the same box. Past ~15 MP a re-encoded GIF saves a median 7% for several seconds of work. Replaces the single `max_animated_output_pixels` (removed, not aliased)
 - `default_avatar`, `default_cover` - Fallback images
+- `variant_guard_max_variants`, `variant_guard_window_seconds` - Variant-walk guard (defaults 4 and 300s, 0 disables). See below
 - `sentry_dsn` - Optional Sentry DSN for error tracking
 - `invalidate_token` - Optional token for cache invalidation API
 - `cloudflare_token`, `cloudflare_zone` - Cloudflare cache purging
@@ -237,6 +238,9 @@ Note: `--exit` flag kept on Mocha as a safety net against any hanging sockets. A
 - Compiled output in `lib/`, version.js auto-generated with git hash + timestamp
 - Redis v4 in native mode (no legacyMode), fail-closed on disconnect
 - ESM-only packages (file-type, multihashes, stream-head) kept on CJS-compatible versions
+
+### Variant-walk guard
+`src/variant-guard.ts`, called in `proxyHandler` after the stored-variant lookup misses, so a cache hit is never counted or limited. Per client address (`CF-Connecting-IP`; IPv6 by /64) and source image it records the distinct variants this service had to render, in a Redis set with a sliding TTL (an in-process map when Redis is not configured). Within the window the first `variant_guard_max_variants` render normally; past that the request is redirected (302) to the nearest compatible variant the same client already got (same mode and height; AVIF may fall back to WebP, `match` only to `match`), or answered 429 with Retry-After when none fits. Both answers are `no-store` and carry `X-Variant-Guard`. Skipped with no client address (direct origin), for known crawler UAs, `blur` placeholders and authenticated `invalidate`/`ignorecache`. A ledger error or an answer slower than 100ms allows the request.
 
 ## Known Issues and Gotchas
 
