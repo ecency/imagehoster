@@ -72,7 +72,9 @@ export class ShardedFsStore {
         try {
             fs.accessSync(sPath, fs.constants.R_OK)
             return fs.createReadStream(sPath)
-        } catch (_e) {}
+        } catch (_e) {
+            // not in its shard yet: read the flat path below
+        }
 
         // Fall back to flat path — migrate in background
         const fPath = flatPath(this.path, key)

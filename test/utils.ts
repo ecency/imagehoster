@@ -681,23 +681,28 @@ describe('constants', function() {
     })
 
     describe('internal service URL helpers', function() {
+        // the configured service host (service_url) and the fixed legacy host;
+        // config/test.toml points service_url at localhost, production at i.ecency.com
+        const own = (path: string) => new URL(path, SERVICE_BASE_URL)
+        const legacy = (path: string) => new URL(path, LEGACY_SERVICE_BASE_URL)
+
         it('should treat both public hosts as internal origins', function() {
             assert(INTERNAL_SERVICE_ORIGINS.includes(new URL(SERVICE_BASE_URL).origin))
             assert(INTERNAL_SERVICE_ORIGINS.includes(new URL(LEGACY_SERVICE_BASE_URL).origin))
-            assert.equal(isInternalServiceUrl(new URL('https://i.ecency.com/foo')), true)
-            assert.equal(isInternalServiceUrl(new URL('https://images.ecency.com/foo')), true)
+            assert.equal(isInternalServiceUrl(own('/foo')), true)
+            assert.equal(isInternalServiceUrl(legacy('/foo')), true)
             assert.equal(isInternalServiceUrl(new URL('https://example.com/foo')), false)
         })
 
         it('should detect upload URLs on both public hosts', function() {
-            assert.equal(isInternalUploadUrl(new URL('https://i.ecency.com/DQmHash/test.jpg')), true)
-            assert.equal(isInternalUploadUrl(new URL('https://images.ecency.com/DQmHash/test.jpg')), true)
+            assert.equal(isInternalUploadUrl(own('/DQmHash/test.jpg')), true)
+            assert.equal(isInternalUploadUrl(legacy('/DQmHash/test.jpg')), true)
             assert.equal(isInternalUploadUrl(new URL('https://example.com/DQmHash/test.jpg')), false)
         })
 
         it('should detect proxy URLs on both public hosts', function() {
-            assert.equal(isInternalProxyUrl(new URL('https://i.ecency.com/p/abc')), true)
-            assert.equal(isInternalProxyUrl(new URL('https://images.ecency.com/p/abc')), true)
+            assert.equal(isInternalProxyUrl(own('/p/abc')), true)
+            assert.equal(isInternalProxyUrl(legacy('/p/abc')), true)
             assert.equal(isInternalProxyUrl(new URL('https://example.com/p/abc')), false)
         })
     })
