@@ -160,6 +160,7 @@ Key configuration sections:
 - `max_animated_input_pixels` - Frames x source width x height an animated source may be READ at (default 300M)
 - `max_animated_output_pixels_webp`, `max_animated_output_pixels_gif` - Frames x output width x height an animated render may WRITE, per output encoder (defaults 50M and 15M). Two numbers because GIF has to quantise every frame to 256 colours and WebP does not: measured over 144 renders of 13 real post GIFs, GIF costs 1.7x WebP at the median, 8x at p95 and ~18x on the same source at the same box. Past ~15 MP a re-encoded GIF saves a median 7% for several seconds of work. Replaces the single `max_animated_output_pixels` (removed, not aliased)
 - `default_avatar`, `default_cover` - Fallback images
+- `variant_guard_max_variants`, `variant_guard_window_seconds`, `variant_guard_edge_token` - Variant-walk guard (defaults 4, 300s, no token; 0 disables). See below
 - `sentry_dsn` - Optional Sentry DSN for error tracking
 - `invalidate_token` - Optional token for cache invalidation API
 - `cloudflare_token`, `cloudflare_zone` - Cloudflare cache purging
@@ -238,6 +239,15 @@ Note: `--exit` flag kept on Mocha as a safety net against any hanging sockets. A
 - Compiled output in `lib/`, version.js auto-generated with git hash + timestamp
 - Redis v4 in native mode (no legacyMode), fail-closed on disconnect
 - ESM-only packages (file-type, multihashes, stream-head) kept on CJS-compatible versions
+
+### Variant-walk guard
+`src/variant-guard.ts`, called in `proxyHandler` after the stored-variant lookup misses, so a stored variant is never counted or limited.
+- Identity: per client address (`CF-Connecting-IP`, IPv6 by /64) and source image, a Redis set (an in-process map without Redis) with a sliding TTL. Members are what is RENDERED: the negotiated output format, mode, width, height. The same query under different Accept headers counts once per output it produces.
+- Allowance: `variant_guard_max_variants` variants; past that one render per new kind (format, mode, height) up to `EXTRA_KINDS` more, so a reader who filled it with feed sizes still gets the post image in a new format.
+- Overflow: 302 to the nearest stored variant this client got, in a format its Accept takes (explicit formats only; `match` only for a client that negotiates `match`), same mode and height; else 429 with Retry-After. Both `no-store`, with `X-Variant-Guard`, no validators, no Vary.
+- A slot is reserved atomically before the render (parallel requests must not all pass). Every request let through on a variant, the one that reserved it and any that find it already reserved, counts as in flight on it (`c:` in the `<key>:s` hash). A store marks it earned (`d:`). The slot is given back only when the last request in flight has ended and none stored it (failed fetch, default image, passthrough), so a failure cannot free a slot another request is still rendering into. Each window has a generation (`g` in the hash): a set that starts afresh clears any state left over and gets a new one, and a settle from another generation changes nothing, so an earned flag or count never carries into a new window and a late settle never re-creates expired state. The set and its state are always expired together. Legacy-route renders are never stored: they keep their slot and are never redirected.
+- Skipped: no trusted client address (missing `x-edge-token` when `variant_guard_edge_token` is set, or no `CF-Connecting-IP`), `blur`, authenticated `invalidate`/`ignorecache`, blocked sources answered with the default image. Crawlers are NOT exempt (a UA is spoofable) and follow the same path: past the allowance they get a redirect to a stored variant, or a 429 when nothing compatible was rendered for them.
+- Fails open: a ledger error or an answer slower than 100ms allows the request. A slow answer is not abandoned: `reserveWithin` keeps the hold the late answer may still take, and the request settles it when it ends, so a failed render never leaves a slot taken until the window expires.
 
 ## Known Issues and Gotchas
 
