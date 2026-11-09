@@ -101,6 +101,8 @@ export function shouldCacheOriginal(
 const SERVICE_URL = new URL(config.get('service_url'))
 
 /** How long a client that got the 503 busy answer should wait. */
+// 1x1 transparent GIF: the answer to a blur request whose render failed (#60).
+const TRANSPARENT_PIXEL_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
 const BUSY_RETRY_AFTER_SECONDS = 30
 
 /**
@@ -899,6 +901,20 @@ async function handleProxy(ctx: KoaContext) {
                 }
                 ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
                 captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
+                if (options.blur) {
+                    // A blur placeholder is decorative and sits behind the real image,
+                    // so it is never worth more bytes than that image: no placeholder
+                    // at all (a transparent pixel) beats the original. Never stored,
+                    // and no-cache keeps it out of Varnish (which holds ?blur= URLs
+                    // for 24h otherwise) and the CDN.
+                    ctx.tag({blur: 'encode-failed'})
+                    ctx.remove('ETag')
+                    ctx.remove('Last-Modified')
+                    ctx.set('Cache-Control', 'no-cache, no-store')
+                    ctx.type = 'image/gif'
+                    ctx.body = TRANSPARENT_PIXEL_GIF
+                    return
+                }
                 // Every branch below serves the unprocessed original instead of a
                 // rendered variant: Sharp cannot decode or process the source (an
                 // unsupported HEIF bitstream, a truncated JPEG) but browsers are

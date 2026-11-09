@@ -66,7 +66,7 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 - Fallback system: attempts multiple mirror URLs if primary source fails
 - Animated sources (src/animated.ts): a GIF or animated WebP over `animated_passthrough_max_size` (100KB) is re-rendered at the requested size, as animated WebP for a client that takes WebP and as GIF otherwise. Never to AVIF/PNG/JPEG: handed a multi-page pipeline libvips writes the frames as one tall "filmstrip" still. Only when libvips counted the frames itself (`pages > 1`): it does not read APNG animation, so an APNG loads as one page and keeps the passthrough. The render is served only if the output container declares the same frame count as the source and is smaller; otherwise the source bytes go out untouched. Frames are counted off the container, not by asking libvips again, since libvips dropping frames is the thing being guarded against
 - `?blur=1` LQIP placeholders render from the first frame of an animation, never from every frame
-- Sharp toBuffer failures: serves original unprocessed bytes for all three paths (upload, cached, fetched) — browsers are more lenient than Sharp at decoding images
+- Sharp toBuffer failures: serves original unprocessed bytes for all three paths (upload, cached, fetched) — browsers are more lenient than Sharp at decoding images. Except a `?blur=1` request: it gets a 1x1 transparent GIF with `Cache-Control: no-cache, no-store` (never stored; `no-cache` is what keeps it out of Varnish, which otherwise holds `?blur=` URLs for 24h). A placeholder is never worth more bytes than the image it stands in for (#60)
 - Busy encoder (`max_queued_encodes`, per worker, default 8 per encode slot): the main `/p/` render opts into a bounded queue (`runEncode(..., {shedWhenBusy: true})`). When the queue is full the render is refused at once (nothing runs). A small original (at most `max_cached_original_size`) that is JPEG, PNG or GIF goes out unresized as a `busy` ServedImage: `Cache-Control: public,max-age=60` (`BUSY_CACHE_CONTROL`), its own ETag, never stored, so the next request after recovery renders the real variant. Anything else (larger, WebP, AVIF, ...) gets 503 `no-store` with `Retry-After: 30`. The stand-in decision never depends on the request's Accept: the CDN does not key on Accept, so the cached answer must be decodable by every client of that URL. Never the variant's year: under the variant URL a full-size original would replace the thumbnail at the edge. Avatars, covers, animations and cached-variant conversions still queue as before
 
 **Upload System** (src/upload.ts)
@@ -219,6 +219,8 @@ Tests in `test/` directory use Mocha + ts-node. Key test files:
 - `test/cover.ts` - Cover image endpoint
 - `test/serve.ts` - Direct image serving
 - `test/legacy-proxy.ts` - Legacy proxy redirect behavior
+- `test/blur-placeholder.ts` - A failed blur render answers a transparent pixel, never the original
+- `test/variant-guard.ts`, `test/encode-shed.ts` - Variant-walk guard, bounded encode queue
 - `test/utils.ts` - Utility function tests
 - `test/store.ts` - Blob store operations
 - `test/ratelimit.ts` - Rate limiting
