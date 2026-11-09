@@ -29,6 +29,11 @@ variant_guard_window_seconds = 300
 # straight to the origin cannot spend another client's allowance (the guard
 # does not apply to it). Empty = trust the header (development, tests).
 variant_guard_edge_token = ''
+# Longest encode queue a proxy render joins, PER WORKER. Past it the render is
+# refused at once: a small JPEG/PNG/GIF original goes out unresized (cached 60s,
+# never stored as the variant), anything else gets a 503 with Retry-After. A deeper queue only collects work the
+# cache in front of the service gives up on. 0/unset = auto (8 per encode slot).
+max_queued_encodes = 0
 
 # url to hive node used for verifying signatures
 rpc_node = 'https://api.hive.blog'

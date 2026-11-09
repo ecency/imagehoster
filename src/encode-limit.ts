@@ -117,7 +117,32 @@ export function resolveEncodeBudget(input: {
 const BUDGET = resolveEncodeBudget()
 const LIMIT = BUDGET.limit
 
+/**
+ * Longest queue a caller that opted in (`shedWhenBusy`) will join, per worker.
+ * Past it the encode is refused at once instead of queued: the cache in front
+ * of the service gives up on a request after its first-byte timeout, so a queue
+ * deeper than it can drain in that time only collects work for clients that
+ * will have gone, while every live request waits behind it. 0/unset = auto
+ * (8 encodes per slot).
+ */
+export const MAX_QUEUED_ENCODES = (() => {
+    const v = config.has('max_queued_encodes') ? Number.parseInt(config.get('max_queued_encodes') as string, 10) : 0
+    return Number.isFinite(v) && v > 0 ? v : LIMIT * 8
+})()
+
 export const ENCODE_ABORTED = 'EncodeAborted'
+export const ENCODE_SHED = 'EncodeShed'
+
+/** True when an encode was refused because the queue was full; nothing ran. */
+export function isEncodeShed(err: any): boolean {
+    return !!err && err.name === ENCODE_SHED
+}
+
+function shedError(): Error {
+    const err = new Error('encode refused: queue full')
+    err.name = ENCODE_SHED
+    return err
+}
 
 /** True when an encode was dropped because its client went away, not because Sharp failed. */
 export function isEncodeAborted(err: any): boolean {
@@ -138,12 +163,13 @@ interface Waiter {
 let active = 0
 const waiting: Waiter[] = []
 
-function acquire(signal?: AbortSignal): Promise<void> {
+function acquire(signal?: AbortSignal, shedAt?: number): Promise<void> {
     if (signal && signal.aborted) { return Promise.reject(abortedError()) }
     if (active < LIMIT) {
         active++
         return Promise.resolve()
     }
+    if (shedAt !== undefined && waiting.length >= shedAt) { return Promise.reject(shedError()) }
     return new Promise<void>((resolve, reject) => {
         const waiter: Waiter = {settled: false, grant: () => undefined}
         const onAbort = () => {
@@ -207,8 +233,8 @@ function release(): void {
  * the other end instead, by not admitting an encode too big to finish quickly
  * (see MAX_ANIMATED_OUTPUT_PIXELS_WEBP / _GIF and the size gate below).
  */
-export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    await acquire(signal)
+export async function withEncodeSlot<T>(fn: () => Promise<T>, signal?: AbortSignal, opts: {shedAt?: number} = {}): Promise<T> {
+    await acquire(signal, opts.shedAt)
     // The slot is ours, but a queued client can go away in the moment between the
     // hand-off and this line resuming: `grant()` drops the abort listener, so
     // nothing else would notice, and the encode would run for a closed socket.
@@ -267,6 +293,7 @@ export async function runEncode<T>(
     fn: () => Promise<T>,
     target: {width?: number, height?: number, blur?: boolean, animated?: boolean},
     signal: AbortSignal | undefined,
+    opts: {shedWhenBusy?: boolean} = {},
 ): Promise<T> {
     // Check for a client that already left before either path. withEncodeSlot
     // does this when it queues, but the bypass calls fn() directly — without this
@@ -274,7 +301,7 @@ export async function runEncode<T>(
     // result nobody will read, which the gated path already avoids.
     if (signal && signal.aborted) { throw abortedError() }
     if (!encodeNeedsSlot(target)) { return fn() }
-    return withEncodeSlot(fn, signal)
+    return withEncodeSlot(fn, signal, {shedAt: opts.shedWhenBusy ? MAX_QUEUED_ENCODES : undefined})
 }
 
 /**
