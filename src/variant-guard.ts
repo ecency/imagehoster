@@ -151,17 +151,21 @@ export function parseMember(member: string): RenderedVariant | undefined {
  * and JPEG/PNG as GIF, and one not worth re-rendering is stored as the source
  * itself under whatever format was asked (see animatedOutputType and the
  * passthrough in proxy.ts). So any explicit-format key may hold GIF or WebP.
- * - its own format is always a target (a fresh render would give the same bytes);
- * - every other explicit format only for a client that takes WebP, which reads
- *   all of them; AVIF only if it takes AVIF too;
- * - `match` is negotiated per request, so it is only a target for a client that
- *   negotiated `match` itself, i.e. one that takes neither AVIF nor WebP.
+ * - A client that takes WebP reads all of that: any explicit format except
+ *   AVIF (which needs AVIF too), and its own, whatever it asked for. An unknown
+ *   `format` value renders `match` even for such a client.
+ * - A client without WebP is offered nothing it did not render the same way
+ *   itself: only `match`, when it negotiated `match`. Not even its own explicit
+ *   format, since a fresh render hands such a client the source in place of an
+ *   animated WebP variant (proxy.ts), and the stored key holds the WebP.
  */
 export function acceptableFormats(rendered: string, acceptHeader: string): Set<string> {
-    const formats = new Set<string>([rendered])
-    if (rendered !== 'match' && supportsWebP(acceptHeader)) {
-        for (const f of ['webp', 'jpeg', 'png']) { formats.add(f) }
+    const formats = new Set<string>()
+    if (supportsWebP(acceptHeader)) {
+        for (const f of [rendered, 'webp', 'jpeg', 'png']) { formats.add(f) }
         if (supportsAvif(acceptHeader)) { formats.add('avif') }
+    } else if (rendered === 'match') {
+        formats.add('match')
     }
     return formats
 }

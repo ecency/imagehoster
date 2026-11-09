@@ -76,7 +76,7 @@ describe('variant guard', function() {
                 'format=webp&mode=fit&width=1000')
         })
         it('only redirects to a format the Accept header takes', function() {
-            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), ['avif'])
+            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), [])
             assert.deepStrictEqual([...acceptableFormats('avif', AVIF_WEBP)].sort(), ['avif', 'jpeg', 'png', 'webp'])
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_ONLY), undefined)
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_WEBP), 'format=webp&mode=fit&width=600')
@@ -87,19 +87,22 @@ describe('variant guard', function() {
             assert.strictEqual(pickFallback([m('jpeg', 600)], want('avif', 800), AVIF_WEBP), 'format=jpeg&mode=fit&width=600')
             assert.strictEqual(pickFallback([m('jpeg', 600)], want('avif', 800), AVIF_ONLY), undefined)
             assert.strictEqual(pickFallback([m('jpeg', 600)], want('match', 800), LEGACY_ONLY), undefined)
-            assert.strictEqual(pickFallback([m('png', 600)], want('png', 800), LEGACY_ONLY), 'format=png&mode=fit&width=600',
-                'its own format: a fresh render would give the same bytes')
+            assert.strictEqual(pickFallback([m('png', 600)], want('png', 800), LEGACY_ONLY), undefined,
+                'not even its own format: the key may hold an animated WebP source')
         })
         it('takes another AVIF variant only from a client that also takes WebP (an animation renders AVIF as WebP)', function() {
             assert.strictEqual(pickFallback([m('avif', 600)], want('jpeg', 800), AVIF_ONLY), undefined)
             assert.strictEqual(pickFallback([m('avif', 600)], want('jpeg', 800), AVIF_WEBP), 'format=avif&mode=fit&width=600')
-            // its own format is always fine: a fresh render would give it the same bytes
-            assert.strictEqual(pickFallback([m('avif', 600)], want('avif', 800), AVIF_ONLY), 'format=avif&mode=fit&width=600')
+            // not even its own format: an AVIF key of an animation holds WebP, while a
+            // fresh render hands a client without WebP the source instead
+            assert.strictEqual(pickFallback([m('avif', 600)], want('avif', 800), AVIF_ONLY), undefined)
         })
         it('uses match only for a client that negotiated match itself', function() {
             assert.strictEqual(pickFallback([m('match', 600)], want('webp', 600), AVIF_WEBP), undefined)
             assert.strictEqual(pickFallback([m('match', 600)], want('match', 800), LEGACY_ONLY), 'format=match&mode=fit&width=600')
             assert.strictEqual(pickFallback([m('webp', 600)], want('match', 800), LEGACY_ONLY), undefined)
+            // an unknown format value renders `match` even for a WebP client, which still reads WebP
+            assert.strictEqual(pickFallback([m('webp', 600)], want('match', 800), AVIF_WEBP), 'format=webp&mode=fit&width=600')
         })
         it('never changes the crop: mode and height must match', function() {
             assert.strictEqual(pickFallback([m('webp', 600, 'cover')], want('webp', 600), WEBP_ONLY), undefined)
