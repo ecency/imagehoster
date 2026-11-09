@@ -27,7 +27,7 @@ import {
     realImage, ServedImage, storeImage, worstOf,
 } from './served-image'
 import {renderAnimatedVariant} from './animated'
-import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
+import {clientGoneSignal, isEncodeAborted, isEncodeShed, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
 import {
@@ -98,6 +98,37 @@ export function shouldCacheOriginal(
 
 
 const SERVICE_URL = new URL(config.get('service_url'))
+
+/**
+ * Busy answer: the original bytes, served unresized because the encode queue
+ * was full. Cached briefly (the CDN absorbs a flood's repeats), never for the
+ * variant's year: under the variant's URL it would pin a full-size original in
+ * place of, say, a 320px thumbnail, and the real variant would never be made.
+ */
+export const BUSY_CACHE_CONTROL = 'public,max-age=60'
+/** How long a client that got the 503 busy answer should wait. */
+const BUSY_RETRY_AFTER_SECONDS = 30
+
+/**
+ * Whether an original can stand in for a variant while the encoder is busy:
+ * small enough not to replace a thumbnail with a heavy download (the same cap
+ * as a cached original), and in a format this client can decode.
+ */
+export function canServeUnresized(mime: string, acceptHeader: string, size: number, maxBytes = MAX_CACHED_ORIGINAL_SIZE): boolean {
+    if (!(size > 0) || size > maxBytes) { return false }
+    switch (mime.toLowerCase()) {
+        case 'image/jpeg':
+        case 'image/png':
+        case 'image/gif':
+            return true
+        case 'image/webp':
+            return supportsWebP(acceptHeader)
+        case 'image/avif':
+            return supportsAvif(acceptHeader)
+        default:
+            return false
+    }
+}
 /** A rendered variant is addressed by a key that encodes its inputs, so it never changes. */
 const IMMUTABLE_CACHE_CONTROL = 'public,max-age=31536000,immutable'
 
@@ -656,6 +687,8 @@ export async function proxyHandler(ctx: KoaContext) {
     // cannot process the source, the origin's own bytes as a passthrough. The
     // value decides storage, Cache-Control and ETag below.
     let rendered: ServedImage
+    // set when the encoder was busy and the original went out unresized
+    let busyOriginal = false
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
         rendered = origin
@@ -805,35 +838,55 @@ export async function proxyHandler(ctx: KoaContext) {
         }
 
         try {
-            rendered = derive(origin, await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx)))
+            rendered = derive(origin, await runEncode(() => image.toBuffer(), options, clientGoneSignal(ctx), {shedWhenBusy: true}))
         } catch (err) {
-            if (isEncodeAborted(err)) {
-                // The client gave up while we were queued. Nothing failed, and
-                // there is no socket left to serve the fallback bytes to, so do
-                // not walk the recovery path or report it as a Sharp failure.
-                ctx.log.debug({ urlString, imageKey }, 'encode abandoned, client gone')
-                throw err
-            }
-            ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
-            captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
-            // Every branch below serves the unprocessed original instead of a
-            // rendered variant: Sharp cannot decode or process the source (an
-            // unsupported HEIF bitstream, a truncated JPEG) but browsers are
-            // lenient. As a passthrough it is never stored under imageKey, which
-            // would make later requests skip resizing and format negotiation, and
-            // it carries its own ETag, so a client that cached it is not told
-            // "not modified" by the real variant once a later render succeeds.
-            const reason = 'sharp could not process the source, original bytes served'
-            if (origIsUpload) {
-                ctx.log.warn({ origKey }, 'serving original upload bytes after toBuffer failure')
-            } else if (origFromCache) {
-                ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on cached image')
-                try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
+            if (isEncodeShed(err)) {
+                // The encode queue is full: nothing ran. Answer at once rather than
+                // queue work the cache in front of us would time out on.
+                const mime = await mimeMagic(origin.bytes)
+                if (!canServeUnresized(mime, acceptHeader, origin.bytes.length)) {
+                    ctx.tag({encode_shed: 'busy'})
+                    ctx.remove('ETag')
+                    ctx.remove('Last-Modified')
+                    ctx.set('Cache-Control', 'no-store')
+                    ctx.set('Retry-After', String(BUSY_RETRY_AFTER_SECONDS))
+                    ctx.status = 503
+                    ctx.body = 'Image service busy, retry shortly'
+                    return
+                }
+                ctx.tag({encode_shed: 'original'})
+                rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, 'encoder busy, original served unresized')
+                contentType = mime
+                busyOriginal = true
             } else {
-                ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on fetched image')
+                if (isEncodeAborted(err)) {
+                    // The client gave up while we were queued. Nothing failed, and
+                    // there is no socket left to serve the fallback bytes to, so do
+                    // not walk the recovery path or report it as a Sharp failure.
+                    ctx.log.debug({ urlString, imageKey }, 'encode abandoned, client gone')
+                    throw err
+                }
+                ctx.log.error({ err, urlString, imageKey }, 'sharp.toBuffer() failed')
+                captureImageFailure('sharp_tobuffer_failed', ctx, { urlString, imageKey, origIsUpload, origFromCache, error: String(err) })
+                // Every branch below serves the unprocessed original instead of a
+                // rendered variant: Sharp cannot decode or process the source (an
+                // unsupported HEIF bitstream, a truncated JPEG) but browsers are
+                // lenient. As a passthrough it is never stored under imageKey, which
+                // would make later requests skip resizing and format negotiation, and
+                // it carries its own ETag, so a client that cached it is not told
+                // "not modified" by the real variant once a later render succeeds.
+                const reason = 'sharp could not process the source, original bytes served'
+                if (origIsUpload) {
+                    ctx.log.warn({ origKey }, 'serving original upload bytes after toBuffer failure')
+                } else if (origFromCache) {
+                    ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on cached image')
+                    try { await storeRemove(proxyStore, imageKey) } catch (_e) { /* best effort */ }
+                } else {
+                    ctx.log.warn({ origKey }, 'serving original bytes after toBuffer failure on fetched image')
+                }
+                rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, reason)
+                contentType = await mimeMagic(origin.bytes)
             }
-            rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, reason)
-            contentType = await mimeMagic(origin.bytes)
         }
         } // end still Sharp pipeline
 
@@ -860,7 +913,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (isFallbackImage(rendered)) {
         ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
-    ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
+    ctx.set('Cache-Control', busyOriginal ? BUSY_CACHE_CONTROL : cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
     ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes, rendered.bytes.length))
     ctx.body = rendered.bytes
 }
