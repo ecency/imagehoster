@@ -76,16 +76,19 @@ describe('variant guard', function() {
                 'format=webp&mode=fit&width=1000')
         })
         it('only redirects to a format the Accept header takes', function() {
-            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), ['avif', 'jpeg', 'png'])
+            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), ['avif'])
             assert.deepStrictEqual([...acceptableFormats('avif', AVIF_WEBP)].sort(), ['avif', 'jpeg', 'png', 'webp'])
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_ONLY), undefined)
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_WEBP), 'format=webp&mode=fit&width=600')
             assert.strictEqual(pickFallback([m('avif', 600)], want('webp', 600), WEBP_ONLY), undefined)
         })
-        it('takes a stored JPEG or PNG for any client: every client decodes them (an animation renders them as GIF)', function() {
+        it('takes a stored JPEG or PNG only from a client that takes WebP (the key may hold an animated GIF or WebP source)', function() {
             assert.strictEqual(pickFallback([m('png', 600)], want('webp', 800), WEBP_ONLY), 'format=png&mode=fit&width=600')
             assert.strictEqual(pickFallback([m('jpeg', 600)], want('avif', 800), AVIF_WEBP), 'format=jpeg&mode=fit&width=600')
-            assert.strictEqual(pickFallback([m('jpeg', 600)], want('match', 800), LEGACY_ONLY), 'format=jpeg&mode=fit&width=600')
+            assert.strictEqual(pickFallback([m('jpeg', 600)], want('avif', 800), AVIF_ONLY), undefined)
+            assert.strictEqual(pickFallback([m('jpeg', 600)], want('match', 800), LEGACY_ONLY), undefined)
+            assert.strictEqual(pickFallback([m('png', 600)], want('png', 800), LEGACY_ONLY), 'format=png&mode=fit&width=600',
+                'its own format: a fresh render would give the same bytes')
         })
         it('takes another AVIF variant only from a client that also takes WebP (an animation renders AVIF as WebP)', function() {
             assert.strictEqual(pickFallback([m('avif', 600)], want('jpeg', 800), AVIF_ONLY), undefined)
@@ -329,17 +332,19 @@ describe('variant guard', function() {
             assert.strictEqual(res.headers['x-variant-guard'], 'reject')
         })
 
-        it('sends an AVIF-only client to a JPEG it already got rather than refusing it', async function() {
+        it('sends a WebP-taking client to a JPEG or PNG it already got, and refuses one without WebP', async function() {
             const src = newSource()
             for (const w of [320, 600, 800, 1024]) {
-                assert.strictEqual((await get(url(src, variant('webp', w)))).statusCode, 200)
+                assert.strictEqual((await get(url(src, `format=webp&mode=cover&width=${w}&height=300`))).statusCode, 200)
             }
             assert.strictEqual((await get(url(src, variant('jpeg', 640)))).statusCode, 200)
             assert.strictEqual((await get(url(src, variant('png', 640)))).statusCode, 200)
-            const res = await get(url(src, variant('avif', 600)), {accept: AVIF_ONLY})
+            const res = await get(url(src, variant('avif', 600)), {accept: AVIF_WEBP})
             assert.strictEqual(res.statusCode, 302)
             assert.match(String(res.headers.location), /format=(jpeg|png)&mode=fit&width=640$/)
             assert.strictEqual(res.headers['cache-control'], 'no-store')
+            const refused = await get(url(src, variant('avif', 600)), {accept: AVIF_ONLY})
+            assert.strictEqual(refused.statusCode, 429)
         })
 
         it('holds a parallel walk of every srcset variant to the allowance', async function() {

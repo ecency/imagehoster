@@ -146,20 +146,21 @@ export function parseMember(member: string): RenderedVariant | undefined {
 }
 
 /**
- * Formats this client can be redirected to. Explicit AVIF/WebP/JPEG/PNG name
- * one stored variant whatever the Accept header says, but not always one byte
- * format: an animated source renders AVIF as animated WebP, and JPEG or PNG as
- * GIF (see animatedOutputType). So:
+ * Formats this client can be redirected to. A format names a stored variant,
+ * not always its bytes: an animated source (GIF or WebP) renders AVIF as WebP
+ * and JPEG/PNG as GIF, and one not worth re-rendering is stored as the source
+ * itself under whatever format was asked (see animatedOutputType and the
+ * passthrough in proxy.ts). So any explicit-format key may hold GIF or WebP.
  * - its own format is always a target (a fresh render would give the same bytes);
- * - JPEG and PNG are targets for everyone, as is the GIF they may hold;
- * - WebP for a client that takes WebP, AVIF only for one that takes WebP too;
+ * - every other explicit format only for a client that takes WebP, which reads
+ *   all of them; AVIF only if it takes AVIF too;
  * - `match` is negotiated per request, so it is only a target for a client that
  *   negotiated `match` itself, i.e. one that takes neither AVIF nor WebP.
  */
 export function acceptableFormats(rendered: string, acceptHeader: string): Set<string> {
-    const formats = new Set<string>([rendered, 'jpeg', 'png'])
+    const formats = new Set<string>([rendered])
     if (rendered !== 'match' && supportsWebP(acceptHeader)) {
-        formats.add('webp')
+        for (const f of ['webp', 'jpeg', 'png']) { formats.add(f) }
         if (supportsAvif(acceptHeader)) { formats.add('avif') }
     }
     return formats
