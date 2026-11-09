@@ -239,7 +239,8 @@ if n <= 0 then
   redis.call('HDEL', KEYS[2], c)
   if redis.call('HEXISTS', KEYS[2], d) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
 end
-if redis.call('EXISTS', KEYS[1]) == 1 then redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3])) end
+-- always: a render that ends after the window re-creates the hash, which must expire too
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
 return n
 `
 

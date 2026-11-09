@@ -355,7 +355,7 @@ describe('variant guard', function() {
             }
         })
 
-        it('sends a crawler an image too: a redirect to a stored variant, never an error', async function() {
+        it('treats a crawler like any client: past the allowance it is redirected to a stored variant', async function() {
             const src = newSource()
             const googlebot = {'user-agent': 'Googlebot-Image/1.0'}
             for (const w of [320, 600, 800, 1024]) {
