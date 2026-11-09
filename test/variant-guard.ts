@@ -76,11 +76,22 @@ describe('variant guard', function() {
                 'format=webp&mode=fit&width=1000')
         })
         it('only redirects to a format the Accept header takes', function() {
-            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), ['avif'])
-            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_WEBP)].sort(), ['avif', 'webp'])
+            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_ONLY)].sort(), ['avif', 'jpeg', 'png'])
+            assert.deepStrictEqual([...acceptableFormats('avif', AVIF_WEBP)].sort(), ['avif', 'jpeg', 'png', 'webp'])
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_ONLY), undefined)
             assert.strictEqual(pickFallback([m('webp', 600)], want('avif', 600), AVIF_WEBP), 'format=webp&mode=fit&width=600')
             assert.strictEqual(pickFallback([m('avif', 600)], want('webp', 600), WEBP_ONLY), undefined)
+        })
+        it('takes a stored JPEG or PNG for any client: every client decodes them (an animation renders them as GIF)', function() {
+            assert.strictEqual(pickFallback([m('png', 600)], want('webp', 800), WEBP_ONLY), 'format=png&mode=fit&width=600')
+            assert.strictEqual(pickFallback([m('jpeg', 600)], want('avif', 800), AVIF_WEBP), 'format=jpeg&mode=fit&width=600')
+            assert.strictEqual(pickFallback([m('jpeg', 600)], want('match', 800), LEGACY_ONLY), 'format=jpeg&mode=fit&width=600')
+        })
+        it('takes another AVIF variant only from a client that also takes WebP (an animation renders AVIF as WebP)', function() {
+            assert.strictEqual(pickFallback([m('avif', 600)], want('jpeg', 800), AVIF_ONLY), undefined)
+            assert.strictEqual(pickFallback([m('avif', 600)], want('jpeg', 800), AVIF_WEBP), 'format=avif&mode=fit&width=600')
+            // its own format is always fine: a fresh render would give it the same bytes
+            assert.strictEqual(pickFallback([m('avif', 600)], want('avif', 800), AVIF_ONLY), 'format=avif&mode=fit&width=600')
         })
         it('uses match only for a client that negotiated match itself', function() {
             assert.strictEqual(pickFallback([m('match', 600)], want('webp', 600), AVIF_WEBP), undefined)
@@ -308,13 +319,27 @@ describe('variant guard', function() {
             for (const w of [320, 600, 800, 1024]) {
                 assert.strictEqual((await get(url(src, variant('webp', w)))).statusCode, 200)
             }
-            assert.strictEqual((await get(url(src, variant('jpeg', 600)))).statusCode, 200)
-            assert.strictEqual((await get(url(src, variant('png', 600)))).statusCode, 200)
+            // the extra kinds go to other crops, which are never redirect targets here
+            assert.strictEqual((await get(url(src, 'format=webp&mode=cover&width=600&height=400'))).statusCode, 200)
+            assert.strictEqual((await get(url(src, 'format=webp&mode=fit&width=600&height=300'))).statusCode, 200)
             const res = await get(url(src, variant('avif', 600)), {accept: AVIF_ONLY})
             assert.strictEqual(res.statusCode, 429)
             assert.strictEqual(res.headers['cache-control'], 'no-store')
             assert.strictEqual(res.headers['retry-after'], '120')
             assert.strictEqual(res.headers['x-variant-guard'], 'reject')
+        })
+
+        it('sends an AVIF-only client to a JPEG it already got rather than refusing it', async function() {
+            const src = newSource()
+            for (const w of [320, 600, 800, 1024]) {
+                assert.strictEqual((await get(url(src, variant('webp', w)))).statusCode, 200)
+            }
+            assert.strictEqual((await get(url(src, variant('jpeg', 640)))).statusCode, 200)
+            assert.strictEqual((await get(url(src, variant('png', 640)))).statusCode, 200)
+            const res = await get(url(src, variant('avif', 600)), {accept: AVIF_ONLY})
+            assert.strictEqual(res.statusCode, 302)
+            assert.match(String(res.headers.location), /format=(jpeg|png)&mode=fit&width=640$/)
+            assert.strictEqual(res.headers['cache-control'], 'no-store')
         })
 
         it('holds a parallel walk of every srcset variant to the allowance', async function() {

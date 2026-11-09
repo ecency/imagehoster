@@ -147,15 +147,20 @@ export function parseMember(member: string): RenderedVariant | undefined {
 
 /**
  * Formats this client can be redirected to. Explicit AVIF/WebP/JPEG/PNG name
- * one stored variant whatever the Accept header says. `match` is negotiated
- * per request, so it is only a target for a client that negotiated `match`
- * itself, i.e. one that takes neither AVIF nor WebP.
+ * one stored variant whatever the Accept header says, but not always one byte
+ * format: an animated source renders AVIF as animated WebP, and JPEG or PNG as
+ * GIF (see animatedOutputType). So:
+ * - its own format is always a target (a fresh render would give the same bytes);
+ * - JPEG and PNG are targets for everyone, as is the GIF they may hold;
+ * - WebP for a client that takes WebP, AVIF only for one that takes WebP too;
+ * - `match` is negotiated per request, so it is only a target for a client that
+ *   negotiated `match` itself, i.e. one that takes neither AVIF nor WebP.
  */
 export function acceptableFormats(rendered: string, acceptHeader: string): Set<string> {
-    const formats = new Set<string>([rendered])
-    if (rendered !== 'match') {
+    const formats = new Set<string>([rendered, 'jpeg', 'png'])
+    if (rendered !== 'match' && supportsWebP(acceptHeader)) {
+        formats.add('webp')
         if (supportsAvif(acceptHeader)) { formats.add('avif') }
-        if (supportsWebP(acceptHeader)) { formats.add('webp') }
     }
     return formats
 }
