@@ -1,5 +1,5 @@
 import config from 'config'
-import {createHash, timingSafeEqual} from 'crypto'
+import {createHash, randomBytes, timingSafeEqual} from 'crypto'
 import {isIP} from 'net'
 import {KoaContext, redisClient, redisReady} from './common'
 import {supportsAvif, supportsWebP} from './utils'
@@ -71,6 +71,8 @@ export interface RenderedVariant {
 export interface Reservation {
     key: string
     member: string
+    /** the window generation the hold was taken in */
+    gen: string
 }
 
 export type GuardDecision =
@@ -183,34 +185,51 @@ export function pickFallback(members: string[], wanted: RenderedVariant, acceptH
 
 /**
  * Reserves `member` in the client's set for this image when allowed. Answers
- * 'held' when the set already has it, 'added' when it was reserved now (under
- * the limit, or the first of a new kind under the hard cap), or the recorded
- * members when refused. Both 'held' and 'added' count the request as one more
- * in flight on that member.
+ * `{held, gen}` when allowed (`held`: the set already had it; otherwise it was
+ * reserved now, under the limit or as the first of a new kind under the hard
+ * cap), or the recorded members when refused. An allowed request counts as one
+ * more in flight on that member.
  *
- * `settle` ends one in-flight request. A request that stored the variant marks
- * the member earned. The member leaves the set only when the LAST request in
- * flight on it has ended and none of them stored it, so a request that fails
- * while another is still rendering the same variant cannot free the slot that
- * the other one is about to earn.
+ * `gen` names the window: a set that starts afresh (none, or the last one
+ * expired) clears any state left over and gets a new generation, so an earned
+ * flag or in-flight count from an earlier window can never carry over, and a
+ * request from an earlier window that settles late is ignored.
+ *
+ * `settle` ends one in-flight request of the same generation. A request that
+ * stored the variant marks the member earned. The member leaves the set only
+ * when the LAST request in flight on it has ended and none of them stored it,
+ * so a request that fails while another is still rendering the same variant
+ * cannot free the slot that the other one is about to earn.
  */
-export type ReserveResult = 'held' | 'added' | string[]
+export type ReserveResult = {held: boolean, gen: string} | string[]
 export interface Ledger {
     reserve(key: string, member: string, kind: string, max: number, hardMax: number, ttlSeconds: number): Promise<ReserveResult>
-    settle(key: string, member: string, stored: boolean, ttlSeconds: number): Promise<void>
+    settle(key: string, member: string, gen: string, stored: boolean, ttlSeconds: number): Promise<void>
 }
 
-// KEYS[1] member set, KEYS[2] state hash (`c:<member>` in-flight count,
-// `d:<member>` earned). ARGV member, kind, max, hard max, ttl.
+const newGen = () => randomBytes(6).toString('base64url')
+
+// KEYS[1] member set, KEYS[2] state hash (`g` generation, `c:<member>` in-flight
+// count, `d:<member>` earned). ARGV member, kind, max, hard max, ttl, new gen.
+// Answers {'held'|'added', gen} or {'refused', member...}.
 const RESERVE_SCRIPT = `
 local ttl = tonumber(ARGV[5])
-local function hold(result)
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  redis.call('DEL', KEYS[2])
+  redis.call('HSET', KEYS[2], 'g', ARGV[6])
+end
+local gen = redis.call('HGET', KEYS[2], 'g')
+if not gen then
+  gen = ARGV[6]
+  redis.call('HSET', KEYS[2], 'g', gen)
+end
+local function hold(status)
   redis.call('HINCRBY', KEYS[2], 'c:' .. ARGV[1], 1)
   redis.call('EXPIRE', KEYS[1], ttl)
   redis.call('EXPIRE', KEYS[2], ttl)
-  return result
+  return {status, gen}
 end
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return hold(0) end
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return hold('held') end
 local n = redis.call('SCARD', KEYS[1])
 local allow = n < tonumber(ARGV[3])
 local members = nil
@@ -224,13 +243,18 @@ if not allow and n < tonumber(ARGV[4]) then
 end
 if allow then
   redis.call('SADD', KEYS[1], ARGV[1])
-  return hold(1)
+  return hold('added')
 end
-return members or redis.call('SMEMBERS', KEYS[1])
+local refused = {'refused'}
+for _, m in ipairs(members or redis.call('SMEMBERS', KEYS[1])) do table.insert(refused, m) end
+return refused
 `
 
-// KEYS[1] member set, KEYS[2] state hash. ARGV member, stored (0/1), ttl.
+// KEYS[1] member set, KEYS[2] state hash. ARGV member, stored (0/1), ttl, gen.
+// A settle from another (expired) generation changes nothing, so it can neither
+// re-create state that would outlive its window nor touch a newer window.
 const SETTLE_SCRIPT = `
+if redis.call('HGET', KEYS[2], 'g') ~= ARGV[4] then return -1 end
 local c = 'c:' .. ARGV[1]
 local d = 'd:' .. ARGV[1]
 if ARGV[2] == '1' then redis.call('HSET', KEYS[2], d, 1) end
@@ -239,8 +263,10 @@ if n <= 0 then
   redis.call('HDEL', KEYS[2], c)
   if redis.call('HEXISTS', KEYS[2], d) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
 end
--- always: a render that ends after the window re-creates the hash, which must expire too
-redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3]))
+-- the set and its state always expire together
+local ttl = tonumber(ARGV[3])
+if redis.call('EXISTS', KEYS[1]) == 1 then redis.call('EXPIRE', KEYS[1], ttl) end
+redis.call('EXPIRE', KEYS[2], ttl)
 return n
 `
 
@@ -251,30 +277,35 @@ const redisLedger: Ledger = {
         if (redisReady) { await redisReady }
         if (!redisClient || !redisClient.isReady) { throw new Error('redis not ready') }
         const res = await redisClient.eval(RESERVE_SCRIPT, {
-            keys: [key, stateKey(key)], arguments: [member, kind, String(max), String(hardMax), String(ttlSeconds)],
-        })
-        if (Array.isArray(res)) { return res.map(String) }
-        return Number(res) === 0 ? 'held' : 'added'
+            keys: [key, stateKey(key)],
+            arguments: [member, kind, String(max), String(hardMax), String(ttlSeconds), newGen()],
+        }) as any[]
+        const [status, ...rest] = res.map(String)
+        if (status === 'refused') { return rest }
+        return {held: status === 'held', gen: rest[0]}
     },
-    async settle(key, member, stored, ttlSeconds) {
+    async settle(key, member, gen, stored, ttlSeconds) {
         if (!redisClient || !redisClient.isReady) { return }
         await redisClient.eval(SETTLE_SCRIPT, {
-            keys: [key, stateKey(key)], arguments: [member, stored ? '1' : '0', String(ttlSeconds)],
+            keys: [key, stateKey(key)], arguments: [member, stored ? '1' : '0', String(ttlSeconds), gen],
         })
     },
 }
 
 /** Per-process ledger for development and tests, where Redis is not configured. */
 export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): void, size(): number} {
-    interface Entry { members: Set<string>, inFlight: Map<string, number>, earned: Set<string>, expiresAt: number }
+    interface Entry {
+        gen: string, members: Set<string>, inFlight: Map<string, number>, earned: Set<string>, expiresAt: number,
+    }
     const sets = new Map<string, Entry>()
     let writes = 0
     const sweep = (t: number) => {
         for (const [k, e] of sets) { if (e.expiresAt <= t) { sets.delete(k) } }
     }
-    const hold = (entry: Entry, member: string, t: number, ttlSeconds: number) => {
+    const hold = (entry: Entry, member: string, t: number, ttlSeconds: number, held: boolean) => {
         entry.inFlight.set(member, (entry.inFlight.get(member) || 0) + 1)
         entry.expiresAt = t + ttlSeconds * 1000
+        return {held, gen: entry.gen}
     }
     return {
         async reserve(key, member, kind, max, hardMax, ttlSeconds) {
@@ -283,25 +314,29 @@ export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): v
             if (++writes % 1000 === 0) { sweep(t) }
             let entry = sets.get(key)
             if (entry && entry.expiresAt <= t) { sets.delete(key); entry = undefined }
-            if (entry && entry.members.has(member)) { hold(entry, member, t, ttlSeconds); return 'held' }
-            if (!entry) { entry = {members: new Set(), inFlight: new Map(), earned: new Set(), expiresAt: 0}; sets.set(key, entry) }
+            if (!entry) {
+                entry = {gen: newGen(), members: new Set(), inFlight: new Map(), earned: new Set(), expiresAt: 0}
+                sets.set(key, entry)
+            }
+            if (entry.members.has(member)) { return hold(entry, member, t, ttlSeconds, true) }
             const n = entry.members.size
             const newKind = ![...entry.members].some((m) => m.startsWith(kind + '#'))
             if (n < max || (n < hardMax && newKind)) {
                 entry.members.add(member)
-                hold(entry, member, t, ttlSeconds)
-                return 'added'
+                return hold(entry, member, t, ttlSeconds, false)
             }
             return [...entry.members]
         },
-        async settle(key, member, stored) {
+        async settle(key, member, gen, stored, ttlSeconds) {
             const entry = sets.get(key)
-            if (!entry) { return }
+            if (!entry || entry.gen !== gen || entry.expiresAt <= now()) { return }
             if (stored) { entry.earned.add(member) }
             const n = (entry.inFlight.get(member) || 0) - 1
-            if (n > 0) { entry.inFlight.set(member, n); return }
-            entry.inFlight.delete(member)
-            if (!entry.earned.has(member)) { entry.members.delete(member) }
+            if (n > 0) { entry.inFlight.set(member, n) } else {
+                entry.inFlight.delete(member)
+                if (!entry.earned.has(member)) { entry.members.delete(member) }
+            }
+            entry.expiresAt = now() + ttlSeconds * 1000
         },
         clear() { sets.clear(); writes = 0 },
         size() { return sets.size },
@@ -352,7 +387,7 @@ export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Prom
         return {action: 'allow'}
     }
     if (result === 'timeout') { return {action: 'allow'} }
-    if (result === 'held' || result === 'added') { return {action: 'allow', reservation: {key, member}} }
+    if (!Array.isArray(result)) { return {action: 'allow', reservation: {key, member, gen: result.gen}} }
     const members = result
 
     if (input.legacy) { return {action: 'reject'} }
@@ -375,7 +410,7 @@ export function settleReservation(
     legacy: boolean,
 ): Promise<void> {
     if (!reservation) { return Promise.resolve() }
-    return ledger.settle(reservation.key, reservation.member, stored || legacy, WINDOW_SECONDS).catch((err) => {
+    return ledger.settle(reservation.key, reservation.member, reservation.gen, stored || legacy, WINDOW_SECONDS).catch((err) => {
         ctx.log.warn({err}, 'variant guard settle failed')
     })
 }

@@ -96,50 +96,70 @@ describe('variant guard', function() {
     })
 
     describe('memory ledger', function() {
+        // status of a reserve: 'added', 'held' or 'refused'
+        const st = (r: any) => Array.isArray(r) ? 'refused' : (r.held ? 'held' : 'added')
+        const gen = (r: any) => (r as {gen: string}).gen
+
         it('reserves up to the limit, then one per new kind up to the hard cap', async function() {
             const l = memoryLedger(() => 1000)
             const r = (member: string, kind: string) => l.reserve('k', member, kind, 2, 3, 60)
-            assert.strictEqual(await r('a#1', 'a'), 'added')
-            assert.strictEqual(await r('a#2', 'a'), 'added')
-            assert.strictEqual(await r('a#1', 'a'), 'held', 'a slot already held is not counted again')
+            assert.strictEqual(st(await r('a#1', 'a')), 'added')
+            assert.strictEqual(st(await r('a#2', 'a')), 'added')
+            assert.strictEqual(st(await r('a#1', 'a')), 'held', 'a slot already held is not counted again')
             assert.deepStrictEqual(await r('a#3', 'a'), ['a#1', 'a#2'], 'same kind past the limit is refused')
-            assert.strictEqual(await r('b#1', 'b'), 'added', 'a new kind gets one more')
+            assert.strictEqual(st(await r('b#1', 'b')), 'added', 'a new kind gets one more')
             assert.deepStrictEqual((await r('c#1', 'c') as string[]).sort(), ['a#1', 'a#2', 'b#1'], 'hard cap reached')
         })
         it('gives a slot back when its only request ends without storing', async function() {
             const l = memoryLedger(() => 1000)
-            await l.reserve('k', 'a#1', 'a', 1, 1, 60)
-            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)))
-            await l.settle('k', 'a#1', false, 60)
-            assert.strictEqual(await l.reserve('k', 'a#2', 'a', 1, 1, 60), 'added')
+            const a = await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'refused')
+            await l.settle('k', 'a#1', gen(a), false, 60)
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'added')
         })
         it('keeps a slot while another request on it is still rendering, and once any stored it', async function() {
             const l = memoryLedger(() => 1000)
-            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'added')   // request A
-            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'held')    // request B, same variant
-            await l.settle('k', 'a#1', false, 60)                                      // A fails first
-            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'B still in flight: slot kept')
-            await l.settle('k', 'a#1', true, 60)                                       // B stores
-            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'earned: slot kept')
-            // an earned slot survives a later failed request on the same variant
-            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'held')
-            await l.settle('k', 'a#1', false, 60)
-            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)))
+            const a = await l.reserve('k', 'a#1', 'a', 1, 1, 60)                     // request A
+            assert.strictEqual(st(a), 'added')
+            const b = await l.reserve('k', 'a#1', 'a', 1, 1, 60)                     // request B, same variant
+            assert.strictEqual(st(b), 'held')
+            await l.settle('k', 'a#1', gen(a), false, 60)                             // A fails first
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'refused', 'B still in flight: slot kept')
+            await l.settle('k', 'a#1', gen(b), true, 60)                              // B stores
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'refused', 'earned: slot kept')
+            const c = await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            assert.strictEqual(st(c), 'held')
+            await l.settle('k', 'a#1', gen(c), false, 60)
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'refused', 'an earned slot survives a later failure')
         })
         it('gives it back when every request on it failed', async function() {
             const l = memoryLedger(() => 1000)
-            await l.reserve('k', 'a#1', 'a', 1, 1, 60)
-            await l.reserve('k', 'a#1', 'a', 1, 1, 60)
-            await l.settle('k', 'a#1', false, 60)
-            await l.settle('k', 'a#1', false, 60)
-            assert.strictEqual(await l.reserve('k', 'a#2', 'a', 1, 1, 60), 'added')
+            const a = await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            const b = await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            await l.settle('k', 'a#1', gen(a), false, 60)
+            await l.settle('k', 'a#1', gen(b), false, 60)
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'added')
+        })
+        it('starts a new window clean: no earned flag carries over, a late settle from the old one is ignored', async function() {
+            let now = 1000
+            const l = memoryLedger(() => now)
+            const old = await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            await l.settle('k', 'a#1', gen(old), true, 60)                             // earned in window 1
+            const lateOld = await l.reserve('k', 'a#1', 'a', 1, 1, 60)                 // still rendering at expiry
+            now += 61000
+            const fresh = await l.reserve('k', 'a#1', 'a', 1, 1, 60)                   // window 2
+            assert.strictEqual(st(fresh), 'added')
+            assert.notStrictEqual(gen(fresh), gen(old))
+            await l.settle('k', 'a#1', gen(lateOld), true, 60)                          // old request stores late: ignored
+            await l.settle('k', 'a#1', gen(fresh), false, 60)                           // the new render fails
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'added', 'no stale earned flag spent the slot')
         })
         it('expires with the window and sweeps clients that never came back', async function() {
             let now = 1000
             const l = memoryLedger(() => now)
             await l.reserve('k', 'a#1', 'a', 1, 1, 60)
             now += 61000
-            assert.strictEqual(await l.reserve('k', 'a#2', 'a', 1, 1, 60), 'added', 'the window expired')
+            assert.strictEqual(st(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'added', 'the window expired')
             for (let i = 0; i < 997; i++) { await l.reserve(`one-off-${i}`, 'a#1', 'a', 1, 1, 60) }
             now += 61000
             await l.reserve('last', 'a#1', 'a', 1, 1, 60) // the 1000th write sweeps
@@ -149,25 +169,23 @@ describe('variant guard', function() {
 
     describe('settling a reservation', function() {
         const ctx: any = {log: {warn: () => undefined}}
-        const reservation = {key: 'settle-k', member: 'webp/fit/0#format=webp&mode=fit&width=600'}
+        const key = 'settle-k'
+        const member = 'webp/fit/0#format=webp&mode=fit&width=600'
         const other = 'webp/fit/0#format=webp&mode=fit&width=800'
         // a 1-slot allowance, so "is the slot free" = can another variant be reserved
-        const slotFree = async () => !Array.isArray(await testLedger.reserve(reservation.key, other, 'webp/fit/0', 1, 1, 60))
-        beforeEach(async () => {
+        const slotFree = async () => !Array.isArray(await testLedger.reserve(key, other, 'webp/fit/0', 1, 1, 60))
+        const take = async () => {
             testLedger.clear()
-            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
-        })
+            const r = await testLedger.reserve(key, member, 'webp/fit/0', 1, 1, 60) as {gen: string}
+            return {key, member, gen: r.gen}
+        }
 
         it('frees the slot for an unstored render, keeps it for a stored or a legacy one', async function() {
-            await settleReservation(ctx, reservation, true, false)
+            await settleReservation(ctx, await take(), true, false)
             assert.ok(!(await slotFree()), 'stored')
-            testLedger.clear()
-            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
-            await settleReservation(ctx, reservation, false, true)
+            await settleReservation(ctx, await take(), false, true)
             assert.ok(!(await slotFree()), 'legacy')
-            testLedger.clear()
-            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
-            await settleReservation(ctx, reservation, false, false)
+            await settleReservation(ctx, await take(), false, false)
             assert.ok(await slotFree(), 'unstored')
         })
     })
