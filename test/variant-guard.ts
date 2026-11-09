@@ -11,7 +11,7 @@ import {clearDeadUrl, markDeadUrl} from './../src/fetch-image'
 import {base58Enc} from './../src/utils'
 import {
     acceptableFormats, clientKeyFor, EXTRA_KINDS, hasEdgeToken, memberFor, memoryLedger, parseMember, pickFallback,
-    testLedger, variantKind, variantQuery,
+    settleReservation, testLedger, variantKind, variantQuery,
 } from './../src/variant-guard'
 
 const AVIF_WEBP = 'image/avif,image/webp,image/apng,*/*;q=0.8'
@@ -123,6 +123,35 @@ describe('variant guard', function() {
             now += 61000
             await l.reserve('last', 'a#1', 'a', 1, 1, 60) // the 1000th write sweeps
             assert.strictEqual(l.size(), 1, 'expired one-off entries are swept')
+        })
+    })
+
+    describe('settling a reservation', function() {
+        const ctx: any = {log: {warn: () => undefined}}
+        const reservation = {key: 'settle-k', member: 'webp/fit/0#format=webp&mode=fit&width=600'}
+        beforeEach(async () => {
+            testLedger.clear()
+            assert.strictEqual(await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60), 'added')
+        })
+        const held = async () => await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60) === 'held'
+
+        it('keeps the slot when another request stored the variant meanwhile', async function() {
+            await settleReservation(ctx, reservation, false, false, async () => true)
+            assert.ok(await held())
+        })
+        it('releases it when nothing is stored, or the store cannot be read', async function() {
+            await settleReservation(ctx, reservation, false, false, async () => false)
+            assert.ok(!(await held()), 'released')
+            testLedger.clear()
+            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60)
+            await settleReservation(ctx, reservation, false, false, async () => { throw new Error('store down') })
+            assert.ok(!(await held()), 'released on a failed check')
+        })
+        it('keeps it after its own store, and for legacy renders', async function() {
+            await settleReservation(ctx, reservation, true, false, async () => false)
+            assert.ok(await held())
+            await settleReservation(ctx, reservation, false, true, async () => false)
+            assert.ok(await held())
         })
     })
 

@@ -322,11 +322,30 @@ export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Prom
  * Give a slot back when the request ended without storing its variant, so a
  * failure (dead source, default image, passthrough) does not spend the
  * allowance and a later recovery is not refused. Legacy renders are never
- * stored and keep their slot. Fire and forget: the response is not held.
+ * stored and keep their slot.
+ *
+ * Two requests for the same new variant share one slot: the first reserves it,
+ * the second finds it held and renders without a reservation. If the holder
+ * fails while the other stored the variant, the slot was earned, so the store
+ * is checked before releasing. A failed check releases (the guard errs toward
+ * the reader). Fire and forget: the response is not held.
  */
-export function settleReservation(ctx: KoaContext, reservation: Reservation | undefined, stored: boolean, legacy: boolean) {
-    if (!reservation || stored || legacy) { return }
-    ledger.release(reservation.key, reservation.member).catch((err) => {
+export function settleReservation(
+    ctx: KoaContext,
+    reservation: Reservation | undefined,
+    stored: boolean,
+    legacy: boolean,
+    isStoredNow?: () => Promise<boolean>,
+): Promise<void> {
+    if (!reservation || stored || legacy) { return Promise.resolve() }
+    return (async () => {
+        if (isStoredNow) {
+            let present = false
+            try { present = await isStoredNow() } catch (_e) { present = false }
+            if (present) { return }
+        }
+        await ledger.release(reservation.key, reservation.member)
+    })().catch((err) => {
         ctx.log.warn({err}, 'variant guard release failed')
     })
 }
