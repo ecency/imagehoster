@@ -23,7 +23,7 @@ import {
 import {APIError} from './error'
 import {serveOrBuildFallbackImage} from './fallback'
 import {
-    cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, passthroughImage, Provenance,
+    busyImage, cacheControlFor, derive, etagFor, fallbackImage, FallbackImage, isFallbackImage, passthroughImage, Provenance,
     realImage, ServedImage, storeImage, worstOf,
 } from './served-image'
 import {renderAnimatedVariant} from './animated'
@@ -99,32 +99,24 @@ export function shouldCacheOriginal(
 
 const SERVICE_URL = new URL(config.get('service_url'))
 
-/**
- * Busy answer: the original bytes, served unresized because the encode queue
- * was full. Cached briefly (the CDN absorbs a flood's repeats), never for the
- * variant's year: under the variant's URL it would pin a full-size original in
- * place of, say, a 320px thumbnail, and the real variant would never be made.
- */
-export const BUSY_CACHE_CONTROL = 'public,max-age=60'
 /** How long a client that got the 503 busy answer should wait. */
 const BUSY_RETRY_AFTER_SECONDS = 30
 
 /**
- * Whether an original can stand in for a variant while the encoder is busy:
- * small enough not to replace a thumbnail with a heavy download (the same cap
- * as a cached original), and in a format this client can decode.
+ * Whether an original can stand in for a variant while the encoder is busy.
+ * The answer is cached at the CDN, which does not key on Accept, and it reaches
+ * every client of that URL, so it must not depend on the requester: only
+ * JPEG, PNG and GIF (which every browser decodes), and only up to the size of
+ * a cached original, so a heavy download never replaces a thumbnail. A WebP or
+ * AVIF original gets the uncacheable 503 instead.
  */
-export function canServeUnresized(mime: string, acceptHeader: string, size: number, maxBytes = MAX_CACHED_ORIGINAL_SIZE): boolean {
+export function canServeUnresized(mime: string, size: number, maxBytes = MAX_CACHED_ORIGINAL_SIZE): boolean {
     if (!(size > 0) || size > maxBytes) { return false }
     switch (mime.toLowerCase()) {
         case 'image/jpeg':
         case 'image/png':
         case 'image/gif':
             return true
-        case 'image/webp':
-            return supportsWebP(acceptHeader)
-        case 'image/avif':
-            return supportsAvif(acceptHeader)
         default:
             return false
     }
@@ -687,8 +679,6 @@ export async function proxyHandler(ctx: KoaContext) {
     // cannot process the source, the origin's own bytes as a passthrough. The
     // value decides storage, Cache-Control and ETag below.
     let rendered: ServedImage
-    // set when the encoder was busy and the original went out unresized
-    let busyOriginal = false
     let isAnimated = contentType === 'image/gif' || contentType === 'image/apng'
     if (contentType.indexOf('video') > -1) {
         rendered = origin
@@ -844,7 +834,7 @@ export async function proxyHandler(ctx: KoaContext) {
                 // The encode queue is full: nothing ran. Answer at once rather than
                 // queue work the cache in front of us would time out on.
                 const mime = await mimeMagic(origin.bytes)
-                if (!canServeUnresized(mime, acceptHeader, origin.bytes.length)) {
+                if (!canServeUnresized(mime, origin.bytes.length)) {
                     ctx.tag({encode_shed: 'busy'})
                     ctx.remove('ETag')
                     ctx.remove('Last-Modified')
@@ -855,9 +845,8 @@ export async function proxyHandler(ctx: KoaContext) {
                     return
                 }
                 ctx.tag({encode_shed: 'original'})
-                rendered = isFallbackImage(origin) ? origin : passthroughImage(origin.bytes, 'encoder busy, original served unresized')
+                rendered = isFallbackImage(origin) ? origin : busyImage(origin.bytes, 'encoder busy, original served unresized')
                 contentType = mime
-                busyOriginal = true
             } else {
                 if (isEncodeAborted(err)) {
                     // The client gave up while we were queued. Nothing failed, and
@@ -913,7 +902,7 @@ export async function proxyHandler(ctx: KoaContext) {
     if (isFallbackImage(rendered)) {
         ctx.log.error({ finalUrl: urlString, reason: rendered.reason }, 'Responding with default image')
     }
-    ctx.set('Cache-Control', busyOriginal ? BUSY_CACHE_CONTROL : cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
+    ctx.set('Cache-Control', cacheControlFor(rendered, IMMUTABLE_CACHE_CONTROL))
     ctx.set('ETag', etagFor(rendered, imageKey, rendered.bytes, rendered.bytes.length))
     ctx.body = rendered.bytes
 }

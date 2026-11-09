@@ -7,7 +7,8 @@ import sharp from 'sharp'
 
 import {app} from './../src/app'
 import {encodeLimitStats, isEncodeShed, MAX_QUEUED_ENCODES, withEncodeSlot} from './../src/encode-limit'
-import {BUSY_CACHE_CONTROL, canServeUnresized} from './../src/proxy'
+import {canServeUnresized} from './../src/proxy'
+import {BUSY_CACHE_CONTROL} from './../src/served-image'
 import {base58Enc} from './../src/utils'
 
 const deferred = () => {
@@ -66,18 +67,16 @@ describe('encode queue limit', function() {
     })
 
     describe('which originals may stand in', function() {
-        it('only small originals in a format the client decodes', function() {
-            assert.strictEqual(canServeUnresized('image/jpeg', '*/*', 50000, 1000000), true)
-            assert.strictEqual(canServeUnresized('image/png', '', 50000, 1000000), true)
-            assert.strictEqual(canServeUnresized('image/gif', '', 50000, 1000000), true)
-            assert.strictEqual(canServeUnresized('image/jpeg', '*/*', 1000001, 1000000), false, 'too large')
-            assert.strictEqual(canServeUnresized('image/jpeg', '*/*', 0, 1000000), false, 'empty')
-            assert.strictEqual(canServeUnresized('image/webp', 'image/webp,*/*', 1000, 1000000), true)
-            assert.strictEqual(canServeUnresized('image/webp', 'image/png,image/*', 1000, 1000000), false)
-            assert.strictEqual(canServeUnresized('image/avif', 'image/avif,image/webp', 1000, 1000000), true)
-            assert.strictEqual(canServeUnresized('image/avif', 'image/webp,*/*', 1000, 1000000), false)
-            assert.strictEqual(canServeUnresized('image/heif', '*/*', 1000, 1000000), false)
-            assert.strictEqual(canServeUnresized('image/svg+xml', '*/*', 1000, 1000000), false)
+        it('only small JPEG, PNG or GIF: decodable by every client sharing the cached answer', function() {
+            assert.strictEqual(canServeUnresized('image/jpeg', 50000, 1000000), true)
+            assert.strictEqual(canServeUnresized('image/png', 50000, 1000000), true)
+            assert.strictEqual(canServeUnresized('image/gif', 50000, 1000000), true)
+            assert.strictEqual(canServeUnresized('image/jpeg', 1000001, 1000000), false, 'too large')
+            assert.strictEqual(canServeUnresized('image/jpeg', 0, 1000000), false, 'empty')
+            assert.strictEqual(canServeUnresized('image/webp', 1000, 1000000), false, 'not every client decodes WebP')
+            assert.strictEqual(canServeUnresized('image/avif', 1000, 1000000), false, 'not every client decodes AVIF')
+            assert.strictEqual(canServeUnresized('image/heif', 1000, 1000000), false)
+            assert.strictEqual(canServeUnresized('image/svg+xml', 1000, 1000000), false)
         })
     })
 
@@ -135,15 +134,36 @@ describe('encode queue limit', function() {
             assert.strictEqual((await sharp(real.body).metadata()).width, 600)
         })
 
-        it('answers 503, uncacheable, when the original cannot stand in', async function() {
+        it('gives every client the same answer for a URL, whatever its Accept (the CDN shares it)', async function() {
+            this.timeout(20000)
+            const src = newSource('jpg')
+            const variant = url(src, 'format=avif&mode=fit&width=600')
+            assert.strictEqual((await get(url(src, 'format=jpeg&mode=fit&width=100'), 'image/avif,image/webp,*/*')).statusCode, 200)
+            const drain = await fillEncoder(MAX_QUEUED_ENCODES)
+            const answers: any[] = []
+            try {
+                for (const accept of ['image/avif,image/webp,*/*', 'image/png,image/*;q=0.8', '']) {
+                    answers.push(await get(variant, accept))
+                }
+            } finally {
+                await drain()
+            }
+            for (const a of answers) {
+                assert.strictEqual(a.statusCode, 200)
+                assert.strictEqual(a.headers['content-type'], 'image/jpeg')
+                assert.strictEqual(a.headers['cache-control'], BUSY_CACHE_CONTROL)
+                assert.strictEqual(a.headers['etag'], answers[0].headers['etag'])
+            }
+        })
+
+        it('answers 503, uncacheable, for an original that not every client decodes, even to one that does', async function() {
             this.timeout(20000)
             const src = newSource('avif')
-            assert.strictEqual((await get(url(src, 'format=jpeg&mode=fit&width=100'), 'image/png,image/*')).statusCode, 200)
+            assert.strictEqual((await get(url(src, 'format=jpeg&mode=fit&width=100'), 'image/avif,*/*')).statusCode, 200)
             const drain = await fillEncoder(MAX_QUEUED_ENCODES)
             let busy: any
             try {
-                // an AVIF original to a client that does not take AVIF
-                busy = await get(url(src, 'format=jpeg&mode=fit&width=600'), 'image/png,image/*')
+                busy = await get(url(src, 'format=jpeg&mode=fit&width=600'), 'image/avif,image/webp,*/*')
             } finally {
                 await drain()
             }
