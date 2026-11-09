@@ -192,11 +192,13 @@ describe('variant guard', function() {
 
     describe('slow ledger', function() {
         const ctx: any = {log: {warn: () => undefined}}
-        const later = <T>(p: Promise<T>, ms: number) => new Promise<T>((resolve, reject) => setTimeout(() => p.then(resolve, reject), ms))
+        // the ledger call starts only when the timer fires, so a rejection always has its handler
+        const later = <T>(call: () => Promise<T>, ms: number) =>
+            new Promise<T>((resolve, reject) => setTimeout(() => call().then(resolve, reject), ms))
 
         it('lets the request through, then settles the hold the late answer took', async function() {
             testLedger.clear()
-            const slow = later(testLedger.reserve('slow-k', 'a#1', 'a', 1, 1, 60), 60)
+            const slow = later(() => testLedger.reserve('slow-k', 'a#1', 'a', 1, 1, 60), 60)
             const reserved = await reserveWithin(slow, 10, 'slow-k', 'a#1')
             assert.strictEqual(reserved.result, undefined, 'timed out: the request goes ahead')
             const hold = await reserved.hold
@@ -208,9 +210,9 @@ describe('variant guard', function() {
         it('has no hold when the late answer refused or failed', async function() {
             testLedger.clear()
             await testLedger.reserve('slow-r', 'a#1', 'a', 1, 1, 60)
-            const refused = await reserveWithin(later(testLedger.reserve('slow-r', 'a#2', 'a', 1, 1, 60), 30), 5, 'slow-r', 'a#2')
+            const refused = await reserveWithin(later(() => testLedger.reserve('slow-r', 'a#2', 'a', 1, 1, 60), 30), 5, 'slow-r', 'a#2')
             assert.strictEqual(await refused.hold, undefined)
-            const failed = await reserveWithin(later(Promise.reject(new Error('down')), 30), 5, 'x', 'y')
+            const failed = await reserveWithin(later(() => Promise.reject(new Error('down')), 30), 5, 'x', 'y')
             assert.strictEqual(await failed.hold, undefined)
         })
         it('answers in time when the ledger is quick', async function() {
