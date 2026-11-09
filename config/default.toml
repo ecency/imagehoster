@@ -18,11 +18,17 @@ num_workers = 0
 max_concurrent_encodes = 0
 
 # Variant-walk guard (src/variant-guard.ts): how many DIFFERENT variants of one
-# source image a single client address may have rendered within the window.
-# Past that, the client is redirected to a variant it already got, or answered
+# source image a single client address may have rendered and stored within the
+# window. Past that, a new kind of variant still renders once (a few at most),
+# otherwise the client is redirected to a variant it already got, or answered
 # 429. Cache hits are never counted. 0 disables the guard.
 variant_guard_max_variants = 4
 variant_guard_window_seconds = 300
+# Secret the CDN adds as the `x-edge-token` request header. When set, the client
+# address header is trusted only on requests that carry it, so a request sent
+# straight to the origin cannot spend another client's allowance (the guard
+# does not apply to it). Empty = trust the header (development, tests).
+variant_guard_edge_token = ''
 
 # url to hive node used for verifying signatures
 rpc_node = 'https://api.hive.blog'

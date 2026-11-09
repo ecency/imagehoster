@@ -1,7 +1,8 @@
 import config from 'config'
-import {createHash} from 'crypto'
+import {createHash, timingSafeEqual} from 'crypto'
 import {isIP} from 'net'
 import {KoaContext, redisClient, redisReady} from './common'
+import {supportsAvif, supportsWebP} from './utils'
 
 /**
  * Variant-walk guard for /p/ renders.
@@ -12,26 +13,44 @@ import {KoaContext, redisClient, redisReady} from './common'
  * which is the most expensive thing this service does.
  *
  * The guard counts, per client address and source image, the DISTINCT variants
- * this service had to render (cache hits are answered before the guard runs and
- * are never counted). Up to `variant_guard_max_variants` are allowed per window.
- * Past that the request is not rendered:
- *   - if the same client already got a compatible variant of this image (same
- *     mode and height, a format it can decode), it is redirected there, so a
- *     person behind a busy shared address still sees the image at another size;
- *     the target was just rendered, so it is a cache hit;
- *   - otherwise it gets a 429 with Retry-After.
- * Both answers are `no-store`, so no cache in front of the service can keep
- * them and hand them to other clients.
+ * this service rendered and stored. Cache hits are answered before the guard
+ * runs and are never counted. A variant is identified by what is actually
+ * rendered (the negotiated output format, mode, width, height), so the same
+ * query sent with different Accept headers counts once per output it produces.
  *
- * Never applied when the client address is unknown (no CF-Connecting-IP, as on
- * direct-origin requests, where every client would share one key), to known
- * search crawlers, to `blur` placeholders or to authenticated cache-bypass
- * requests. A ledger error or slow answer lets the request through: the guard
- * must never be the reason a real image fails.
+ *   - Up to `variant_guard_max_variants` variants render normally.
+ *   - Past that, a variant of a kind the client has not had yet (format, mode
+ *     and height) still renders once, up to EXTRA_KINDS more, so a reader who
+ *     filled the allowance with feed thumbnails still gets the post image in
+ *     the format its page asks for.
+ *   - Otherwise the request is redirected to the nearest variant of this image
+ *     the same client already got, in a format its Accept header takes, with
+ *     the same mode and height. The target was rendered and stored, and is
+ *     named with an explicit format, so it is a cache hit for this client.
+ *   - Only when nothing fits is the answer a 429 with Retry-After.
+ * Redirects and 429s are `no-store`, so no cache in front of the service can
+ * keep them and hand them to other clients.
+ *
+ * A slot is reserved before the render (parallel requests for every variant
+ * must not all pass a check that runs before any of them is recorded) and given
+ * back when the request ends without storing the variant: a failed fetch, the
+ * default image, an original passed through. Legacy-route renders are never
+ * stored, so they keep their slot and are never redirected.
+ *
+ * Client address: CF-Connecting-IP, trusted only when the request carries the
+ * edge token (`variant_guard_edge_token`, a secret the CDN adds) so a request
+ * sent straight to the origin cannot spend another client's allowance. Without
+ * a trusted address the guard does not apply. A ledger error or slow answer
+ * lets the request through: the guard must never be the reason a real image
+ * fails.
  */
 
 const MAX_VARIANTS = configNumber('variant_guard_max_variants', 4)
 const WINDOW_SECONDS = configNumber('variant_guard_window_seconds', 300)
+const EDGE_TOKEN = config.has('variant_guard_edge_token') ? String(config.get('variant_guard_edge_token') || '') : ''
+const EDGE_TOKEN_HEADER = 'x-edge-token'
+/** New kinds of variant (format, mode, height) allowed past the limit, one render each. */
+export const EXTRA_KINDS = 2
 /** A slow ledger answer lets the request through rather than delaying it. */
 const LEDGER_TIMEOUT_MS = 100
 
@@ -41,30 +60,28 @@ function configNumber(key: string, fallback: number): number {
     return Number.isFinite(v) && v >= 0 ? v : fallback
 }
 
-/**
- * Search and social crawlers fetch whichever candidates they like and must never
- * see a 429 or an unexpected redirect. A scraper spoofing one of these strings
- * is out of reach here; the CDN's bot verification is the place for that.
- */
-const CRAWLER_UA = /Googlebot|Google-InspectionTool|GoogleOther|Storebot-Google|AdsBot-Google|Mediapartners-Google|bingbot|BingPreview|msnbot|Applebot|DuckDuckBot|YandexBot|YandexImages|Baiduspider|Slurp|facebookexternalhit|meta-externalagent|meta-webindexer|Twitterbot|LinkedInBot|Slackbot|Discordbot|TelegramBot|WhatsApp|Pinterestbot|redditbot/i
-
-/** The variant as the CLIENT named it, which is what a redirect has to reproduce. */
-export interface RequestedVariant {
+/** A variant as rendered: the negotiated output format, not the query's. */
+export interface RenderedVariant {
     format: string
     mode: string
     width?: number
     height?: number
 }
 
+export interface Reservation {
+    key: string
+    member: string
+}
+
 export type GuardDecision =
-    | {action: 'allow'}
+    | {action: 'allow', reservation?: Reservation}
     | {action: 'redirect', query: string}
     | {action: 'reject'}
 
 /**
- * The client this request is counted against: Cloudflare's view of the
+ * The client this request is counted against: the CDN's view of the
  * connecting address. An IPv6 client is keyed by its /64, which is what one
- * household or one rented proxy exit gets (they rotate inside it freely).
+ * household or one rented exit gets (they rotate inside it freely).
  */
 export function clientKeyFor(cfConnectingIp: string | undefined): string | undefined {
     const ip = (cfConnectingIp || '').trim()
@@ -75,7 +92,6 @@ export function clientKeyFor(cfConnectingIp: string | undefined): string | undef
 }
 
 function ipv6Prefix64(ip: string): string {
-    // Expand '::' so the first four groups are positional.
     const zone = ip.indexOf('%')
     const addr = (zone >= 0 ? ip.slice(0, zone) : ip).toLowerCase()
     const [head, tail] = addr.split('::')
@@ -89,16 +105,36 @@ function ipv6Prefix64(ip: string): string {
     return groups.slice(0, 4).map((g) => (Number.parseInt(g, 16) || 0).toString(16)).join(':') + '::/64'
 }
 
+/** True when the request came through the CDN that sets CF-Connecting-IP. */
+export function hasEdgeToken(presented: string | undefined, expected: string = EDGE_TOKEN): boolean {
+    if (!expected) { return true }
+    if (!presented) { return false }
+    const a = Buffer.from(presented)
+    const b = Buffer.from(expected)
+    return a.length === b.length && timingSafeEqual(a, b)
+}
+
 /** Canonical query for a variant, in the order the frontends build it. */
-export function variantQuery(v: RequestedVariant): string {
+export function variantQuery(v: RenderedVariant): string {
     const parts = [`format=${v.format}`, `mode=${v.mode}`]
     if (v.width !== undefined) { parts.push(`width=${v.width}`) }
     if (v.height !== undefined) { parts.push(`height=${v.height}`) }
     return parts.join('&')
 }
 
-export function parseVariantQuery(q: string): RequestedVariant | undefined {
-    const params = new URLSearchParams(q)
+/** What a variant looks like on the page: format, crop mode and height. */
+export function variantKind(v: RenderedVariant): string {
+    return `${v.format}/${v.mode}/${v.height || 0}`
+}
+
+/** Ledger member: `<kind>#<query>`, so the ledger can tell kinds apart. */
+export function memberFor(v: RenderedVariant): string {
+    return `${variantKind(v)}#${variantQuery(v)}`
+}
+
+export function parseMember(member: string): RenderedVariant | undefined {
+    const hash = member.indexOf('#')
+    const params = new URLSearchParams(hash >= 0 ? member.slice(hash + 1) : member)
     const format = params.get('format')
     const mode = params.get('mode')
     if (!format || !mode) { return undefined }
@@ -108,86 +144,125 @@ export function parseVariantQuery(q: string): RequestedVariant | undefined {
 }
 
 /**
- * Formats a client that asked for `requested` can certainly decode. `match` is
- * Accept-negotiated and the CDN does not key on Accept, so it only stands in
- * for itself; an AVIF client takes WebP too, but not the other way round.
+ * Formats this client can be redirected to. Explicit AVIF/WebP/JPEG/PNG name
+ * one stored variant whatever the Accept header says. `match` is negotiated
+ * per request, so it is only a target for a client that negotiated `match`
+ * itself, i.e. one that takes neither AVIF nor WebP.
  */
-function compatibleFormats(requested: string): string[] {
-    if (requested === 'avif') { return ['avif', 'webp'] }
-    return [requested]
+export function acceptableFormats(rendered: string, acceptHeader: string): Set<string> {
+    const formats = new Set<string>([rendered])
+    if (rendered !== 'match') {
+        if (supportsAvif(acceptHeader)) { formats.add('avif') }
+        if (supportsWebP(acceptHeader)) { formats.add('webp') }
+    }
+    return formats
 }
 
 /**
  * The already-rendered variant to send this client to instead of rendering a
- * new one: same mode and height (so the crop and aspect are what the page laid
- * out), a format it can decode, and the width nearest the one it asked for
+ * new one: a format it takes, the same mode and height (so the crop and aspect
+ * are what the page laid out), and the width nearest the one it asked for
  * (ties go to the larger, which scales down cleanly).
  */
-export function pickFallback(members: string[], requested: RequestedVariant): string | undefined {
-    const formats = compatibleFormats(requested.format)
+export function pickFallback(members: string[], wanted: RenderedVariant, acceptHeader: string): string | undefined {
+    const formats = acceptableFormats(wanted.format, acceptHeader)
     let best: {q: string, dist: number, width: number} | undefined
-    for (const q of members) {
-        const v = parseVariantQuery(q)
+    for (const member of members) {
+        const v = parseMember(member)
         if (!v) { continue }
-        if (!formats.includes(v.format) || v.mode !== requested.mode || v.height !== requested.height) { continue }
-        const want = requested.width || 0
+        if (!formats.has(v.format) || v.mode !== wanted.mode || v.height !== wanted.height) { continue }
+        const want = wanted.width || 0
         const have = v.width || 0
         const dist = Math.abs(have - want)
         if (!best || dist < best.dist || (dist === best.dist && have > best.width)) {
-            best = {q, dist, width: have}
+            best = {q: variantQuery(v), dist, width: have}
         }
     }
     return best ? best.q : undefined
 }
 
 /**
- * Records `member` in the client's set for this image when there is room.
- * Answers `null` when the variant is allowed (new and under the cap, or already
- * recorded), or the recorded members when the cap is reached.
+ * Reserves `member` in the client's set for this image when allowed. Answers
+ * 'held' when the client already holds it, 'added' when it was reserved now
+ * (under the limit, or the first of a new kind under the hard cap), or the
+ * recorded members when refused.
  */
-interface Ledger {
-    record(key: string, member: string, max: number, ttlSeconds: number): Promise<string[] | null>
+export type ReserveResult = 'held' | 'added' | string[]
+export interface Ledger {
+    reserve(key: string, member: string, kind: string, max: number, hardMax: number, ttlSeconds: number): Promise<ReserveResult>
+    release(key: string, member: string): Promise<void>
 }
 
-// KEYS[1] set, ARGV member, max, ttl. Membership first, so retrying a variant
-// the client already rendered is never counted twice.
-const RECORD_SCRIPT = `
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return nil end
-if redis.call('SCARD', KEYS[1]) < tonumber(ARGV[2]) then
-  redis.call('SADD', KEYS[1], ARGV[1])
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
-  return nil
+// KEYS[1] set. ARGV member, kind, max, hard max, ttl. Membership first, so a
+// variant the client already has a slot for is never counted twice.
+const RESERVE_SCRIPT = `
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 0 end
+local n = redis.call('SCARD', KEYS[1])
+local allow = n < tonumber(ARGV[3])
+local members = nil
+if not allow and n < tonumber(ARGV[4]) then
+  members = redis.call('SMEMBERS', KEYS[1])
+  allow = true
+  local prefix = ARGV[2] .. '#'
+  for _, m in ipairs(members) do
+    if string.sub(m, 1, #prefix) == prefix then allow = false break end
+  end
 end
-return redis.call('SMEMBERS', KEYS[1])
+if allow then
+  redis.call('SADD', KEYS[1], ARGV[1])
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
+  return 1
+end
+return members or redis.call('SMEMBERS', KEYS[1])
 `
 
 const redisLedger: Ledger = {
-    async record(key, member, max, ttlSeconds) {
+    async reserve(key, member, kind, max, hardMax, ttlSeconds) {
         if (redisReady) { await redisReady }
-        if (!redisClient || !redisClient.isReady) { return null }
-        const res = await redisClient.eval(RECORD_SCRIPT, {keys: [key], arguments: [member, String(max), String(ttlSeconds)]})
-        return Array.isArray(res) ? res.map(String) : null
+        if (!redisClient || !redisClient.isReady) { throw new Error('redis not ready') }
+        const res = await redisClient.eval(RESERVE_SCRIPT, {
+            keys: [key], arguments: [member, kind, String(max), String(hardMax), String(ttlSeconds)],
+        })
+        if (Array.isArray(res)) { return res.map(String) }
+        return Number(res) === 0 ? 'held' : 'added'
+    },
+    async release(key, member) {
+        if (!redisClient || !redisClient.isReady) { return }
+        await redisClient.sRem(key, member)
     },
 }
 
 /** Per-process ledger for development and tests, where Redis is not configured. */
-export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): void} {
+export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): void, size(): number} {
     const sets = new Map<string, {members: Set<string>, expiresAt: number}>()
+    let writes = 0
+    const sweep = (t: number) => {
+        for (const [k, e] of sets) { if (e.expiresAt <= t) { sets.delete(k) } }
+    }
     return {
-        async record(key, member, max, ttlSeconds) {
+        async reserve(key, member, kind, max, hardMax, ttlSeconds) {
             const t = now()
+            // Expired entries of clients that never came back go in a periodic sweep.
+            if (++writes % 1000 === 0) { sweep(t) }
             let entry = sets.get(key)
             if (entry && entry.expiresAt <= t) { sets.delete(key); entry = undefined }
-            if (entry && entry.members.has(member)) { return null }
+            if (entry && entry.members.has(member)) { return 'held' }
             if (!entry) { entry = {members: new Set(), expiresAt: 0}; sets.set(key, entry) }
-            if (entry.members.size < max) {
+            const n = entry.members.size
+            const newKind = ![...entry.members].some((m) => m.startsWith(kind + '#'))
+            if (n < max || (n < hardMax && newKind)) {
                 entry.members.add(member)
                 entry.expiresAt = t + ttlSeconds * 1000
-                return null
+                return 'added'
             }
             return [...entry.members]
         },
-        clear() { sets.clear() },
+        async release(key, member) {
+            const entry = sets.get(key)
+            if (entry) { entry.members.delete(member) }
+        },
+        clear() { sets.clear(); writes = 0 },
+        size() { return sets.size },
     }
 }
 
@@ -200,34 +275,60 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
     return Promise.race([p, timeout]).finally(() => { if (timer) { clearTimeout(timer) } })
 }
 
+export interface GuardInput {
+    /** The variant about to be rendered, with the NEGOTIATED output format. */
+    variant: RenderedVariant
+    /** Key of the source image the variant is rendered from. */
+    sourceKey: string
+    blur?: boolean
+    /** Authenticated invalidate/ignorecache, or a blocked source answered with the default image. */
+    skip?: boolean
+    /** Legacy-route request: rendered but never stored, so never redirected. */
+    legacy?: boolean
+}
+
 /**
- * Decide whether this request may render `variant` of the source `sourceKey`.
- * Call only on the render path, after the stored-variant lookup missed.
+ * Decide whether this request may render its variant. Call only on the render
+ * path, after the stored-variant lookup missed. An `allow` with a reservation
+ * must be settled with `settleReservation` once the request is done.
  */
-export async function checkVariantWalk(
-    ctx: KoaContext,
-    sourceKey: string,
-    variant: RequestedVariant,
-    opts: {blur?: boolean, bypass?: boolean} = {}
-): Promise<GuardDecision> {
-    if (MAX_VARIANTS <= 0 || opts.blur || opts.bypass) { return {action: 'allow'} }
+export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Promise<GuardDecision> {
+    if (MAX_VARIANTS <= 0 || input.blur || input.skip) { return {action: 'allow'} }
+    if (!hasEdgeToken(ctx.get(EDGE_TOKEN_HEADER) || undefined)) { return {action: 'allow'} }
     const client = clientKeyFor(ctx.get('cf-connecting-ip'))
     if (!client) { return {action: 'allow'} }
-    if (CRAWLER_UA.test(ctx.get('user-agent') || '')) { return {action: 'allow'} }
 
-    const key = 'vg:' + createHash('sha1').update(client + '|' + sourceKey).digest('base64url').slice(0, 22)
-    const member = variantQuery(variant)
-    let members: string[] | null | 'timeout'
+    const key = 'vg:' + createHash('sha1').update(client + '|' + input.sourceKey).digest('base64url').slice(0, 22)
+    const member = memberFor(input.variant)
+    let result: ReserveResult | 'timeout'
     try {
-        members = await withTimeout(ledger.record(key, member, MAX_VARIANTS, WINDOW_SECONDS), LEDGER_TIMEOUT_MS)
+        result = await withTimeout(
+            ledger.reserve(key, member, variantKind(input.variant), MAX_VARIANTS, MAX_VARIANTS + EXTRA_KINDS, WINDOW_SECONDS),
+            LEDGER_TIMEOUT_MS)
     } catch (err) {
         ctx.log.warn({err}, 'variant guard ledger failed, allowing')
         return {action: 'allow'}
     }
-    if (members === null || members === 'timeout') { return {action: 'allow'} }
+    if (result === 'timeout' || result === 'held') { return {action: 'allow'} }
+    if (result === 'added') { return {action: 'allow', reservation: {key, member}} }
+    const members = result
 
-    const fallback = pickFallback(members, variant)
+    if (input.legacy) { return {action: 'reject'} }
+    const fallback = pickFallback(members, input.variant, ctx.get('accept') || '')
     return fallback ? {action: 'redirect', query: fallback} : {action: 'reject'}
+}
+
+/**
+ * Give a slot back when the request ended without storing its variant, so a
+ * failure (dead source, default image, passthrough) does not spend the
+ * allowance and a later recovery is not refused. Legacy renders are never
+ * stored and keep their slot. Fire and forget: the response is not held.
+ */
+export function settleReservation(ctx: KoaContext, reservation: Reservation | undefined, stored: boolean, legacy: boolean) {
+    if (!reservation || stored || legacy) { return }
+    ledger.release(reservation.key, reservation.member).catch((err) => {
+        ctx.log.warn({err}, 'variant guard release failed')
+    })
 }
 
 /** Answer a guarded request. Nothing here may be cached by anyone. */
@@ -235,15 +336,13 @@ export function applyGuardDecision(ctx: KoaContext, decision: GuardDecision): bo
     if (decision.action === 'allow') { return false }
     ctx.remove('ETag')
     ctx.remove('Last-Modified')
+    ctx.remove('Vary')
     ctx.set('Cache-Control', 'no-store')
     if (decision.action === 'redirect') {
         ctx.tag({variant_guard: 'redirect'})
         ctx.set('X-Variant-Guard', 'redirect')
         ctx.status = 302
-        // Legacy-route requests are rendered but never stored; keep the marker so
-        // the target is handled the same way as the variants recorded for it.
-        const legacy = ctx.query['_src'] === 'legacy' ? '&_src=legacy' : ''
-        ctx.set('Location', `${ctx.path}?${decision.query}${legacy}`)
+        ctx.set('Location', `${ctx.path}?${decision.query}`)
         ctx.body = ''
     } else {
         ctx.tag({variant_guard: 'reject'})
@@ -255,18 +354,9 @@ export function applyGuardDecision(ctx: KoaContext, decision: GuardDecision): bo
     return true
 }
 
-const KNOWN_FORMATS = new Set(['match', 'jpeg', 'jpg', 'png', 'webp', 'avif'])
+const FORMAT_NAMES: {[k: string]: string} = {AVIF: 'avif', WEBP: 'webp', JPEG: 'jpeg', PNG: 'png', Match: 'match'}
 
-/**
- * The variant as the client's query names it, normalised the way parseOptions
- * reads it (unknown format = match, missing mode = cover, 0 width = none), so
- * two spellings of one variant count once and a redirect reproduces it.
- */
-export function requestedVariantOf(query: {[key: string]: any}): RequestedVariant {
-    const rawFormat = typeof query['format'] === 'string' ? query['format'] : 'match'
-    const format = KNOWN_FORMATS.has(rawFormat) ? (rawFormat === 'jpg' ? 'jpeg' : rawFormat) : 'match'
-    const mode = query['mode'] === 'fit' ? 'fit' : 'cover'
-    const width = Number.parseInt(query['width']) || undefined
-    const height = Number.parseInt(query['height']) || undefined
-    return {format, mode, width, height}
+/** Name of an OutputFormat enum member (as `OutputFormat[x]` gives it), as a query value. */
+export function formatQueryValue(enumName: string): string {
+    return FORMAT_NAMES[enumName] || 'match'
 }

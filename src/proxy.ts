@@ -30,7 +30,7 @@ import {renderAnimatedVariant} from './animated'
 import {clientGoneSignal, isEncodeAborted, runEncode} from './encode-limit'
 import {fetchImageWithFallbacks} from './fetch-image'
 import {captureImageFailure} from './sentry'
-import {applyGuardDecision, checkVariantWalk, requestedVariantOf} from './variant-guard'
+import {applyGuardDecision, checkVariantWalk, formatQueryValue, Reservation, settleReservation} from './variant-guard'
 import {
     AcceptedContentTypes,
     applyMatchFallbackFormat,
@@ -211,7 +211,25 @@ async function convertCachedMatchVariant(
     }
 }
 
+interface GuardState {
+    variantGuard?: {reservation: Reservation, stored: boolean, legacy: boolean}
+}
+
+/**
+ * The /p/ route. A variant-guard slot reserved during the request is settled
+ * here whatever way the request ends (stored, served unstored, thrown), so a
+ * render that produced nothing stored gives its slot back.
+ */
 export async function proxyHandler(ctx: KoaContext) {
+    try {
+        await handleProxy(ctx)
+    } finally {
+        const vg = (ctx.state as GuardState).variantGuard
+        if (vg) { settleReservation(ctx, vg.reservation, vg.stored, vg.legacy) }
+    }
+}
+
+async function handleProxy(ctx: KoaContext) {
     ctx.tag({handler: 'proxy'})
     // One budget for every upstream fetch this request makes, including the
     // metadata re-walk. It is sized so that the walk, the reserved default-image
@@ -522,12 +540,24 @@ export async function proxyHandler(ctx: KoaContext) {
     // Past this point the variant has to be rendered. A client walking every
     // srcset variant of the same image is held to a few renders; see
     // variant-guard.ts. Cache hits above never reach this.
-    const guard = await checkVariantWalk(ctx, origKey, requestedVariantOf(ctx.query), {
+    const guard = await checkVariantWalk(ctx, {
+        variant: {
+            format: formatQueryValue(OutputFormat[options.format]),
+            mode: options.mode === ScalingMode.Fit ? 'fit' : 'cover',
+            width: options.width,
+            height: options.height,
+        },
+        sourceKey: origKey,
         blur: options.blur,
-        bypass: shouldBypassCache,
+        // a blocked source is answered with the default image, which is not this source's render
+        skip: shouldBypassCache || !!substitution,
+        legacy: isLegacy,
     })
     if (applyGuardDecision(ctx, guard)) {
         return
+    }
+    if (guard.action === 'allow' && guard.reservation) {
+        (ctx.state as GuardState).variantGuard = {reservation: guard.reservation, stored: false, legacy: isLegacy}
     }
 
     // check if we have the original
@@ -856,6 +886,8 @@ export async function proxyHandler(ctx: KoaContext) {
             try {
                 if (await storeImage(proxyStore, imageKey, rendered, storeSignal())) {
                     ctx.log.debug('stored converted %s', imageKey)
+                    const vg = (ctx.state as GuardState).variantGuard
+                    if (vg) { vg.stored = true }
                 }
             } catch (err) {
                 ctx.log.error({ err, imageKey }, 'failed to store converted proxy image')
