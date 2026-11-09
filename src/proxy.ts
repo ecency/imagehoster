@@ -212,23 +212,19 @@ async function convertCachedMatchVariant(
 }
 
 interface GuardState {
-    variantGuard?: {reservation: Reservation, stored: boolean, legacy: boolean, imageKey: string}
+    variantGuard?: {reservation: Reservation, stored: boolean, legacy: boolean}
 }
 
 /**
- * The /p/ route. A variant-guard slot reserved during the request is settled
- * here whatever way the request ends (stored, served unstored, thrown), so a
- * render that produced nothing stored gives its slot back.
+ * The /p/ route. A variant-guard hold taken during the request is settled here
+ * whatever way the request ends (stored, served unstored, thrown).
  */
 export async function proxyHandler(ctx: KoaContext) {
     try {
         await handleProxy(ctx)
     } finally {
         const vg = (ctx.state as GuardState).variantGuard
-        if (vg) {
-            void settleReservation(ctx, vg.reservation, vg.stored, vg.legacy, () => storeExistsBounded(
-                proxyStore, vg.imageKey, AbortSignal.timeout(STORE_OP_TIMEOUT_MS), ctx.log, 'variant guard settle'))
-        }
+        if (vg) { void settleReservation(ctx, vg.reservation, vg.stored, vg.legacy) }
     }
 }
 
@@ -560,7 +556,7 @@ async function handleProxy(ctx: KoaContext) {
         return
     }
     if (guard.action === 'allow' && guard.reservation) {
-        (ctx.state as GuardState).variantGuard = {reservation: guard.reservation, stored: false, legacy: isLegacy, imageKey}
+        (ctx.state as GuardState).variantGuard = {reservation: guard.reservation, stored: false, legacy: isLegacy}
     }
 
     // check if we have the original

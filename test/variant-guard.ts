@@ -106,11 +106,32 @@ describe('variant guard', function() {
             assert.strictEqual(await r('b#1', 'b'), 'added', 'a new kind gets one more')
             assert.deepStrictEqual((await r('c#1', 'c') as string[]).sort(), ['a#1', 'a#2', 'b#1'], 'hard cap reached')
         })
-        it('gives a released slot back', async function() {
+        it('gives a slot back when its only request ends without storing', async function() {
             const l = memoryLedger(() => 1000)
             await l.reserve('k', 'a#1', 'a', 1, 1, 60)
             assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)))
-            await l.release('k', 'a#1')
+            await l.settle('k', 'a#1', false, 60)
+            assert.strictEqual(await l.reserve('k', 'a#2', 'a', 1, 1, 60), 'added')
+        })
+        it('keeps a slot while another request on it is still rendering, and once any stored it', async function() {
+            const l = memoryLedger(() => 1000)
+            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'added')   // request A
+            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'held')    // request B, same variant
+            await l.settle('k', 'a#1', false, 60)                                      // A fails first
+            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'B still in flight: slot kept')
+            await l.settle('k', 'a#1', true, 60)                                       // B stores
+            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)), 'earned: slot kept')
+            // an earned slot survives a later failed request on the same variant
+            assert.strictEqual(await l.reserve('k', 'a#1', 'a', 1, 1, 60), 'held')
+            await l.settle('k', 'a#1', false, 60)
+            assert.ok(Array.isArray(await l.reserve('k', 'a#2', 'a', 1, 1, 60)))
+        })
+        it('gives it back when every request on it failed', async function() {
+            const l = memoryLedger(() => 1000)
+            await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            await l.reserve('k', 'a#1', 'a', 1, 1, 60)
+            await l.settle('k', 'a#1', false, 60)
+            await l.settle('k', 'a#1', false, 60)
             assert.strictEqual(await l.reserve('k', 'a#2', 'a', 1, 1, 60), 'added')
         })
         it('expires with the window and sweeps clients that never came back', async function() {
@@ -129,29 +150,25 @@ describe('variant guard', function() {
     describe('settling a reservation', function() {
         const ctx: any = {log: {warn: () => undefined}}
         const reservation = {key: 'settle-k', member: 'webp/fit/0#format=webp&mode=fit&width=600'}
+        const other = 'webp/fit/0#format=webp&mode=fit&width=800'
+        // a 1-slot allowance, so "is the slot free" = can another variant be reserved
+        const slotFree = async () => !Array.isArray(await testLedger.reserve(reservation.key, other, 'webp/fit/0', 1, 1, 60))
         beforeEach(async () => {
             testLedger.clear()
-            assert.strictEqual(await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60), 'added')
+            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
         })
-        const held = async () => await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60) === 'held'
 
-        it('keeps the slot when another request stored the variant meanwhile', async function() {
-            await settleReservation(ctx, reservation, false, false, async () => true)
-            assert.ok(await held())
-        })
-        it('releases it when nothing is stored, or the store cannot be read', async function() {
-            await settleReservation(ctx, reservation, false, false, async () => false)
-            assert.ok(!(await held()), 'released')
+        it('frees the slot for an unstored render, keeps it for a stored or a legacy one', async function() {
+            await settleReservation(ctx, reservation, true, false)
+            assert.ok(!(await slotFree()), 'stored')
             testLedger.clear()
-            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 4, 6, 60)
-            await settleReservation(ctx, reservation, false, false, async () => { throw new Error('store down') })
-            assert.ok(!(await held()), 'released on a failed check')
-        })
-        it('keeps it after its own store, and for legacy renders', async function() {
-            await settleReservation(ctx, reservation, true, false, async () => false)
-            assert.ok(await held())
-            await settleReservation(ctx, reservation, false, true, async () => false)
-            assert.ok(await held())
+            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
+            await settleReservation(ctx, reservation, false, true)
+            assert.ok(!(await slotFree()), 'legacy')
+            testLedger.clear()
+            await testLedger.reserve(reservation.key, reservation.member, 'webp/fit/0', 1, 1, 60)
+            await settleReservation(ctx, reservation, false, false)
+            assert.ok(await slotFree(), 'unstored')
         })
     })
 
@@ -247,6 +264,23 @@ describe('variant guard', function() {
             assert.strictEqual(res.headers['cache-control'], 'no-store')
             assert.strictEqual(res.headers['retry-after'], '120')
             assert.strictEqual(res.headers['x-variant-guard'], 'reject')
+        })
+
+        it('holds a parallel walk of every srcset variant to the allowance', async function() {
+            this.timeout(20000)
+            const src = newSource()
+            const queries: string[] = []
+            for (const f of ['avif', 'webp', 'match']) {
+                for (const w of [320, 600, 800, 1024, 1280]) { queries.push(variant(f, w)) }
+            }
+            const responses = await Promise.all(queries.map((q) => get(url(src, q))))
+            // `match` negotiates to AVIF for this client, so it is the same render as format=avif
+            const rendered = new Set<string>()
+            responses.forEach((res, i) => {
+                assert.ok([200, 302, 429].includes(res.statusCode!), `${queries[i]}: ${res.statusCode}`)
+                if (res.statusCode === 200) { rendered.add(queries[i].replace('format=match', 'format=avif')) }
+            })
+            assert.ok(rendered.size <= 4 + EXTRA_KINDS, `distinct renders ${rendered.size}`)
         })
 
         it('never counts or limits a stored variant, even one another client rendered', async function() {

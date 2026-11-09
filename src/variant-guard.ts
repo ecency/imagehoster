@@ -183,20 +183,34 @@ export function pickFallback(members: string[], wanted: RenderedVariant, acceptH
 
 /**
  * Reserves `member` in the client's set for this image when allowed. Answers
- * 'held' when the client already holds it, 'added' when it was reserved now
- * (under the limit, or the first of a new kind under the hard cap), or the
- * recorded members when refused.
+ * 'held' when the set already has it, 'added' when it was reserved now (under
+ * the limit, or the first of a new kind under the hard cap), or the recorded
+ * members when refused. Both 'held' and 'added' count the request as one more
+ * in flight on that member.
+ *
+ * `settle` ends one in-flight request. A request that stored the variant marks
+ * the member earned. The member leaves the set only when the LAST request in
+ * flight on it has ended and none of them stored it, so a request that fails
+ * while another is still rendering the same variant cannot free the slot that
+ * the other one is about to earn.
  */
 export type ReserveResult = 'held' | 'added' | string[]
 export interface Ledger {
     reserve(key: string, member: string, kind: string, max: number, hardMax: number, ttlSeconds: number): Promise<ReserveResult>
-    release(key: string, member: string): Promise<void>
+    settle(key: string, member: string, stored: boolean, ttlSeconds: number): Promise<void>
 }
 
-// KEYS[1] set. ARGV member, kind, max, hard max, ttl. Membership first, so a
-// variant the client already has a slot for is never counted twice.
+// KEYS[1] member set, KEYS[2] state hash (`c:<member>` in-flight count,
+// `d:<member>` earned). ARGV member, kind, max, hard max, ttl.
 const RESERVE_SCRIPT = `
-if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 0 end
+local ttl = tonumber(ARGV[5])
+local function hold(result)
+  redis.call('HINCRBY', KEYS[2], 'c:' .. ARGV[1], 1)
+  redis.call('EXPIRE', KEYS[1], ttl)
+  redis.call('EXPIRE', KEYS[2], ttl)
+  return result
+end
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return hold(0) end
 local n = redis.call('SCARD', KEYS[1])
 local allow = n < tonumber(ARGV[3])
 local members = nil
@@ -210,34 +224,56 @@ if not allow and n < tonumber(ARGV[4]) then
 end
 if allow then
   redis.call('SADD', KEYS[1], ARGV[1])
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[5]))
-  return 1
+  return hold(1)
 end
 return members or redis.call('SMEMBERS', KEYS[1])
 `
+
+// KEYS[1] member set, KEYS[2] state hash. ARGV member, stored (0/1), ttl.
+const SETTLE_SCRIPT = `
+local c = 'c:' .. ARGV[1]
+local d = 'd:' .. ARGV[1]
+if ARGV[2] == '1' then redis.call('HSET', KEYS[2], d, 1) end
+local n = redis.call('HINCRBY', KEYS[2], c, -1)
+if n <= 0 then
+  redis.call('HDEL', KEYS[2], c)
+  if redis.call('HEXISTS', KEYS[2], d) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
+end
+if redis.call('EXISTS', KEYS[1]) == 1 then redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3])) end
+return n
+`
+
+const stateKey = (key: string) => key + ':s'
 
 const redisLedger: Ledger = {
     async reserve(key, member, kind, max, hardMax, ttlSeconds) {
         if (redisReady) { await redisReady }
         if (!redisClient || !redisClient.isReady) { throw new Error('redis not ready') }
         const res = await redisClient.eval(RESERVE_SCRIPT, {
-            keys: [key], arguments: [member, kind, String(max), String(hardMax), String(ttlSeconds)],
+            keys: [key, stateKey(key)], arguments: [member, kind, String(max), String(hardMax), String(ttlSeconds)],
         })
         if (Array.isArray(res)) { return res.map(String) }
         return Number(res) === 0 ? 'held' : 'added'
     },
-    async release(key, member) {
+    async settle(key, member, stored, ttlSeconds) {
         if (!redisClient || !redisClient.isReady) { return }
-        await redisClient.sRem(key, member)
+        await redisClient.eval(SETTLE_SCRIPT, {
+            keys: [key, stateKey(key)], arguments: [member, stored ? '1' : '0', String(ttlSeconds)],
+        })
     },
 }
 
 /** Per-process ledger for development and tests, where Redis is not configured. */
 export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): void, size(): number} {
-    const sets = new Map<string, {members: Set<string>, expiresAt: number}>()
+    interface Entry { members: Set<string>, inFlight: Map<string, number>, earned: Set<string>, expiresAt: number }
+    const sets = new Map<string, Entry>()
     let writes = 0
     const sweep = (t: number) => {
         for (const [k, e] of sets) { if (e.expiresAt <= t) { sets.delete(k) } }
+    }
+    const hold = (entry: Entry, member: string, t: number, ttlSeconds: number) => {
+        entry.inFlight.set(member, (entry.inFlight.get(member) || 0) + 1)
+        entry.expiresAt = t + ttlSeconds * 1000
     }
     return {
         async reserve(key, member, kind, max, hardMax, ttlSeconds) {
@@ -246,20 +282,25 @@ export function memoryLedger(now: () => number = Date.now): Ledger & {clear(): v
             if (++writes % 1000 === 0) { sweep(t) }
             let entry = sets.get(key)
             if (entry && entry.expiresAt <= t) { sets.delete(key); entry = undefined }
-            if (entry && entry.members.has(member)) { return 'held' }
-            if (!entry) { entry = {members: new Set(), expiresAt: 0}; sets.set(key, entry) }
+            if (entry && entry.members.has(member)) { hold(entry, member, t, ttlSeconds); return 'held' }
+            if (!entry) { entry = {members: new Set(), inFlight: new Map(), earned: new Set(), expiresAt: 0}; sets.set(key, entry) }
             const n = entry.members.size
             const newKind = ![...entry.members].some((m) => m.startsWith(kind + '#'))
             if (n < max || (n < hardMax && newKind)) {
                 entry.members.add(member)
-                entry.expiresAt = t + ttlSeconds * 1000
+                hold(entry, member, t, ttlSeconds)
                 return 'added'
             }
             return [...entry.members]
         },
-        async release(key, member) {
+        async settle(key, member, stored) {
             const entry = sets.get(key)
-            if (entry) { entry.members.delete(member) }
+            if (!entry) { return }
+            if (stored) { entry.earned.add(member) }
+            const n = (entry.inFlight.get(member) || 0) - 1
+            if (n > 0) { entry.inFlight.set(member, n); return }
+            entry.inFlight.delete(member)
+            if (!entry.earned.has(member)) { entry.members.delete(member) }
         },
         clear() { sets.clear(); writes = 0 },
         size() { return sets.size },
@@ -309,8 +350,8 @@ export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Prom
         ctx.log.warn({err}, 'variant guard ledger failed, allowing')
         return {action: 'allow'}
     }
-    if (result === 'timeout' || result === 'held') { return {action: 'allow'} }
-    if (result === 'added') { return {action: 'allow', reservation: {key, member}} }
+    if (result === 'timeout') { return {action: 'allow'} }
+    if (result === 'held' || result === 'added') { return {action: 'allow', reservation: {key, member}} }
     const members = result
 
     if (input.legacy) { return {action: 'reject'} }
@@ -319,34 +360,22 @@ export async function checkVariantWalk(ctx: KoaContext, input: GuardInput): Prom
 }
 
 /**
- * Give a slot back when the request ended without storing its variant, so a
- * failure (dead source, default image, passthrough) does not spend the
- * allowance and a later recovery is not refused. Legacy renders are never
- * stored and keep their slot.
- *
- * Two requests for the same new variant share one slot: the first reserves it,
- * the second finds it held and renders without a reservation. If the holder
- * fails while the other stored the variant, the slot was earned, so the store
- * is checked before releasing. A failed check releases (the guard errs toward
- * the reader). Fire and forget: the response is not held.
+ * End this request's hold on its variant. A store marks the variant earned;
+ * the slot is given back only when the last request in flight on it ended and
+ * none stored it (failed fetch, default image, passthrough), so a failure does
+ * not spend the allowance and a later recovery is not refused. Legacy renders
+ * are never stored but keep their slot. Fire and forget: the response is not
+ * held.
  */
 export function settleReservation(
     ctx: KoaContext,
     reservation: Reservation | undefined,
     stored: boolean,
     legacy: boolean,
-    isStoredNow?: () => Promise<boolean>,
 ): Promise<void> {
-    if (!reservation || stored || legacy) { return Promise.resolve() }
-    return (async () => {
-        if (isStoredNow) {
-            let present = false
-            try { present = await isStoredNow() } catch (_e) { present = false }
-            if (present) { return }
-        }
-        await ledger.release(reservation.key, reservation.member)
-    })().catch((err) => {
-        ctx.log.warn({err}, 'variant guard release failed')
+    if (!reservation) { return Promise.resolve() }
+    return ledger.settle(reservation.key, reservation.member, stored || legacy, WINDOW_SECONDS).catch((err) => {
+        ctx.log.warn({err}, 'variant guard settle failed')
     })
 }
 
