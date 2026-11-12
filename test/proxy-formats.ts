@@ -43,6 +43,7 @@ describe('proxy formats', function() {
     // AVIF sources, generated so no binary fixture has to be committed
     const avifFile = 'generated-test.avif'
     const avifAlphaFile = 'generated-alpha.avif'
+    const alphaPngFile = 'generated-alpha.png'
     before(async function() {
         this.timeout(30000)
         await sharp(path.resolve(__dirname, 'test.jpg'))
@@ -53,9 +54,13 @@ describe('proxy formats', function() {
             width: 60, height: 60, channels: 4,
             background: {r: 0, g: 128, b: 255, alpha: 0.5},
         }}).avif({quality: 50, effort: 0}).toFile(path.resolve(__dirname, avifAlphaFile))
+        await sharp({create: {
+            width: 60, height: 60, channels: 4,
+            background: {r: 0, g: 128, b: 255, alpha: 0},
+        }}).png().toFile(path.resolve(__dirname, alphaPngFile))
     })
     after(() => {
-        for (const file of [avifFile, avifAlphaFile]) {
+        for (const file of [avifFile, avifAlphaFile, alphaPngFile]) {
             try { fs.unlinkSync(path.resolve(__dirname, file)) } catch (_e) { /* best effort */ }
         }
     })
@@ -84,6 +89,23 @@ describe('proxy formats', function() {
         const meta = await sharp(res.body).metadata()
         assert.equal(meta.format, 'jpeg')
         assert.equal(meta.width, 200)
+    })
+
+    it('should flatten transparency onto white when JPEG is requested', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = alphaPngFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/alpha-to-jpeg.png`)
+        const res = await needle('get',
+            `http://localhost:${port}/p/${imageUrl}?width=40&format=jpeg`)
+        assert.equal(res.statusCode, 200)
+        const {data, info} = await sharp(res.body).raw().toBuffer({resolveWithObject: true})
+        assert.equal(info.channels, 3)
+        // JPEG has no alpha: without flattening, libvips composites the
+        // transparent pixels onto black
+        for (let i = 0; i < 3; i++) {
+            assert.ok(data[i] > 245, `channel ${i} of the corner pixel is ${data[i]}, expected white`)
+        }
     })
 
     it('should output PNG when requested', async function() {
