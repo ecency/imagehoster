@@ -846,6 +846,10 @@ async function handleProxy(ctx: KoaContext) {
                 contentType = applyMatchFallbackFormat(image, contentType, acceptHeader, metadata.hasAlpha)
                 break
             case OutputFormat.JPEG:
+                // JPEG has no alpha, and libvips composites it onto black
+                if (metadata.hasAlpha) {
+                    image.flatten({background: '#ffffff'})
+                }
                 image.jpeg({force: true})
                 contentType = 'image/jpeg'
                 break
