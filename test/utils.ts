@@ -5,6 +5,7 @@ import * as path from 'path'
 import * as fs from 'fs'
 import { createHash } from 'crypto'
 import { URL } from 'url'
+import { spawnSync } from 'child_process'
 
 import {
     parseBool,
@@ -53,6 +54,31 @@ import { APIError } from './../src/error'
 import { initBlacklistService } from './../src/blacklist-service'
 
 describe('utils', function() {
+
+    describe('mimeMagic', function() {
+        // GHSA-5v7r-6r5c-r473: an ASF header whose sub-header size is 0 sends
+        // file-type < 21.3.1 into an endless loop of microtasks, which starves the
+        // event loop, so a single fetched source can freeze a worker. It is run in
+        // a child process because a hang in this process would freeze mocha's own
+        // timers and the test could never fail.
+        it('returns on a 55-byte ASF header with a zero-size sub-header', function() {
+            this.slow(8000)
+            this.timeout(30000)
+            const script = `
+                const {mimeMagic} = require(${ JSON.stringify(path.resolve(__dirname, '../src/utils')) })
+                const b = Buffer.alloc(55)
+                Buffer.from([0x30,0x26,0xB2,0x75,0x8E,0x66,0xCF,0x11,0xA6,0xD9,0x00,0xAA,0x00,0x62,0xCE,0x6C]).copy(b, 0)
+                b.writeBigUInt64LE(55n, 16)
+                mimeMagic(b).then((m) => { process.stdout.write('MIME ' + m); process.exit(0) })
+            `
+            const run = spawnSync(process.execPath, ['-r', 'ts-node/register', '-e', script], {
+                cwd: path.resolve(__dirname, '..'), env: {...process.env, NODE_ENV: 'test'}, timeout: 20000, encoding: 'utf8',
+            })
+            assert.notEqual(run.signal, 'SIGTERM', 'mimeMagic never returned (killed after 20s)')
+            assert.equal(run.status, 0, run.stderr)
+            assert.match(run.stdout, /MIME \S+/)
+        })
+    })
 
     describe('parseBool', function() {
         it('should return false for falsy values', function() {
