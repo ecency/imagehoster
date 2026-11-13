@@ -152,8 +152,12 @@ const ESTEEM_WRAP_PREFIX = /^https?:\/\/(?:steemitimages\.com|images\.hive\.blog
  * `?format=match&amp;mode=fit&amp;width=320`, whose keys parse as `amp;mode`
  * and `amp;width`: the options are silently dropped and the request becomes
  * its own cache key for the wrong variant. Returns the query with the `amp;`
- * prefixes removed (an explicit key wins over its escaped twin), or
- * `undefined` when there is nothing to fix.
+ * prefixes removed, or `undefined` when there is nothing to fix.
+ *
+ * Keys are compared the way Koa will read them (percent-decoded), and an
+ * unescaped pair never adds a second value for a key: a repeated key parses as
+ * an array, which parseOptions rejects. An explicit key wins over its escaped
+ * twins; among escaped twins alone, the first one wins.
  */
 export function unescapeHtmlQuery(querystring: string): string | undefined {
     if (!querystring.includes('amp;')) {
@@ -161,16 +165,30 @@ export function unescapeHtmlQuery(querystring: string): string | undefined {
     }
     const pairs = querystring.split('&').filter((pair) => pair !== '').map((pair) => {
         const unescaped = pair.replace(/^(amp;)+/, '')
-        return {pair: unescaped, key: unescaped.split('=')[0], escaped: unescaped !== pair}
+        return {pair: unescaped, key: decodeQueryKey(unescaped.split('=')[0]), escaped: unescaped !== pair}
     })
     if (!pairs.some((p) => p.escaped)) {
         return undefined
     }
-    const explicit = new Set(pairs.filter((p) => !p.escaped).map((p) => p.key))
+    const taken = new Set(pairs.filter((p) => !p.escaped).map((p) => p.key))
     return pairs
-        .filter((p) => p.key !== '' && !(p.escaped && explicit.has(p.key)))
+        .filter((p) => {
+            if (p.key === '') { return false }
+            if (!p.escaped) { return true }
+            if (taken.has(p.key)) { return false }
+            taken.add(p.key)
+            return true
+        })
         .map((p) => p.pair)
         .join('&')
+}
+
+function decodeQueryKey(raw: string): string {
+    try {
+        return decodeURIComponent(raw.replace(/\+/g, ' '))
+    } catch (_e) {
+        return raw
+    }
 }
 
 function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): ProxyOptions {

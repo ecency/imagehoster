@@ -869,6 +869,24 @@ describe('proxy', function() {
             assert.equal(res.headers['location'], `/p/${ b58 }?format=match&width=320`)
         })
 
+        // The redirect target must parse: Koa turns a repeated key into an
+        // array, which parseOptions rejects, so each decoded key survives once.
+        it('keeps one value when the same option is escaped twice', async function() {
+            const res = await get('amp;mode=fit&amp;amp;mode=cover&width=100')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?mode=fit&width=100`)
+            const target = await needle('get', `http://localhost:${ port }${ res.headers['location'] }`, {follow_max: 0})
+            assert.equal(target.statusCode, 200, 'the redirect target must be a valid request')
+        })
+
+        it('lets a percent-encoded explicit key win over its escaped twin', async function() {
+            const res = await get('amp;mode=fit&mo%64e=cover&width=100')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?mo%64e=cover&width=100`)
+            const target = await needle('get', `http://localhost:${ port }${ res.headers['location'] }`, {follow_max: 0})
+            assert.equal(target.statusCode, 200, 'the redirect target must be a valid request')
+        })
+
         it('does not redirect a canonical query', async function() {
             this.slow(1000)
             const res = await get('format=match&mode=fit&width=320')
