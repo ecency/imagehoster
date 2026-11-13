@@ -1298,6 +1298,16 @@ describe('expandPurgeUrls', function() {
         assert.ok(p.includes(`${legacy}/p/tok?format=match&mode=fit&_acc=0`))
     })
 
+    it('rebuilds every group from a URL that already carries the tag (an invalidate through the CDN)', function() {
+        const out = expandPurgeUrls([`${primary}/u/alice/avatar/small?&_acc=webp`, `${primary}/p/tok?format=match&_acc=0`])
+        for (const tag of ['avif', 'webp', '0']) {
+            assert.ok(out.includes(`${legacy}/u/alice/avatar/small?&_acc=${tag}`), tag)
+            assert.ok(out.includes(`${primary}/p/tok?format=match&_acc=${tag}`), tag)
+        }
+        assert.ok(out.includes(`${primary}/u/alice/avatar/small`))
+        assert.ok(!out.some((u) => /_acc=[^&]*&_acc=/.test(u)), 'never a doubled tag')
+    })
+
     it('leaves explicit-format proxy URLs and other paths untagged', function() {
         assert.equal(expandPurgeUrls(`${primary}/p/tok?format=webp&width=100`).length, INTERNAL_SERVICE_ORIGINS.length)
         assert.equal(expandPurgeUrls(`${primary}/DQmHash/name.png`).length, INTERNAL_SERVICE_ORIGINS.length)

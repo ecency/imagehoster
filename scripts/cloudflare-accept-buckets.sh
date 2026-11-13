@@ -96,7 +96,7 @@ if [ "$MODE" = rollback ]; then
   RULES="$OTHERS"
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
-  BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
+  BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (len(http.request.uri.args[\"format\"]) == 1 and http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
   AVIF='lower(http.request.headers["accept"][0]) contains "image/avif"'
   WEBP='lower(http.request.headers["accept"][0]) contains "image/webp"'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[

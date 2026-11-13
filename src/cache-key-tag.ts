@@ -16,7 +16,7 @@
 import config from 'config'
 
 import { KoaContext } from './common'
-import { CACHE_KEY_TAG, isNegotiatedPath, supportsAvif, supportsWebP } from './utils'
+import { CACHE_KEY_TAG, isNegotiatedPath, supportsAvif, supportsWebP, untaggedSearch } from './utils'
 import { hasEdgeToken } from './variant-guard'
 
 const EDGE_TOKEN = config.has('variant_guard_edge_token') ? String(config.get('variant_guard_edge_token') || '') : ''
@@ -33,14 +33,7 @@ export function acceptBucket(acceptHeader: string): 'avif' | 'webp' | '0' {
 /** Remove the tag from a redirect target, leaving the rest of the query as written. */
 export function stripCacheKeyTag(location: string): string {
     const q = location.indexOf('?')
-    if (q < 0) { return location }
-    const kept = location.slice(q + 1).split('&').filter((pair) => {
-        const key = pair.split('=', 1)[0]
-        let decoded = key
-        try { decoded = decodeURIComponent(key) } catch { /* keep the raw key */ }
-        return decoded !== CACHE_KEY_TAG
-    })
-    return location.slice(0, q) + (kept.length ? '?' + kept.join('&') : '')
+    return q < 0 ? location : location.slice(0, q) + untaggedSearch(location.slice(q))
 }
 
 /**

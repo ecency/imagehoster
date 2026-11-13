@@ -528,6 +528,18 @@ export function isNegotiatedPath(pathname: string, format: unknown): boolean {
     return !(typeof format === 'string' && EXPLICIT_PROXY_FORMATS.has(format))
 }
 
+/** `search` (with its `?`) minus every `_acc` pair, the rest exactly as written; '' when nothing is left. */
+export function untaggedSearch(search: string): string {
+    if (!search) { return '' }
+    const kept = search.replace(/^\?/, '').split('&').filter((pair) => {
+        const key = pair.split('=', 1)[0]
+        let decoded = key
+        try { decoded = decodeURIComponent(key) } catch { /* keep the raw key */ }
+        return decoded !== CACHE_KEY_TAG
+    })
+    return kept.some((pair) => pair !== '') ? '?' + kept.filter((pair) => pair !== '').join('&') : ''
+}
+
 export function expandPurgeUrls(value: string | string[]): string[] {
     const input = Array.isArray(value) ? value : [value]
     const out = new Set<string>()
@@ -545,13 +557,16 @@ export function expandPurgeUrls(value: string | string[]): string[] {
         }
         const formats = parsed.searchParams.getAll('format')
         const negotiated = isNegotiatedPath(parsed.pathname, formats.length === 1 ? formats[0] : formats.length ? formats : undefined)
+        // A URL taken from a request that came through the CDN already carries its
+        // group's tag; rebuild every group from the query the client sent
+        const search = negotiated ? untaggedSearch(parsed.search) : parsed.search
         for (const origin of INTERNAL_SERVICE_ORIGINS) {
-            const url = new URL(`${parsed.pathname}${parsed.search}`, origin).toString()
+            const url = new URL(`${parsed.pathname}${search}`, origin).toString()
             out.add(url)
             if (negotiated) {
                 // What the CDN actually keys a negotiated request on
                 for (const tag of CACHE_KEY_TAG_VALUES) {
-                    out.add(`${url}${parsed.search ? '' : '?'}&${CACHE_KEY_TAG}=${tag}`)
+                    out.add(`${url}${search ? '' : '?'}&${CACHE_KEY_TAG}=${tag}`)
                 }
             }
         }
