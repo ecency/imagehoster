@@ -147,6 +147,53 @@ const fromFetch = (result: {res: NeedleResponse, isFallback: boolean}): ServedIm
 // (e.g. https://steemitimages.com/500x0/https://img.esteem.ws/abc.jpg)
 const ESTEEM_WRAP_PREFIX = /^https?:\/\/(?:steemitimages\.com|images\.hive\.blog)\/\d+x\d+\//
 
+/**
+ * A src attribute copied out of HTML without decoding gives
+ * `?format=match&amp;mode=fit&amp;width=320`, whose keys parse as `amp;mode`
+ * and `amp;width`: the options are silently dropped and the request becomes
+ * its own cache key for the wrong variant. Returns the query with the `amp;`
+ * prefixes removed, or `undefined` when there is nothing to fix.
+ *
+ * Keys are read the way Koa will read them (percent-decoded), so an encoded
+ * prefix such as `amp%3Bmode` is caught too. An escaped pair never adds a
+ * second value for a key: a repeated key parses as an array, which
+ * parseOptions rejects. An explicit key wins over its escaped twins; among
+ * escaped twins alone, the first one wins.
+ */
+export function unescapeHtmlQuery(querystring: string): string | undefined {
+    const pairs = querystring.split('&').filter((pair) => pair !== '').map((pair) => {
+        const eq = pair.indexOf('=')
+        const rawKey = eq < 0 ? pair : pair.slice(0, eq)
+        const decoded = decodeQueryKey(rawKey)
+        const key = decoded.replace(/^(amp;)+/, '')
+        const escaped = key !== decoded
+        // An unescaped pair keeps its original spelling; a repaired one is re-encoded.
+        return {pair: escaped ? encodeURIComponent(key) + pair.slice(rawKey.length) : pair, key, escaped}
+    })
+    if (!pairs.some((p) => p.escaped)) {
+        return undefined
+    }
+    const taken = new Set(pairs.filter((p) => !p.escaped).map((p) => p.key))
+    return pairs
+        .filter((p) => {
+            if (p.key === '') { return false }
+            if (!p.escaped) { return true }
+            if (taken.has(p.key)) { return false }
+            taken.add(p.key)
+            return true
+        })
+        .map((p) => p.pair)
+        .join('&')
+}
+
+function decodeQueryKey(raw: string): string {
+    try {
+        return decodeURIComponent(raw.replace(/\+/g, ' '))
+    } catch (_e) {
+        return raw
+    }
+}
+
 function parseOptions(query: {[key: string]: any}, acceptHeader: string = ''): ProxyOptions {
     const width = Number.parseInt(query['width']) || undefined
     const height = Number.parseInt(query['height']) || undefined
@@ -266,6 +313,16 @@ async function handleProxy(ctx: KoaContext) {
 
     APIError.assert(ctx.method === 'GET', APIError.Code.InvalidMethod)
     APIError.assertParams(ctx.params, ['url'])
+
+    const canonicalQuery = unescapeHtmlQuery(ctx.querystring)
+    if (canonicalQuery !== undefined) {
+        // Cheap to answer, so cache it long enough to absorb repeats but not
+        // immutably: a wrong mapping must stay correctable.
+        ctx.status = 301
+        ctx.set('Cache-Control', 'public,max-age=2592000')
+        ctx.redirect(canonicalQuery ? `${ ctx.path }?${ canonicalQuery }` : ctx.path)
+        return
+    }
 
     const acceptHeader = ctx.get('accept') || ''
     const isLegacy = ctx.query['_src'] === 'legacy'

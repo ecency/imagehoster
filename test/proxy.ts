@@ -841,6 +841,66 @@ describe('proxy', function() {
         })
     })
 
+    describe('HTML-escaped query strings', function() {
+        // Clients that copy a src attribute out of HTML without decoding it ask
+        // for `?format=match&amp;mode=fit&amp;width=320`, which parses as
+        // `amp;mode` / `amp;width` and would render the wrong variant under its
+        // own CDN cache key. These are answered with a cacheable redirect to the
+        // canonical URL instead.
+        const b58 = base58Enc(`http://localhost:${ port+1 }/test.jpg`)
+        const get = (query: string) => needle('get', `http://localhost:${ port }/p/${ b58 }?${ query }`, {follow_max: 0})
+
+        it('redirects &amp; separated options to the canonical URL', async function() {
+            const res = await get('format=match&amp;mode=fit&amp;width=320')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?format=match&mode=fit&width=320`)
+            assert.equal(res.headers['cache-control'], 'public,max-age=2592000', 'cacheable, but not immutable')
+        })
+
+        it('keeps the explicit key over its amp; twin', async function() {
+            const res = await get('amp;mode=fit&mode=cover&width=100')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?mode=cover&width=100`)
+        })
+
+        it('strips a double-escaped prefix', async function() {
+            const res = await get('format=match&amp;amp;width=320')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?format=match&width=320`)
+        })
+
+        // Koa decodes keys, so a percent-encoded prefix is the same bug.
+        it('strips a percent-encoded prefix', async function() {
+            const res = await get('format=match&amp%3Bmode=fit&%61mp%3bwidth=320')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?format=match&mode=fit&width=320`)
+        })
+
+        // The redirect target must parse: Koa turns a repeated key into an
+        // array, which parseOptions rejects, so each decoded key survives once.
+        it('keeps one value when the same option is escaped twice', async function() {
+            const res = await get('amp;mode=fit&amp;amp;mode=cover&width=100')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?mode=fit&width=100`)
+            const target = await needle('get', `http://localhost:${ port }${ res.headers['location'] }`, {follow_max: 0})
+            assert.equal(target.statusCode, 200, 'the redirect target must be a valid request')
+        })
+
+        it('lets a percent-encoded explicit key win over its escaped twin', async function() {
+            const res = await get('amp;mode=fit&mo%64e=cover&width=100')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?mo%64e=cover&width=100`)
+            const target = await needle('get', `http://localhost:${ port }${ res.headers['location'] }`, {follow_max: 0})
+            assert.equal(target.statusCode, 200, 'the redirect target must be a valid request')
+        })
+
+        it('does not redirect a canonical query', async function() {
+            this.slow(1000)
+            const res = await get('format=match&mode=fit&width=320')
+            assert.equal(res.statusCode, 200)
+        })
+    })
+
     describe('original caching cap', function() {
         const cacheable = {image: realImage(Buffer.alloc(0)), usesUploadStore: false, isLegacy: false}
         const MAX_IMAGE_SIZE = Number.parseInt(config.get('max_image_size'))
