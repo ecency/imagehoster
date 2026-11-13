@@ -869,6 +869,13 @@ describe('proxy', function() {
             assert.equal(res.headers['location'], `/p/${ b58 }?format=match&width=320`)
         })
 
+        // Koa decodes keys, so a percent-encoded prefix is the same bug.
+        it('strips a percent-encoded prefix', async function() {
+            const res = await get('format=match&amp%3Bmode=fit&%61mp%3bwidth=320')
+            assert.equal(res.statusCode, 301)
+            assert.equal(res.headers['location'], `/p/${ b58 }?format=match&mode=fit&width=320`)
+        })
+
         // The redirect target must parse: Koa turns a repeated key into an
         // array, which parseOptions rejects, so each decoded key survives once.
         it('keeps one value when the same option is escaped twice', async function() {

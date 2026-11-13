@@ -154,18 +154,21 @@ const ESTEEM_WRAP_PREFIX = /^https?:\/\/(?:steemitimages\.com|images\.hive\.blog
  * its own cache key for the wrong variant. Returns the query with the `amp;`
  * prefixes removed, or `undefined` when there is nothing to fix.
  *
- * Keys are compared the way Koa will read them (percent-decoded), and an
- * unescaped pair never adds a second value for a key: a repeated key parses as
- * an array, which parseOptions rejects. An explicit key wins over its escaped
- * twins; among escaped twins alone, the first one wins.
+ * Keys are read the way Koa will read them (percent-decoded), so an encoded
+ * prefix such as `amp%3Bmode` is caught too. An escaped pair never adds a
+ * second value for a key: a repeated key parses as an array, which
+ * parseOptions rejects. An explicit key wins over its escaped twins; among
+ * escaped twins alone, the first one wins.
  */
 export function unescapeHtmlQuery(querystring: string): string | undefined {
-    if (!querystring.includes('amp;')) {
-        return undefined
-    }
     const pairs = querystring.split('&').filter((pair) => pair !== '').map((pair) => {
-        const unescaped = pair.replace(/^(amp;)+/, '')
-        return {pair: unescaped, key: decodeQueryKey(unescaped.split('=')[0]), escaped: unescaped !== pair}
+        const eq = pair.indexOf('=')
+        const rawKey = eq < 0 ? pair : pair.slice(0, eq)
+        const decoded = decodeQueryKey(rawKey)
+        const key = decoded.replace(/^(amp;)+/, '')
+        const escaped = key !== decoded
+        // An unescaped pair keeps its original spelling; a repaired one is re-encoded.
+        return {pair: escaped ? encodeURIComponent(key) + pair.slice(rawKey.length) : pair, key, escaped}
     })
     if (!pairs.some((p) => p.escaped)) {
         return undefined
