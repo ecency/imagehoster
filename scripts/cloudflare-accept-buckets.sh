@@ -65,6 +65,8 @@ verify() {
   # a percent-encoded format is still negotiated, so it must be tagged too
   check "encoded fmt" "$OLD" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/(png|jpeg) '
   check "encoded avif" "$AV" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/avif '
+  # a client naming AVIF only with parameters must never get the catch-all JPEG/PNG
+  check "param avif" "image/avif;q=0.5" "https://$HOST/p/$p?format=match&mode=fit&width=$((w + 2))" '^200 image/avif .*cc=no-store'
   local loc
   loc=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/p/$p?format=match&amp;mode=fit&amp;width=$w")
   if [[ "$loc" =~ ^301\  && "$loc" != *_acc* ]]; then echo "  ok    amp form   : $loc"; else echo "  FAIL  amp form   : $loc (want a 301 without _acc)"; fails=$((fails+1)); fi
@@ -136,7 +138,12 @@ else
   # file a client that refused a type into the group that type is cached for.
   AVIF='(lower(http.request.headers["accept"][0]) == "image/avif" or starts_with(lower(http.request.headers["accept"][0]), "image/avif,") or lower(http.request.headers["accept"][0]) contains ",image/avif," or ends_with(lower(http.request.headers["accept"][0]), ",image/avif"))'
   WEBP='(lower(http.request.headers["accept"][0]) == "image/webp" or starts_with(lower(http.request.headers["accept"][0]), "image/webp,") or lower(http.request.headers["accept"][0]) contains ",image/webp," or ends_with(lower(http.request.headers["accept"][0]), ",image/webp"))'
-  MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[
+  # Mentions AVIF or WebP but neither as a bare item (parameters, spacing): the origin
+  # may still choose one, so such a client must not share the catch-all key, which
+  # caches source formats. `_acc=x` is never cacheable: the origin answers no-store to
+  # any tag that is not the request's own group, and it never computes `x`.
+  MENTIONS='(lower(http.request.headers["accept"][0]) contains "image/avif" or lower(http.request.headers["accept"][0]) contains "image/webp")'
+  MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg m "$MENTIONS" --arg t "$TAG" '[
     {action:"rewrite", enabled:true, description:($t+" Accept bucket avif for /p/ format=match + /u/"),
      expression:("(" + $b + ") and (" + $a + ")"),
      action_parameters:{uri:{query:{expression:"concat(http.request.uri.query, \"&_acc=avif\")"}}}},
@@ -144,8 +151,11 @@ else
      expression:("(" + $b + ") and not (" + $a + ") and (" + $w + ")"),
      action_parameters:{uri:{query:{expression:"concat(http.request.uri.query, \"&_acc=webp\")"}}}},
     {action:"rewrite", enabled:true, description:($t+" Accept bucket other for /p/ format=match + /u/"),
-     expression:("(" + $b + ") and not (" + $a + ") and not (" + $w + ")"),
-     action_parameters:{uri:{query:{expression:"concat(http.request.uri.query, \"&_acc=0\")"}}}}
+     expression:("(" + $b + ") and not (" + $a + ") and not (" + $w + ") and not (" + $m + ")"),
+     action_parameters:{uri:{query:{expression:"concat(http.request.uri.query, \"&_acc=0\")"}}}},
+    {action:"rewrite", enabled:true, description:($t+" Accept bucket unclassified (never cached) for /p/ format=match + /u/"),
+     expression:("(" + $b + ") and not (" + $a + ") and not (" + $w + ") and (" + $m + ")"),
+     action_parameters:{uri:{query:{expression:"concat(http.request.uri.query, \"&_acc=x\")"}}}}
   ]')
   RULES=$(jq -n --argjson m "$MINE" --argjson o "$OTHERS" '$m + $o')
 fi

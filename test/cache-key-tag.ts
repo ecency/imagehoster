@@ -74,19 +74,24 @@ describe('edge Accept groups (scripts/cloudflare-accept-buckets.sh)', function()
         const a = accept.toLowerCase()
         return a === type || a.startsWith(type + ',') || a.includes(',' + type + ',') || a.endsWith(',' + type)
     }
-    const edge = (a: string) => bare(a, 'image/avif') ? 'avif' : bare(a, 'image/webp') ? 'webp' : '0'
+    // `x`: mentions AVIF or WebP but neither as a bare item; never cacheable, the
+    // origin answers no-store to any tag that is not the request's own group
+    const mentions = (a: string) => /image\/(avif|webp)/.test(a.toLowerCase())
+    const edge = (a: string) => bare(a, 'image/avif') ? 'avif' : bare(a, 'image/webp') ? 'webp' : mentions(a) ? 'x' : '0'
 
     // A cache HIT never reaches the origin guard, so a client must accept whatever its
-    // group caches: AVIF for `avif`, WebP for `webp`. Landing lower than the origin
-    // would choose is fine (the origin answers no-store on the miss)
+    // group caches: AVIF for `avif`, WebP for `webp`, and for `0` the source formats
+    // the origin serves its own catch-all group, so only clients the origin also
+    // files there. `x` is never cached
     it('never files a client into a group whose cached format it does not accept', function() {
         for (const accept of [
             'ximage/avif,image/jpeg', 'image/jpeg,ximage/webp', 'image/avifx,image/jpeg',
             'image/avif;foo=bar;q=0,image/jpeg', 'image/avif;q=0,image/webp', 'image/webp;q=0,image/jpeg',
-            'image/avif;q=0.5,image/webp', 'image/jpeg, image/avif', 'IMAGE/AVIF,*/*', '*/*', '',
+            'image/avif;q=0.5,image/webp', 'image/avif;q=0.5', 'image/webp;q=0.9,image/jpeg', 'image/jpeg, image/avif', 'IMAGE/AVIF,*/*', '*/*', '',
+            'image/jpeg,image/png,image/*;q=0.8',
         ]) {
             const group = edge(accept)
-            const accepted = group === '0' || (group === 'avif' ? supportsAvif(accept) : supportsWebP(accept))
+            const accepted = group === 'x' || (group === '0' ? acceptBucket(accept) === '0' : group === 'avif' ? supportsAvif(accept) : supportsWebP(accept))
             assert.ok(accepted, `${accept}: filed under ${group}, which it does not accept`)
         }
     })

@@ -166,6 +166,7 @@ describe('proxy formats', function() {
         ['image/avif;q=0,image/webp,*/*', '&_acc=avif', 'an AVIF q=0 Accept the edge filed as avif'],
         [AVIF_ACCEPT, '&_acc=avif&_acc=avif', 'a repeated tag'],
         [AVIF_ACCEPT, '&_acc=AVIF', 'a tag outside the three values'],
+        ['image/avif;q=0.5', '&_acc=x', 'the edge\'s unclassified group, which is never cacheable'],
     ]) {
         it(`should answer no-store for ${why}`, async function() {
             this.slow(2000)
