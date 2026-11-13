@@ -195,7 +195,7 @@ Multi-stage Dockerfile with vips/heif/aom dependencies for image processing:
 
 ### Varnish
 VCL template at `config/varnish-user.vcl`.
-- Caches only /u/* (avatars/covers) and ?blur= URLs
+- Caches only /u/* (avatars/covers) and ?blur= URLs. Unlike Cloudflare, Varnish honours `Vary: Accept` itself, so it keeps one copy per Accept value
 - Passes proxy images and uploads through (cached by Cloudflare instead)
 - Fallback avatars detected by max-age=120, cached only 2 minutes. This is a header-level contract: the handlers still emit max-age=120 for every fallback render, so the VCL branch is unaffected by the fact that fallbacks are no longer written to the blob store
 - `BAN` with `X-Ban-User` and `X-Ban-Kind` (avatar|cover) drops every cached size, route, hostname and letter case of one user's image. It matches `obj.http.x-url`, which `vcl_backend_response` stores and `vcl_deliver` strips, so the ban lurker can retire it. Objects cached before that VCL have no `x-url`, so ban `^/u/` once after loading it. Only the `banners` ACL (the imagehoster container's Docker network, 172.18.0.0/16) may send it; loopback is excluded because public traffic arrives from nginx there
@@ -204,6 +204,8 @@ VCL template at `config/varnish-user.vcl`.
 ### Cloudflare
 - Page rule: `cache_everything` for the image domain
 - Tiered cache enabled, Polish off, sort query string on, strong ETags on
+- **Cloudflare ignores `Vary: Accept`**: it caches one body per URL. Without help, the first client to warm a negotiated URL (`/p/` with `format=match` or no format, and `/u/` avatars and covers) would fix its format for everyone, a large PNG for AVIF browsers or AVIF for clients that cannot decode it (#61). Three URL rewrites in the `http_request_transform` phase append a cache-key tag before the cache lookup: `&_acc=avif` (Accept names `image/avif`), `&_acc=webp` (names `image/webp` but not AVIF), `&_acc=0` (anything else). Explicit formats, `amp;` queries and already-tagged queries are skipped. The origin ignores `_acc` and keeps negotiating from Accept (`test/proxy-formats.ts` pins this), so never give the tag a meaning, and keep the bucket tests in step with `supportsAvif`/`supportsWebP`. `scripts/cloudflare-accept-buckets.sh apply|verify|rollback` manages the rules (CF_API_TOKEN + CF_ZONE_ID); it writes them first in the phase because a later rewrite of the query wins. Profile-change purges are prefix purges and the Varnish ban regex allows a query, so both still clear tagged avatar URLs
+- Residual: the `_acc=0` group mixes clients that name no image type (`*/*`, most bots) with ones that list only JPEG/PNG. For an AVIF *source* the origin answers them differently (passthrough vs JPEG/PNG), so the first of the two pins that URL's format in the group
 - After deploys: purge avatar prefix. As with Varnish, this no longer has to undo persisted fallbacks; it only clears edge copies, which expire on their own in 120s for fallback renders
 - A failed avatar/cover fetch no longer triggers the Cloudflare purge that accompanies a successful store write, so a transient upstream outage leaves the previously cached good avatar in place instead of replacing it with the default
 

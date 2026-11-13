@@ -132,6 +132,28 @@ describe('proxy formats', function() {
         assert.equal(meta.format, 'jpeg')
     })
 
+    // The CDN appends `_acc=avif|webp|0` to negotiated URLs so each Accept group gets
+    // its own cache entry (see "Cloudflare" in CLAUDE.md). The tag is only a cache
+    // key: the origin must keep negotiating from Accept and ignore it entirely, or a
+    // tagged and an untagged request would build different variants.
+    for (const accept of ['image/avif,image/webp,*/*', 'image/jpeg,image/png,image/*;q=0.8']) {
+        it(`should ignore the CDN's _acc cache-key tag (Accept: ${ accept })`, async function() {
+            this.slow(2000)
+            this.timeout(10000)
+            const imageUrl = base58Enc(`http://localhost:${imagePort}/acc-tag-test.jpg`)
+            const base = `http://localhost:${port}/p/${imageUrl}?format=match&mode=fit&width=90`
+            const headers = {accept}
+            const plain = await needle('get', base, null, {headers})
+            assert.equal(plain.statusCode, 200)
+            for (const tag of ['avif', 'webp', '0']) {
+                const tagged = await needle('get', `${base}&_acc=${tag}`, null, {headers})
+                assert.equal(tagged.statusCode, 200)
+                assert.equal(tagged.headers['content-type'], plain.headers['content-type'], `_acc=${tag}`)
+                assert.equal(tagged.headers.etag, plain.headers.etag, `_acc=${tag} is the same variant`)
+            }
+        })
+    }
+
     it('should convert an AVIF source for a client that did not accept AVIF', async function() {
         this.slow(2000)
         this.timeout(10000)

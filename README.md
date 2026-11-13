@@ -323,7 +323,7 @@ curl -H "Accept: image/avif,image/webp,*/*" https://images.ecency.com/u/username
 curl https://images.ecency.com/u/username/avatar
 ```
 
-Response includes `Vary: Accept` header for proper CDN caching.
+Responses carry `Vary: Accept`. Caches that honour it (Varnish, browsers) keep one copy per format. Cloudflare does not: it stores one body per URL, so the CDN in front of this service has URL rewrites that add a cache-key tag per Accept group (`_acc=avif`, `_acc=webp`, `_acc=0`) to negotiated `/p/` and `/u/` requests. The service ignores the tag. If you run it behind Cloudflare yourself, see `scripts/cloudflare-accept-buckets.sh`.
 
 ### HDR AVIF Support
 
