@@ -77,7 +77,38 @@ verify() {
 }
 
 [ "$MODE" = verify ] && { verify; exit $?; }
-[ "$MODE" = apply ] || [ "$MODE" = rollback ] || { echo "usage: $0 apply|verify|rollback"; exit 2; }
+# purge <url>...: clear every Accept group's CDN key for each URL, on every host.
+# The edge keys a negotiated request on its query plus `&_acc=<group>` (`?&_acc=`
+# for an empty query), so a plain URL purge would miss them. Use this for a URL
+# whose cached copy is wrong; a /p/ prefix purge would empty the whole image cache.
+purge() {
+  : "${CF_API_TOKEN:?set CF_API_TOKEN}" "${CF_ZONE_ID:?set CF_ZONE_ID}"
+  local files=() u path query h pair kept g
+  for u in "$@"; do
+    u=${u#https://}; u=${u#http://}; u=${u#*/}
+    path="/${u%%\?*}"; query=""; [[ "$u" == *\?* ]] && query=${u#*\?}
+    kept=""
+    IFS='&' read -ra pairs <<< "$query"
+    for pair in "${pairs[@]}"; do [ -z "$pair" ] || [ "${pair%%=*}" = _acc ] || kept="${kept:+$kept&}$pair"; done
+    for h in $HOSTS; do
+      files+=("https://$h$path${kept:+?$kept}")
+      for g in avif webp 0; do
+        if [ -n "$kept" ]; then files+=("https://$h$path?$kept&_acc=$g"); else files+=("https://$h$path?&_acc=$g"); fi
+      done
+    done
+  done
+  local i rc=0
+  for ((i = 0; i < ${#files[@]}; i += 30)); do
+    local R
+    R=$(jq -n '{files: $ARGS.positional}' --args "${files[@]:i:30}" | curl -s -X POST -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" -d @-)
+    echo "purge $(( ${#files[@]} - i < 30 ? ${#files[@]} - i : 30 )) URLs: $(echo "$R" | jq -c '{success, errors}')"
+    [ "$(echo "$R" | jq -r .success)" = true ] || rc=1
+  done
+  printf '  %s\n' "${files[@]}"
+  return $rc
+}
+[ "$MODE" = purge ] && { shift; [ $# -gt 0 ] || { echo "usage: $0 purge <url>..."; exit 2; }; purge "$@"; exit $?; }
+[ "$MODE" = apply ] || [ "$MODE" = rollback ] || { echo "usage: $0 apply|verify|rollback|purge <url>..."; exit 2; }
 : "${CF_API_TOKEN:?set CF_API_TOKEN}" "${CF_ZONE_ID:?set CF_ZONE_ID}"
 EP="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_transform/entrypoint"
 H=(-H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json')
@@ -97,12 +128,13 @@ if [ "$MODE" = rollback ]; then
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
   BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (len(http.request.uri.args[\"format\"]) == 1 and http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
-  # an explicit q=0 refuses the type; also catches q=0.5, which then only disagrees
-  # with the origin and is answered no-store, never served the wrong format
-  AVIF='(lower(http.request.headers["accept"][0]) contains "image/avif" and not lower(http.request.headers["accept"][0]) contains "image/avif;q=0" and not lower(http.request.headers["accept"][0]) contains "image/avif; q=0")'
-  # an explicit q=0 refuses the type; also catches q=0.5, which then only disagrees
-  # with the origin and is answered no-store, never served the wrong format
-  WEBP='(lower(http.request.headers["accept"][0]) contains "image/webp" and not lower(http.request.headers["accept"][0]) contains "image/webp;q=0" and not lower(http.request.headers["accept"][0]) contains "image/webp; q=0")'
+  # A type joins its group only when written bare (followed by a comma, or last).
+  # Any parameter (q=0 in whatever spelling, q=0.5, extensions) or odd spacing
+  # drops the client to a lower group, where at worst the origin disagrees and
+  # answers no-store. A cache HIT never reaches the origin, so the edge must never
+  # file a client that refused a type into the group that type is cached for.
+  AVIF='(lower(http.request.headers["accept"][0]) contains "image/avif," or ends_with(lower(http.request.headers["accept"][0]), "image/avif"))'
+  WEBP='(lower(http.request.headers["accept"][0]) contains "image/webp," or ends_with(lower(http.request.headers["accept"][0]), "image/webp"))'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[
     {action:"rewrite", enabled:true, description:($t+" Accept bucket avif for /p/ format=match + /u/"),
      expression:("(" + $b + ") and (" + $a + ")"),
