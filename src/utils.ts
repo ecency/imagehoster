@@ -3,7 +3,7 @@
 import { AbstractBlobStore, BlobKey } from 'abstract-blob-store'
 import config from 'config'
 import { createHash } from 'crypto'
-import * as fileType from 'file-type'
+import { fileTypeFromBuffer } from 'file-type'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as multihash from 'multihashes'
@@ -128,7 +128,7 @@ export function readStream(stream: NodeJS.ReadableStream, signal?: AbortSignal) 
 }
 
 export async function mimeMagic(data: Buffer): Promise<string> {
-    const result = await fileType.fromBuffer(data)
+    const result = await fileTypeFromBuffer(data)
     if (result) {
         return result.mime
     }

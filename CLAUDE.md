@@ -240,7 +240,7 @@ Note: `--exit` flag kept on Mocha as a safety net against any hanging sockets. A
 - TypeScript 5.7 with `noImplicitAny: false`
 - Compiled output in `lib/`, version.js auto-generated with git hash + timestamp
 - Redis v4 in native mode (no legacyMode), fail-closed on disconnect
-- ESM-only packages (file-type, multihashes, stream-head) kept on CJS-compatible versions
+- ESM-only packages: `file-type` (>= 21.3.1, for the GHSA-5v7r-6r5c-r473 fix) is ESM-only and is loaded through `require()` of ESM (Node >= 20.19, production runs 24; types come from `src/types/file-type`). `multihashes` and `stream-head` stay on CJS-compatible versions
 
 ### Variant-walk guard
 `src/variant-guard.ts`, called in `proxyHandler` after the stored-variant lookup misses, so a stored variant is never counted or limited.
