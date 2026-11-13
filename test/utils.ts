@@ -1247,7 +1247,8 @@ describe('expandPurgeUrls', function() {
 
     it('fans a service URL out across every service origin', function() {
         const out = expandPurgeUrls(`${primary}/p/sometoken`)
-        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length)
+        // the URL itself plus its three Accept-group CDN keys, per origin
+        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length * 4)
         assert.ok(out.includes(`${primary}/p/sometoken`))
         assert.ok(out.includes(`${legacy}/p/sometoken`))
     })
@@ -1266,7 +1267,7 @@ describe('expandPurgeUrls', function() {
 
     it('accepts an array and deduplicates the result', function() {
         const out = expandPurgeUrls([`${primary}/p/tok`, `${legacy}/p/tok`, `${primary}/p/tok`])
-        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length)
+        assert.equal(out.length, INTERNAL_SERVICE_ORIGINS.length * 4)
     })
 
     it('never rewrites a URL belonging to some other host onto ours', function() {
@@ -1280,6 +1281,36 @@ describe('expandPurgeUrls', function() {
 
     it('returns an empty list for empty input', function() {
         assert.deepEqual(expandPurgeUrls([]), [])
+    })
+
+    // The CDN keys negotiated requests on the query its rewrite produced: the
+    // original query plus `&_acc=<group>`, so `?&_acc=avif` when there was none.
+    // A purge naming only the untagged URL would clear nothing.
+    it('names every Accept group\'s CDN key for a negotiated URL', function() {
+        const out = expandPurgeUrls(`${primary}/u/alice/avatar/small`)
+        for (const origin of [primary, legacy]) {
+            assert.ok(out.includes(`${origin}/u/alice/avatar/small`))
+            for (const tag of ['avif', 'webp', '0']) {
+                assert.ok(out.includes(`${origin}/u/alice/avatar/small?&_acc=${tag}`), `${origin} ${tag}`)
+            }
+        }
+        const p = expandPurgeUrls(`${primary}/p/tok?format=match&mode=fit`)
+        assert.ok(p.includes(`${legacy}/p/tok?format=match&mode=fit&_acc=0`))
+    })
+
+    it('rebuilds every group from a URL that already carries the tag (an invalidate through the CDN)', function() {
+        const out = expandPurgeUrls([`${primary}/u/alice/avatar/small?&_acc=webp`, `${primary}/p/tok?format=match&_acc=0`])
+        for (const tag of ['avif', 'webp', '0']) {
+            assert.ok(out.includes(`${legacy}/u/alice/avatar/small?&_acc=${tag}`), tag)
+            assert.ok(out.includes(`${primary}/p/tok?format=match&_acc=${tag}`), tag)
+        }
+        assert.ok(out.includes(`${primary}/u/alice/avatar/small`))
+        assert.ok(!out.some((u) => /_acc=[^&]*&_acc=/.test(u)), 'never a doubled tag')
+    })
+
+    it('leaves explicit-format proxy URLs and other paths untagged', function() {
+        assert.equal(expandPurgeUrls(`${primary}/p/tok?format=webp&width=100`).length, INTERNAL_SERVICE_ORIGINS.length)
+        assert.equal(expandPurgeUrls(`${primary}/DQmHash/name.png`).length, INTERNAL_SERVICE_ORIGINS.length)
     })
 })
 

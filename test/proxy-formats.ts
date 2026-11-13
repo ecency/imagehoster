@@ -132,6 +132,83 @@ describe('proxy formats', function() {
         assert.equal(meta.format, 'jpeg')
     })
 
+    // The CDN appends `_acc=avif|webp|0` to negotiated URLs so each Accept group gets
+    // its own cache entry (see "Cloudflare" in CLAUDE.md). The tag never changes what
+    // the origin renders, and a tag that disagrees with the client's own Accept group
+    // is answered `no-store`: otherwise a client could warm the key another group is
+    // rewritten to (`?_acc=0` with an AVIF Accept caches AVIF for JPEG-only clients).
+    const AVIF_ACCEPT = 'image/avif,image/webp,*/*'
+    const OLD_ACCEPT = 'image/jpeg,image/png,image/*;q=0.8'
+    const tagged = async (query: string, accept: string) => {
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/acc-tag-test.jpg`)
+        return needle('get', `http://localhost:${port}/p/${imageUrl}?format=match&mode=fit&width=90${query}`, null, {headers: {accept}})
+    }
+
+    for (const [accept, tag] of [[AVIF_ACCEPT, 'avif'], ['image/webp,*/*', 'webp'], [OLD_ACCEPT, '0']]) {
+        it(`should cache a matching _acc=${tag} tag like the untagged request`, async function() {
+            this.slow(2000)
+            this.timeout(10000)
+            const plain = await tagged('', accept)
+            const res = await tagged(`&_acc=${tag}`, accept)
+            assert.equal(res.statusCode, 200)
+            assert.equal(res.headers['content-type'], plain.headers['content-type'])
+            assert.equal(res.headers.etag, plain.headers.etag, 'the same variant')
+            assert.equal(res.headers['cache-control'], plain.headers['cache-control'])
+            assert.match(String(res.headers['cache-control']), /immutable/)
+        })
+    }
+
+    for (const [accept, query, why] of [
+        [OLD_ACCEPT, '&_acc=avif', 'a JPEG-only client claiming the AVIF group'],
+        [AVIF_ACCEPT, '&_acc=0', 'an AVIF client claiming the catch-all group'],
+        [AVIF_ACCEPT, '&_acc=webp', 'an AVIF client claiming the WebP group'],
+        ['IMAGE/AVIF,*/*', '&_acc=0', 'an upper-case Accept the edge filed as other'],
+        ['image/avif;q=0,image/webp,*/*', '&_acc=avif', 'an AVIF q=0 Accept the edge filed as avif'],
+        [AVIF_ACCEPT, '&_acc=avif&_acc=avif', 'a repeated tag'],
+        [AVIF_ACCEPT, '&_acc=AVIF', 'a tag outside the three values'],
+        ['image/avif;q=0.5', '&_acc=x', 'the edge\'s unclassified group, which is never cacheable'],
+    ]) {
+        it(`should answer no-store for ${why}`, async function() {
+            this.slow(2000)
+            this.timeout(10000)
+            const plain = await tagged('', accept)
+            const res = await tagged(query, accept)
+            assert.equal(res.statusCode, 200)
+            assert.equal(res.headers['content-type'], plain.headers['content-type'], 'still negotiated from Accept')
+            assert.equal(res.headers['cache-control'], 'no-store')
+        })
+    }
+
+    // `_acc=0` holds both clients that name no image type (`*/*`, most bots) and
+    // ones that list only JPEG/PNG. For an AVIF source the first get the AVIF passed
+    // through and the second a JPEG, so an AVIF body must never be cached there.
+    it('should not let the catch-all group cache an AVIF source passed through to */*', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        serveFile = avifFile
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/avif-catch-all.avif`)
+        const url = `http://localhost:${port}/p/${imageUrl}?format=match&mode=fit&width=100&_acc=0`
+        const bot = await needle('get', url, null, {headers: {accept: '*/*'}})
+        assert.equal(bot.statusCode, 200)
+        assert.equal(bot.headers['content-type'], 'image/avif')
+        assert.equal(bot.headers['cache-control'], 'no-store')
+        const old = await needle('get', url, null, {headers: {accept: OLD_ACCEPT}})
+        assert.equal(old.statusCode, 200)
+        assert.equal(old.headers['content-type'], 'image/jpeg')
+        assert.match(String(old.headers['cache-control']), /immutable/, 'what every client in the group can decode stays cacheable')
+    })
+
+    it('should leave an explicit format alone whatever the tag says', async function() {
+        this.slow(2000)
+        this.timeout(10000)
+        const imageUrl = base58Enc(`http://localhost:${imagePort}/acc-tag-test.jpg`)
+        const res = await needle('get', `http://localhost:${port}/p/${imageUrl}?format=webp&mode=fit&width=90&_acc=0`,
+            null, {headers: {accept: AVIF_ACCEPT}})
+        assert.equal(res.statusCode, 200)
+        assert.equal(res.headers['content-type'], 'image/webp')
+        assert.match(String(res.headers['cache-control']), /immutable/)
+    })
+
     it('should convert an AVIF source for a client that did not accept AVIF', async function() {
         this.slow(2000)
         this.timeout(10000)

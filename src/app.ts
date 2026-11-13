@@ -15,6 +15,7 @@ import {startProfileWatcher} from './profile-change'
 import {routes} from './routes'
 import {encodeBudget, RESERVED_POOL_SLOTS} from './encode-limit'
 import {getSharpConcurrency, parseBool} from './utils'
+import {cacheKeyTagGuard} from './cache-key-tag'
 
 export const app = new Koa()
 export const version = require('./version')
@@ -58,6 +59,7 @@ app.use(async (ctx, next) => {
 app.use(cors({origin: '*',
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']}))
+app.use(cacheKeyTagGuard as any)
 app.use(routes)
 app.use((_ctx: Koa.Context) => {
     throw new APIError({code: APIError.Code.NotFound})
