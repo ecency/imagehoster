@@ -239,38 +239,35 @@ describe('proxy', function() {
         it('serves the original as a passthrough when the render fails, with its own ETag and no store write', async function() {
             this.slow(3000)
             this.timeout(15000)
-            // A HEIC parses (container metadata) but its pixels need libde265, which
-            // the stock development libvips lacks, so the render fails and the
-            // original bytes are handed through. Inside the production image the
-            // decode succeeds and this scenario does not arise; skip there.
-            const heic = fs.readFileSync(path.resolve(__dirname, 'test.heic'))
-            let decodes = true
-            try { await sharp(heic).resize(64).jpeg().toBuffer() } catch (_e) { decodes = false }
-            if (decodes) { this.skip() }
-
-            const heicServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/heic'}); res.end(heic) })
-            await new Promise<void>((resolve) => heicServer.listen(0, 'localhost', () => resolve()))
-            const heicPort = (heicServer.address() as any).port
-            const source = `http://localhost:${ heicPort }/photo.heic`
-            // blur=1 keeps the request on the Sharp pipeline: this fixture reports two
-            // pages (primary plus auxiliary image) and the handler would otherwise take
-            // the animated-passthrough branch before any decode is attempted
-            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit&blur=1`
+            // test.png with its deflate stream scrambled (chunk CRCs recomputed): the
+            // header parses, so metadata succeeds and the request stays on the Sharp
+            // pipeline as a single-page image, but the pixels cannot decode in any
+            // libvips build, so the render fails and the original bytes are handed
+            // through. No blur: a failed blur render answers a transparent pixel instead.
+            const corrupt = fs.readFileSync(path.resolve(__dirname, 'test-corrupt-idat.png'))
+            const corruptServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/png'}); res.end(corrupt) })
+            await new Promise<void>((resolve) => corruptServer.listen(0, 'localhost', () => resolve()))
+            const corruptPort = (corruptServer.address() as any).port
+            const source = `http://localhost:${ corruptPort }/broken.png`
+            const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
+            // An Accept with neither AVIF nor WebP keeps format=match, the key below
+            const headers = {accept: 'image/png'}
             const key = getImageKey('U' + multihash.toB58String(multihash.encode(
-                createHash('sha1').update(source).digest(), 'sha1')), {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match, blur: true} as any)
+                createHash('sha1').update(source).digest(), 'sha1')), {width: 120, mode: ScalingMode.Fit, format: OutputFormat.Match} as any)
             try {
-                const res = await needle('get', url)
+                const res = await needle('get', url, null, {headers})
                 assert.equal(res.statusCode, 200)
-                assert.equal(res.body.length, heic.length, 'the original bytes are handed through')
+                assert.equal(res.body.length, corrupt.length, 'the original bytes are handed through')
+                assert.ok(Buffer.from(res.body).equals(corrupt), 'byte for byte')
                 assert.equal(res.headers['cache-control'], 'public,max-age=3600', 'a passthrough is fresh for an hour, not a year')
                 assert.equal(res.headers.etag, passthroughEtag(key))
                 assert.notEqual(res.headers.etag, realEtag(key, res.body, res.body.length), 'a passthrough must not wear the variant ETag')
                 assert.equal(await storeExists(proxyStore, key), false, 'a passthrough must not be stored as the variant')
                 // a client holding the passthrough is not told it is current
-                const inm = await needle('get', url, null, { headers: { 'if-none-match': res.headers.etag as string } })
+                const inm = await needle('get', url, null, { headers: { ...headers, 'if-none-match': res.headers.etag as string } })
                 assert.equal(inm.statusCode, 200)
             } finally {
-                await new Promise<void>((resolve) => heicServer.close(() => resolve()))
+                await new Promise<void>((resolve) => corruptServer.close(() => resolve()))
             }
         })
 
