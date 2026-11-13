@@ -172,8 +172,10 @@ Environment variables can override TOML values (see config module docs).
 
 ### Docker
 Multi-stage Dockerfile with vips/heif/aom dependencies for image processing:
-- Build stage: Node 20 with native build tools
-- Runtime stage: Node 20-slim with runtime libraries only (libvips42, libdav1d7)
+- Build stages: Node 24 on Debian trixie. libvips 8.18.7, libheif 1.23.7, libaom 3.11.0, libde265 1.0.15 and dav1d 1.5.0 are built from source (dav1d is built but nothing links it), and sharp's binding is compiled against that libvips
+- Runtime stage: Node 24 trixie-slim with the Debian libraries libvips loads. librsvg (SVG sources) is the one decoder taken from Debian; a build guard requires the trixie-security package with the CVE-2026-96889 fix
+- libvips 8.18 decodes PNG with libpng, not libspng. libpng renders damaged PNG data leniently (`failOnError: false`) where libspng refused it, so a corrupt PNG is rendered rather than passed through as original bytes
+- Any codec or base change alters encoder output, and `/p/` responses are cached immutable for a year. A/B the new image against the running one on a real corpus (content type, dimensions, fallbacks, PSNR) before deploying
 - Healthcheck: GET /healthcheck every 20s
 - Default port: 8800
 
