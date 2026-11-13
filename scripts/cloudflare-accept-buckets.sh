@@ -32,8 +32,21 @@ HOST=${HOSTS%% *}
 TAG="imagehoster #61:"
 
 verify() {
-  # base58 of a public Hive image URL
-  local p='EEEoA8oLaAxtTLvNAHVkbHyZnaYNv3ezuYaNDttUYueEDS1yWu159sLYw3QcuS3Y36r8dm8sEDqRML2XuhHhuEiMm3DWj264TfT6YuY2WUvDxUKvTZW7UFbPSVLUfHDygHN1WcDnNf7b4Ss9NV6P8'
+  # The origin's variant guard allows one client only a few rendered variants of one
+  # source image per 5 minutes, so each group of checks in each run uses its own
+  # source: a public image on an EXTERNAL host with a different `?v=` (base58 of the
+  # full URL). It must be external: for our own uploads the proxy keys the source by
+  # the upload hash and ignores the query, so every `?v=` would count as one image.
+  # Override with VERIFY_SOURCE (any external image URL that ignores its query).
+  local src=${VERIFY_SOURCE:-'https://files.peakd.com/file/peakd-hive/papilloncharity/23yTh8AaTZfPwahyLfaTXJYd2pPRaVhkqEP1NW6EVUy2JCrbwjiCZD6jmCQngKrNwABMZ.jpg'}
+  tok() { python3 -I -c "
+import sys
+A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+b=sys.argv[1].encode(); n=int.from_bytes(b,'big'); s=''
+while n: n,r=divmod(n,58); s=A[r]+s
+print(s)" "$src?v=$1"; }
+  local run=$RANDOM
+  local p; p=$(tok "$run-a")
   local w=$(( 41 + RANDOM % 200 ))
   local u="https://$HOST/p/$p?format=match&mode=fit&width=$w"
   local av="https://$HOST/u/${VERIFY_USER:-ecency}/avatar/medium"
@@ -48,7 +61,7 @@ verify() {
     if [[ "$got" =~ $4 ]]; then echo "  ok    $1: $got"
     # the origin's variant-walk guard redirects one client past a few variants of one
     # image in 5 minutes; that is not a rule failure, just rerun later
-    elif [[ "$got" == *vg=redirect* ]]; then echo "  skip  $1: variant guard redirect, rerun in 5 minutes"; skips=$((skips+1))
+    elif [[ "$got" == *vg=redirect* || "$got" == *vg=reject* ]]; then echo "  skip  $1: variant guard ($got), rerun in 5 minutes"; skips=$((skips+1))
     else echo "  FAIL  $1: $got (want /$4/)"; fails=$((fails+1)); fi
   }
   echo "proxy, fresh width $w"
@@ -59,14 +72,15 @@ verify() {
   check "explicit   " "$OLD" "https://$HOST/p/$p?format=avif&mode=fit&width=$w" '^200 image/avif '
   # a client-supplied tag for another group must never be cached (origin answers no-store).
   # On its own cold width: the checks above already warmed $u's groups at the edge.
-  local u2="https://$HOST/p/$p?format=match&mode=fit&width=$((w + 1))"
+  local u2="https://$HOST/p/$(tok "$run-b")?format=match&mode=fit&width=$w"
   check "poison try " "$AV" "$u2&_acc=0" '^200 image/avif .*cc=no-store'
   check "old after  " "$OLD" "$u2" '^200 image/(png|jpeg) '
   # a percent-encoded format is still negotiated, so it must be tagged too
-  check "encoded fmt" "$OLD" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/(png|jpeg) '
-  check "encoded avif" "$AV" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/avif '
+  local pc; pc=$(tok "$run-c")
+  check "encoded fmt" "$OLD" "https://$HOST/p/$pc?format=%6datch&mode=fit&width=$w" '^200 image/(png|jpeg) '
+  check "encoded avif" "$AV" "https://$HOST/p/$pc?format=%6datch&mode=fit&width=$w" '^200 image/avif '
   # a client naming AVIF only with parameters must never get the catch-all JPEG/PNG
-  check "param avif" "image/avif;q=0.5" "https://$HOST/p/$p?format=match&mode=fit&width=$((w + 2))" '^200 image/avif .*cc=no-store'
+  check "param avif" "image/avif;q=0.5" "https://$HOST/p/$pc?format=match&mode=fit&width=$w" '^200 image/avif .*cc=no-store'
   local loc
   loc=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/p/$p?format=match&amp;mode=fit&amp;width=$w")
   if [[ "$loc" =~ ^301\  && "$loc" != *_acc* ]]; then echo "  ok    amp form   : $loc"; else echo "  FAIL  amp form   : $loc (want a 301 without _acc)"; fails=$((fails+1)); fi
