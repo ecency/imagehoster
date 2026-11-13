@@ -97,8 +97,12 @@ if [ "$MODE" = rollback ]; then
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
   BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (len(http.request.uri.args[\"format\"]) == 1 and http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
-  AVIF='lower(http.request.headers["accept"][0]) contains "image/avif"'
-  WEBP='lower(http.request.headers["accept"][0]) contains "image/webp"'
+  # an explicit q=0 refuses the type; also catches q=0.5, which then only disagrees
+  # with the origin and is answered no-store, never served the wrong format
+  AVIF='(lower(http.request.headers["accept"][0]) contains "image/avif" and not lower(http.request.headers["accept"][0]) contains "image/avif;q=0" and not lower(http.request.headers["accept"][0]) contains "image/avif; q=0")'
+  # an explicit q=0 refuses the type; also catches q=0.5, which then only disagrees
+  # with the origin and is answered no-store, never served the wrong format
+  WEBP='(lower(http.request.headers["accept"][0]) contains "image/webp" and not lower(http.request.headers["accept"][0]) contains "image/webp;q=0" and not lower(http.request.headers["accept"][0]) contains "image/webp; q=0")'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[
     {action:"rewrite", enabled:true, description:($t+" Accept bucket avif for /p/ format=match + /u/"),
      expression:("(" + $b + ") and (" + $a + ")"),
