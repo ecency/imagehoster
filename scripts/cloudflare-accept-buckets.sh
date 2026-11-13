@@ -40,22 +40,38 @@ verify() {
   local AV='image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
   local WB='image/webp,image/apng,image/*,*/*;q=0.8'
   local OLD='image/jpeg,image/png,image/*;q=0.8'
-  req() { curl -s -m 30 -o /dev/null -H "Accept: $1" -w "%{http_code} %{content_type} %{size_download}B cf=%header{cf-cache-status}" "$2"; }
-  echo "proxy, fresh width $w: each Accept group gets its own format, repeats HIT"
-  echo "  avif  first : $(req "$AV" "$u")   expect image/avif"
-  echo "  old   next  : $(req "$OLD" "$u")   expect image/png or image/jpeg"
-  echo "  webp  next  : $(req "$WB" "$u")   expect image/webp"
-  echo "  avif  again : $(req "$AV" "$u")   expect image/avif HIT"
-  echo "  explicit    : $(req "$OLD" "https://$HOST/p/$p?format=avif&mode=fit&width=$w")   expect image/avif (untouched)"
-  echo "  &amp; form  : $(curl -s -m 30 -o /dev/null -w '%{http_code} -> %{redirect_url}' "https://$HOST/p/$p?format=match&amp;mode=fit&amp;width=$w")"
-  echo "                expect 301 to the clean URL, without _acc"
+  local fails=0 skips=0
+  # check <label> <accept> <url> <regex over "code type cache-status cache-control">
+  check() {
+    local got
+    got=$(curl -s -m 30 -o /dev/null -H "Accept: $2" -w '%{http_code} %{content_type} cf=%header{cf-cache-status} cc=%header{cache-control} vg=%header{x-variant-guard}' "$3")
+    if [[ "$got" =~ $4 ]]; then echo "  ok    $1: $got"
+    # the origin's variant-walk guard redirects one client past a few variants of one
+    # image in 5 minutes; that is not a rule failure, just rerun later
+    elif [[ "$got" == *vg=redirect* ]]; then echo "  skip  $1: variant guard redirect, rerun in 5 minutes"; skips=$((skips+1))
+    else echo "  FAIL  $1: $got (want /$4/)"; fails=$((fails+1)); fi
+  }
+  echo "proxy, fresh width $w"
+  check "avif first " "$AV" "$u" '^200 image/avif '
+  check "old next   " "$OLD" "$u" '^200 image/(png|jpeg) '
+  check "webp next  " "$WB" "$u" '^200 image/webp '
+  check "avif again " "$AV" "$u" '^200 image/avif cf=HIT'
+  check "explicit   " "$OLD" "https://$HOST/p/$p?format=avif&mode=fit&width=$w" '^200 image/avif '
+  # a client-supplied tag for another group must never be cached (origin answers no-store)
+  check "poison try " "$AV" "$u&_acc=0" '^200 image/avif .*cc=no-store'
+  check "old after  " "$OLD" "$u" '^200 image/(png|jpeg) '
+  local loc
+  loc=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/p/$p?format=match&amp;mode=fit&amp;width=$w")
+  if [[ "$loc" =~ ^301\  && "$loc" != *_acc* ]]; then echo "  ok    amp form   : $loc"; else echo "  FAIL  amp form   : $loc (want a 301 without _acc)"; fails=$((fails+1)); fi
   echo "avatar"
-  echo "  avif        : $(req "$AV" "$av")   expect image/avif"
-  echo "  old         : $(req "$OLD" "$av")   expect image/png or image/jpeg"
-  echo "  webp        : $(req "$WB" "$av")   expect image/webp"
+  check "avif       " "$AV" "$av" '^200 image/avif '
+  check "old        " "$OLD" "$av" '^200 image/(png|jpeg) '
+  check "webp       " "$WB" "$av" '^200 image/webp '
+  [ "$fails" = 0 ] || { echo "verify: $fails check(s) FAILED"; return 1; }
+  [ "$skips" = 0 ] && echo "verify: all checks passed" || { echo "verify: no failures, $skips skipped (variant guard), rerun in 5 minutes"; return 2; }
 }
 
-[ "$MODE" = verify ] && { verify; exit; }
+[ "$MODE" = verify ] && { verify; exit $?; }
 [ "$MODE" = apply ] || [ "$MODE" = rollback ] || { echo "usage: $0 apply|verify|rollback"; exit 2; }
 : "${CF_API_TOKEN:?set CF_API_TOKEN}" "${CF_ZONE_ID:?set CF_ZONE_ID}"
 EP="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/rulesets/phases/http_request_transform/entrypoint"
@@ -76,8 +92,8 @@ if [ "$MODE" = rollback ]; then
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
   BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and (not http.request.uri.query contains \"format=\" or http.request.uri.query contains \"format=match\")) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not http.request.uri.query contains \"_acc=\""
-  AVIF='http.request.headers["accept"][0] contains "image/avif"'
-  WEBP='http.request.headers["accept"][0] contains "image/webp"'
+  AVIF='lower(http.request.headers["accept"][0]) contains "image/avif"'
+  WEBP='lower(http.request.headers["accept"][0]) contains "image/webp"'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[
     {action:"rewrite", enabled:true, description:($t+" Accept bucket avif for /p/ format=match + /u/"),
      expression:("(" + $b + ") and (" + $a + ")"),
@@ -95,6 +111,7 @@ R=$(curl -s -X PUT "${H[@]}" "$EP" -d "$(jq -n --argjson r "$RULES" '{rules:$r}'
 echo "$R" | jq -r '"success=\(.success) version=\(.result.version // "-") errors=\(.errors)"'
 echo "$R" | jq -r '.result.rules[]?.description' | nl
 echo "backup: $BAK"
-if [ "$MODE" = apply ] && [ "$(echo "$R" | jq -r .success)" = true ]; then
-  echo "waiting 45s for propagation..."; sleep 45; verify
+[ "$(echo "$R" | jq -r .success)" = true ] || { echo "PUT FAILED, rules unchanged"; exit 1; }
+if [ "$MODE" = apply ]; then
+  echo "waiting 45s for propagation..."; sleep 45; verify || exit 1
 fi

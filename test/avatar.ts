@@ -104,6 +104,24 @@ describe('avatar', function() {
         assert.equal(res.headers['location'], '/u/foo/avatar/small?x=1')
     })
 
+    it('drops the CDN cache-key tag from a canonicalising redirect', async function() {
+        const res = await needle('get', `http://localhost:${port}/u/Foo/avatar/small?x=1&_acc=avif`, { follow_max: 0 })
+        assert.equal(res.statusCode, 301)
+        assert.equal(res.headers['location'], '/u/foo/avatar/small?x=1')
+    })
+
+    it('answers no-store when the cache-key tag disagrees with the Accept group', async function() {
+        this.slow(3000)
+        this.timeout(10000)
+        const url = `http://localhost:${port}/u/healthy/avatar/small`
+        const good = await needle('get', `${url}?_acc=0`, null, {headers: {accept: 'image/jpeg,image/png'}})
+        assert.equal(good.statusCode, 200)
+        assert.notEqual(good.headers['cache-control'], 'no-store', 'a matching tag keeps the normal policy')
+        const bad = await needle('get', `${url}?_acc=0`, null, {headers: {accept: 'image/avif,image/webp,*/*'}})
+        assert.equal(bad.statusCode, 200)
+        assert.equal(bad.headers['cache-control'], 'no-store')
+    })
+
     it('still rejects an invalid mixed-case name instead of redirecting it', async function() {
         const res = await needle('get', `http://localhost:${port}/u/Fo!o/avatar`, { follow_max: 0 })
         assert.equal(res.statusCode, 404)
