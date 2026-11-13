@@ -327,7 +327,7 @@ Response includes `Vary: Accept` header for proper CDN caching.
 
 ### HDR AVIF Support
 
-The Docker image builds libvips from source with dav1d (AV1 decoder) for full AVIF support, including HDR gain map images (MA1A brand) commonly produced by modern cameras. Sharp's bundled libvips uses libaom which cannot decode these bitstreams.
+The Docker image builds libvips and libheif from source, with libde265 for HEIC decode and libaom for AVIF decode and encode. dav1d is built as well, but nothing links it yet (see the note in the Dockerfile).
 
 ### Fallback System
 
@@ -371,9 +371,9 @@ Workers share Redis rate limiter state and coordinate via node.js cluster module
 
 Multi-stage Dockerfile optimized for production:
 
-**Stage 1 (vips-builder):** Builds libvips from source with dav1d (AV1 decoder), libaom (AV1 encoder), and libheif for full AVIF/HEIF support including HDR gain map images
-**Stage 2 (build):** Node 20 with app compilation, replaces Sharp's bundled libvips with custom build
-**Stage 3 (runtime):** Node 20 slim with minimal runtime dependencies
+**Stage 1 (vips-builder):** Builds libvips, libheif, libde265 (HEVC decode) and libaom (AV1 decode and encode) from source; dav1d is built but not linked
+**Stage 2 (build):** Node 24 (Debian trixie) with app compilation; sharp's binding is compiled against the custom libvips
+**Stage 3 (runtime):** Node 24 trixie-slim with minimal runtime dependencies
 
 ```bash
 # Build image

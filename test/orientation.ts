@@ -23,7 +23,9 @@ async function plainJpeg(): Promise<Buffer> {
 // A big-endian EXIF APP1 whose IFD0 holds the orientation. With `badThumbnail`
 // IFD0 also carries a thumbnail pointer (0x0201/0x0202) that runs far past the
 // end of the block, in the tag order some phone uploads use. libexif 0.6.24
-// rejects that IFD, so libvips reports no orientation at all.
+// (Debian bookworm, and the library sharp's prebuilt binaries bundle) rejects
+// that IFD, so libvips reports no orientation at all; 0.6.25 (Debian trixie,
+// the production image) reads it. readExifOrientation has to cover the first.
 function exifApp1(orientation: number, badThumbnail: boolean): Buffer {
     const entries: Array<[number, number, number, number]> = [] // tag, type, count, value
     if (badThumbnail) {
@@ -68,11 +70,12 @@ describe('EXIF orientation', function() {
         plain = await plainJpeg()
     })
 
-    it('fixture: libvips reads well-formed EXIF and loses the malformed one', async function() {
+    it('fixture: libvips reads well-formed EXIF, and the malformed one is lost or read correctly', async function() {
         const good = await Sharp(withExif(plain, exifApp1(6, false))).metadata()
         const bad = await Sharp(withExif(plain, exifApp1(6, true))).metadata()
         assert.strictEqual(good.orientation, 6)
-        assert.strictEqual(bad.orientation, undefined)
+        // Lost with libexif 0.6.24, read with 0.6.25; never a wrong value
+        assert.ok(bad.orientation === undefined || bad.orientation === 6, `orientation ${ bad.orientation }`)
         assert.ok(bad.exif && bad.exif.length > 0, 'the EXIF block still reaches metadata')
     })
 

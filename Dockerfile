@@ -1,5 +1,5 @@
-# --- Stage 1: Build libvips from source with the codecs bookworm does not ship ---
-FROM node:24-bookworm AS vips-builder
+# --- Stage 1: Build libvips from source with the codecs Debian does not ship ---
+FROM node:24-trixie AS vips-builder
 
 RUN apt-get update && apt-get install -y \
   build-essential cmake meson ninja-build nasm \
@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y \
   libhwy-dev \
   && rm -rf /var/lib/apt/lists/*
 
-# Build dav1d. NOTE: nothing currently links it. libheif 1.19.7 defaults
-# WITH_DAV1D=OFF and this file never passes it, so AV1 decode runs on libaom
+# Build dav1d. NOTE: nothing currently links it. The libheif build below passes
+# WITH_DAV1D=OFF (also its default), so AV1 decode runs on libaom
 # and libdav1d.so ships unused. Enabling it is a decoder change with its own
 # regression surface, so it is deliberately left alone here.
 ARG DAV1D_VERSION=1.5.0
@@ -63,7 +63,7 @@ RUN cd /tmp && \
 
 # Build libheif (HEIF/AVIF container — libde265 for HEVC, libaom for AV1 decode
 # and encode; dav1d is NOT linked, see the note above)
-ARG LIBHEIF_VERSION=1.19.7
+ARG LIBHEIF_VERSION=1.23.7
 RUN cd /tmp && \
   git clone --depth 1 --branch v${LIBHEIF_VERSION} https://github.com/strukturag/libheif.git && \
   cd libheif && \
@@ -74,13 +74,14 @@ RUN cd /tmp && \
     -DWITH_EXAMPLES=OFF \
     -DWITH_GDK_PIXBUF=OFF \
     -DWITH_LIBDE265=ON \
-    -DWITH_LIBDE265_PLUGIN=OFF && \
+    -DWITH_LIBDE265_PLUGIN=OFF \
+    -DWITH_DAV1D=OFF && \
   make -j$(nproc) && \
   make install && \
   ldconfig
 
 # Build libvips (image processing — links to our custom libheif)
-ARG LIBVIPS_VERSION=8.16.1
+ARG LIBVIPS_VERSION=8.18.7
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig
 RUN cd /tmp && \
   git clone --depth 1 --branch v${LIBVIPS_VERSION} https://github.com/libvips/libvips.git && \
@@ -164,21 +165,30 @@ COPY . .
 RUN make lib
 
 # --- Runtime image ---
-FROM node:24-bookworm-slim
+FROM node:24-trixie-slim
 
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   wget tini \
   # Runtime shared library dependencies for libvips
-  libglib2.0-0 libexpat1 \
-  libjpeg62-turbo libpng16-16 libwebp7 libwebpdemux2 libwebpmux3 \
+  libglib2.0-0t64 libexpat1 \
+  libjpeg62-turbo libpng16-16t64 libwebp7 libwebpdemux2 libwebpmux3 \
   libtiff6 libgif7 librsvg2-2 \
   libexif12 liblcms2-2 libfftw3-double3 \
-  liborc-0.4-0 libpango-1.0-0 libpangocairo-1.0-0 \
-  libcgif0 libspng0 libarchive13 \
-  libimagequant0 libhwy1 \
+  liborc-0.4-0t64 libpango-1.0-0 libpangocairo-1.0-0 \
+  libcgif0 libspng0 libarchive13t64 \
+  libimagequant0 libhwy1t64 \
   && rm -rf /var/lib/apt/lists/*
+
+# librsvg is the one decoder this file takes from Debian instead of building, and
+# proxied SVG sources reach it. CVE-2026-96889 (use-after-free on nested XInclude
+# entities) is fixed in trixie-security 2.60.0+dfsg-1+deb13u1; bookworm has no fixed
+# package, which is why both stages are on trixie. Fail the build if the installed
+# package is older than that, e.g. after a base image change.
+RUN v="$(dpkg-query -W -f='${Version}' librsvg2-2)"; \
+  dpkg --compare-versions "$v" ge 2.60.0+dfsg-1+deb13u1 || { \
+    echo "GUARD FAIL: librsvg2-2 $v predates the CVE-2026-96889 fix (2.60.0+dfsg-1+deb13u1)"; exit 1; }
 
 # Copy custom-built shared libraries (libaom, libde265, libheif, libvips; dav1d
 # is copied too but nothing links it, see the note in the builder stage)

@@ -72,7 +72,23 @@ async function main() {
     process.exit(1)
   }
 
-  console.log(`smoke OK: HEIC(${meta.compression}) ${raw.info.width}x${raw.info.height} decoded, AVIF round-trip ${avif.length}B`)
+  // SVG sources are rasterised by librsvg, which comes from the distro rather
+  // than from this image's own build. Prove it loads and renders: a 4x4 red square.
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>')
+  let px
+  try {
+    px = await sharp(svg).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+  } catch (err) {
+    console.error('smoke FAIL: SVG rasterise failed, librsvg is not usable')
+    console.error(`  ${err && err.message}`)
+    process.exit(1)
+  }
+  if (px.info.width !== 4 || px.info.height !== 4 || px.data[0] !== 255 || px.data[1] !== 0 || px.data[2] !== 0) {
+    console.error(`smoke FAIL: SVG rendered ${px.info.width}x${px.info.height} rgb(${px.data[0]},${px.data[1]},${px.data[2]}), expected 4x4 red`)
+    process.exit(1)
+  }
+
+  console.log(`smoke OK: HEIC(${meta.compression}) ${raw.info.width}x${raw.info.height} decoded, AVIF round-trip ${avif.length}B, SVG rasterised`)
 }
 
 main().catch((err) => { console.error('smoke FAIL:', err && err.message); process.exit(1) })

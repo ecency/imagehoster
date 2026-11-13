@@ -239,16 +239,19 @@ describe('proxy', function() {
         it('serves the original as a passthrough when the render fails, with its own ETag and no store write', async function() {
             this.slow(3000)
             this.timeout(15000)
-            // test.png with its deflate stream scrambled (chunk CRCs recomputed): the
-            // header parses, so metadata succeeds and the request stays on the Sharp
-            // pipeline as a single-page image, but the pixels cannot decode in any
-            // libvips build, so the render fails and the original bytes are handed
-            // through. No blur: a failed blur render answers a transparent pixel instead.
-            const corrupt = fs.readFileSync(path.resolve(__dirname, 'test-corrupt-idat.png'))
-            const corruptServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/png'}); res.end(corrupt) })
+            // A 100x80 lossy WebP with everything after its VP8 frame header XORed:
+            // the header parses, so metadata succeeds and the request stays on the
+            // Sharp pipeline as a single-page image, but libwebp cannot decode the
+            // pixels even with failOnError off, so the render fails and the original
+            // bytes are handed through. A corrupt PNG no longer does this: libvips 8.18
+            // loads PNG through libpng, which renders damaged data leniently where
+            // libspng refused it. No blur: a failed blur render answers a transparent
+            // pixel instead.
+            const corrupt = fs.readFileSync(path.resolve(__dirname, 'test-corrupt-pixels.webp'))
+            const corruptServer = http.createServer((_req, res) => { res.writeHead(200, {'content-type': 'image/webp'}); res.end(corrupt) })
             await new Promise<void>((resolve) => corruptServer.listen(0, 'localhost', () => resolve()))
             const corruptPort = (corruptServer.address() as any).port
-            const source = `http://localhost:${ corruptPort }/broken.png`
+            const source = `http://localhost:${ corruptPort }/broken.webp`
             const url = `http://localhost:${ port }/p/${ base58Enc(source) }?width=120&mode=fit`
             // An Accept with neither AVIF nor WebP keeps format=match, the key below
             const headers = {accept: 'image/png'}
