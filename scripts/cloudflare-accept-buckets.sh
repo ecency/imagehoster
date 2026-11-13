@@ -57,9 +57,14 @@ verify() {
   check "webp next  " "$WB" "$u" '^200 image/webp '
   check "avif again " "$AV" "$u" '^200 image/avif cf=HIT'
   check "explicit   " "$OLD" "https://$HOST/p/$p?format=avif&mode=fit&width=$w" '^200 image/avif '
-  # a client-supplied tag for another group must never be cached (origin answers no-store)
-  check "poison try " "$AV" "$u&_acc=0" '^200 image/avif .*cc=no-store'
-  check "old after  " "$OLD" "$u" '^200 image/(png|jpeg) '
+  # a client-supplied tag for another group must never be cached (origin answers no-store).
+  # On its own cold width: the checks above already warmed $u's groups at the edge.
+  local u2="https://$HOST/p/$p?format=match&mode=fit&width=$((w + 1))"
+  check "poison try " "$AV" "$u2&_acc=0" '^200 image/avif .*cc=no-store'
+  check "old after  " "$OLD" "$u2" '^200 image/(png|jpeg) '
+  # a percent-encoded format is still negotiated, so it must be tagged too
+  check "encoded fmt" "$OLD" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/(png|jpeg) '
+  check "encoded avif" "$AV" "https://$HOST/p/$p?format=%6datch&mode=fit&width=$((w + 2))" '^200 image/avif '
   local loc
   loc=$(curl -s -m 30 -o /dev/null -w '%{http_code} %{redirect_url}' "https://$HOST/p/$p?format=match&amp;mode=fit&amp;width=$w")
   if [[ "$loc" =~ ^301\  && "$loc" != *_acc* ]]; then echo "  ok    amp form   : $loc"; else echo "  FAIL  amp form   : $loc (want a 301 without _acc)"; fails=$((fails+1)); fi
@@ -91,7 +96,7 @@ if [ "$MODE" = rollback ]; then
   RULES="$OTHERS"
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
-  BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and (not http.request.uri.query contains \"format=\" or http.request.uri.query contains \"format=match\")) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not http.request.uri.query contains \"_acc=\""
+  BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
   AVIF='lower(http.request.headers["accept"][0]) contains "image/avif"'
   WEBP='lower(http.request.headers["accept"][0]) contains "image/webp"'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[

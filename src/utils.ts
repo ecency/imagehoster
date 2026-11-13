@@ -511,6 +511,23 @@ export function getProxyImageLimits() {
  * built from our own origin today, but rewriting an external URL onto ours
  * would silently purge the wrong object if that ever changes.
  */
+/**
+ * The CDN cache-key tag. Cloudflare ignores `Vary: Accept`, so edge rewrites
+ * append `_acc=<group>` to negotiated requests (see src/cache-key-tag.ts and
+ * "Cloudflare" in CLAUDE.md). The rewrite is a plain concatenation, so the key
+ * is the original query plus `&_acc=<group>`, `?&_acc=<group>` when it had none.
+ */
+export const CACHE_KEY_TAG = '_acc'
+export const CACHE_KEY_TAG_VALUES = ['avif', 'webp', '0']
+const EXPLICIT_PROXY_FORMATS = new Set(['jpeg', 'jpg', 'png', 'webp', 'avif'])
+
+/** Whether the output format is negotiated: every /u/ image, and /p/ unless the query names one explicit format. */
+export function isNegotiatedPath(pathname: string, format: unknown): boolean {
+    if (pathname.startsWith('/u/')) { return true }
+    if (!pathname.startsWith('/p/')) { return false }
+    return !(typeof format === 'string' && EXPLICIT_PROXY_FORMATS.has(format))
+}
+
 export function expandPurgeUrls(value: string | string[]): string[] {
     const input = Array.isArray(value) ? value : [value]
     const out = new Set<string>()
@@ -526,8 +543,17 @@ export function expandPurgeUrls(value: string | string[]): string[] {
             out.add(raw)
             continue
         }
+        const formats = parsed.searchParams.getAll('format')
+        const negotiated = isNegotiatedPath(parsed.pathname, formats.length === 1 ? formats[0] : formats.length ? formats : undefined)
         for (const origin of INTERNAL_SERVICE_ORIGINS) {
-            out.add(new URL(`${parsed.pathname}${parsed.search}`, origin).toString())
+            const url = new URL(`${parsed.pathname}${parsed.search}`, origin).toString()
+            out.add(url)
+            if (negotiated) {
+                // What the CDN actually keys a negotiated request on
+                for (const tag of CACHE_KEY_TAG_VALUES) {
+                    out.add(`${url}${parsed.search ? '' : '?'}&${CACHE_KEY_TAG}=${tag}`)
+                }
+            }
         }
     }
     return [...out]

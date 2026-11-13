@@ -13,13 +13,14 @@
  * answered `no-store`: the response is still right for this client, and nothing
  * the CDN keeps under that key can differ from what the key's group would get.
  */
+import config from 'config'
+
 import { KoaContext } from './common'
-import { supportsAvif, supportsWebP } from './utils'
+import { CACHE_KEY_TAG, isNegotiatedPath, supportsAvif, supportsWebP } from './utils'
+import { hasEdgeToken } from './variant-guard'
 
-export const CACHE_KEY_TAG = '_acc'
-
-/** Formats a /p/ URL can name outright; anything else is negotiated. */
-const EXPLICIT_FORMATS = new Set(['jpeg', 'jpg', 'png', 'webp', 'avif'])
+const EDGE_TOKEN = config.has('variant_guard_edge_token') ? String(config.get('variant_guard_edge_token') || '') : ''
+const EDGE_TOKEN_HEADER = 'x-edge-token'
 
 /** The Accept group, by the same test `parseOptions` negotiates with. */
 export function acceptBucket(acceptHeader: string): 'avif' | 'webp' | '0' {
@@ -28,12 +29,6 @@ export function acceptBucket(acceptHeader: string): 'avif' | 'webp' | '0' {
     return '0'
 }
 
-function isNegotiated(ctx: KoaContext): boolean {
-    if (ctx.path.startsWith('/u/')) { return true }
-    if (!ctx.path.startsWith('/p/')) { return false }
-    const format = ctx.query['format']
-    return !(typeof format === 'string' && EXPLICIT_FORMATS.has(format))
-}
 
 /** Remove the tag from a redirect target, leaving the rest of the query as written. */
 export function stripCacheKeyTag(location: string): string {
@@ -48,7 +43,14 @@ export function stripCacheKeyTag(location: string): string {
     return location.slice(0, q) + (kept.length ? '?' + kept.join('&') : '')
 }
 
-export async function cacheKeyTagGuard(ctx: KoaContext, next: () => Promise<any>) {
+/**
+ * `edgeToken` is the secret the CDN adds to every request it forwards (the same
+ * one the variant guard trusts). Only with it configured can the guard tell that a
+ * request came through the CDN, and so that a missing tag means an edge rule
+ * missed it.
+ */
+export function makeCacheKeyTagGuard(edgeToken: string) {
+    return async function cacheKeyTagGuard(ctx: KoaContext, next: () => Promise<any>) {
     await next()
     // A canonicalising redirect copies the query; the tag belongs to the edge's
     // cache key, never to a URL the client is sent to
@@ -57,7 +59,17 @@ export async function cacheKeyTagGuard(ctx: KoaContext, next: () => Promise<any>
         ctx.set('Location', stripCacheKeyTag(location))
     }
     const tag = ctx.query[CACHE_KEY_TAG]
-    if (tag === undefined || !isNegotiated(ctx)) { return }
+    if (!isNegotiatedPath(ctx.path, ctx.query['format'])) { return }
+    if (tag === undefined) {
+        // Through the CDN without a tag: a query shape the rewrite skipped, so every
+        // client shares this key. Redirects are exempt, the `amp;` 301 is meant to be
+        // cached and is the same for everyone
+        const redirect = ctx.status >= 300 && ctx.status < 400
+        if (edgeToken && !redirect && hasEdgeToken(ctx.get(EDGE_TOKEN_HEADER) || undefined, edgeToken)) {
+            ctx.set('Cache-Control', 'no-store')
+        }
+        return
+    }
     if (Array.isArray(tag) || tag !== acceptBucket(ctx.get('accept'))) {
         ctx.set('Cache-Control', 'no-store')
         return
@@ -69,4 +81,7 @@ export async function cacheKeyTagGuard(ctx: KoaContext, next: () => Promise<any>
     if (tag === '0' && /^image\/(avif|heic|heif)$/.test(ctx.response.type)) {
         ctx.set('Cache-Control', 'no-store')
     }
+    }
 }
+
+export const cacheKeyTagGuard = makeCacheKeyTagGuard(EDGE_TOKEN)
