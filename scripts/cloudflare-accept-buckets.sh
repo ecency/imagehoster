@@ -128,13 +128,14 @@ if [ "$MODE" = rollback ]; then
 else
   HOSTSET=$(printf '"%s" ' $HOSTS); HOSTSET=${HOSTSET% }
   BASE="(http.host in {$HOSTSET}) and ((starts_with(http.request.uri.path, \"/p/\") and not (len(http.request.uri.args[\"format\"]) == 1 and http.request.uri.args[\"format\"][0] in {\"jpeg\" \"jpg\" \"png\" \"webp\" \"avif\"})) or starts_with(http.request.uri.path, \"/u/\")) and not http.request.uri.query contains \"amp;\" and not any(starts_with(http.request.uri.args.names[*], \"amp;\")) and not any(http.request.uri.args.names[*] == \"_acc\")"
-  # A type joins its group only when written bare (followed by a comma, or last).
+  # A type joins its group only as a whole, bare list item: at the start or after a
+  # comma, and at the end or before a comma (so never `ximage/avif`).
   # Any parameter (q=0 in whatever spelling, q=0.5, extensions) or odd spacing
   # drops the client to a lower group, where at worst the origin disagrees and
   # answers no-store. A cache HIT never reaches the origin, so the edge must never
   # file a client that refused a type into the group that type is cached for.
-  AVIF='(lower(http.request.headers["accept"][0]) contains "image/avif," or ends_with(lower(http.request.headers["accept"][0]), "image/avif"))'
-  WEBP='(lower(http.request.headers["accept"][0]) contains "image/webp," or ends_with(lower(http.request.headers["accept"][0]), "image/webp"))'
+  AVIF='(lower(http.request.headers["accept"][0]) == "image/avif" or starts_with(lower(http.request.headers["accept"][0]), "image/avif,") or lower(http.request.headers["accept"][0]) contains ",image/avif," or ends_with(lower(http.request.headers["accept"][0]), ",image/avif"))'
+  WEBP='(lower(http.request.headers["accept"][0]) == "image/webp" or starts_with(lower(http.request.headers["accept"][0]), "image/webp,") or lower(http.request.headers["accept"][0]) contains ",image/webp," or ends_with(lower(http.request.headers["accept"][0]), ",image/webp"))'
   MINE=$(jq -n --arg b "$BASE" --arg a "$AVIF" --arg w "$WEBP" --arg t "$TAG" '[
     {action:"rewrite", enabled:true, description:($t+" Accept bucket avif for /p/ format=match + /u/"),
      expression:("(" + $b + ") and (" + $a + ")"),

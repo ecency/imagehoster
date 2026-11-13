@@ -6,6 +6,7 @@ import * as http from 'http'
 import needle from 'needle'
 
 import {acceptBucket, makeCacheKeyTagGuard} from './../src/cache-key-tag'
+import {supportsAvif, supportsWebP} from './../src/utils'
 
 describe('acceptBucket', function() {
     it('files each Accept the way the origin negotiates it', function() {
@@ -63,5 +64,37 @@ describe('cache-key tag guard behind the CDN', function() {
     it('keeps a matching tag cacheable behind the CDN', async function() {
         const res = await get('/p/x?format=match&_acc=0', {'x-edge-token': 'secret', accept: 'image/jpeg'})
         assert.match(String(res.headers['cache-control']), /immutable/)
+    })
+})
+
+describe('edge Accept groups (scripts/cloudflare-accept-buckets.sh)', function() {
+    // Mirror of the AVIF/WEBP rule expressions: a type counts only as a whole, bare
+    // list item of the lower-cased header. Keep in step with the script.
+    const bare = (accept: string, type: string) => {
+        const a = accept.toLowerCase()
+        return a === type || a.startsWith(type + ',') || a.includes(',' + type + ',') || a.endsWith(',' + type)
+    }
+    const edge = (a: string) => bare(a, 'image/avif') ? 'avif' : bare(a, 'image/webp') ? 'webp' : '0'
+
+    // A cache HIT never reaches the origin guard, so a client must accept whatever its
+    // group caches: AVIF for `avif`, WebP for `webp`. Landing lower than the origin
+    // would choose is fine (the origin answers no-store on the miss)
+    it('never files a client into a group whose cached format it does not accept', function() {
+        for (const accept of [
+            'ximage/avif,image/jpeg', 'image/jpeg,ximage/webp', 'image/avifx,image/jpeg',
+            'image/avif;foo=bar;q=0,image/jpeg', 'image/avif;q=0,image/webp', 'image/webp;q=0,image/jpeg',
+            'image/avif;q=0.5,image/webp', 'image/jpeg, image/avif', 'IMAGE/AVIF,*/*', '*/*', '',
+        ]) {
+            const group = edge(accept)
+            const accepted = group === '0' || (group === 'avif' ? supportsAvif(accept) : supportsWebP(accept))
+            assert.ok(accepted, `${accept}: filed under ${group}, which it does not accept`)
+        }
+    })
+
+    it('keeps the groups real browsers send', function() {
+        assert.equal(edge('image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'), 'avif') // Chrome
+        assert.equal(edge('image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5'), 'avif') // Firefox
+        assert.equal(edge('image/webp,image/avif,image/jxl,image/heic,image/heic-sequence,video/*;q=0.8,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5'), 'avif') // Safari
+        assert.equal(edge('image/webp,image/apng,image/*,*/*;q=0.8'), 'webp')
     })
 })
