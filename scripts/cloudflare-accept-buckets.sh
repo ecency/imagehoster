@@ -33,9 +33,12 @@ TAG="imagehoster #61:"
 
 verify() {
   # The origin's variant guard allows one client only a few rendered variants of one
-  # source image per 5 minutes, so each group of checks below uses its own source:
-  # the same public upload with a different `?v=` (base58 of the full URL)
-  local src='https://i.ecency.com/DQmQp4u54X47SKd8muaudHj1aAmz7ymxYBWo9dotxb2tJTU/e2eb0d5c_0363_431a_b124_5401ae79afae.jpg'
+  # source image per 5 minutes, so each group of checks in each run uses its own
+  # source: a public image on an EXTERNAL host with a different `?v=` (base58 of the
+  # full URL). It must be external: for our own uploads the proxy keys the source by
+  # the upload hash and ignores the query, so every `?v=` would count as one image.
+  # Override with VERIFY_SOURCE (any external image URL that ignores its query).
+  local src=${VERIFY_SOURCE:-'https://files.peakd.com/file/peakd-hive/papilloncharity/23yTh8AaTZfPwahyLfaTXJYd2pPRaVhkqEP1NW6EVUy2JCrbwjiCZD6jmCQngKrNwABMZ.jpg'}
   tok() { python3 -I -c "
 import sys
 A='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
