@@ -33,7 +33,11 @@ router.get('/:width(\\d+)x:height(\\d+)/:url(.*)', legacyProxyHandler as any)
 router.get('/:hash/:filename?', serveHandler as any)
 
 // Upload endpoints
+// The token comes from the path (shipped apps use this form for good) or from an
+// `Authorization: Bearer` header on the bare `/hs` routes.
 router.post('/hs/:accesstoken', uploadHsHandler as any)
+router.post('/hs', uploadHsHandler as any)
+router.post('/webp/hs', uploadHsHandler as any) // before /:username/:signature, which would match it
 router.post('/:username/:signature', uploadHandler as any)
 
 // Deprecated /webp/ routes - kept for backward compatibility, redirect to non-webp URLs

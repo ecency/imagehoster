@@ -19,7 +19,17 @@ if (output === 'stdout') {
 
 export const logger = Bunyan.createLogger({
     name: config.get('name'),
-    serializers: Bunyan.stdSerializers,
+    serializers: {
+        ...Bunyan.stdSerializers,
+        // The upload token travels in the Authorization header: never write it out.
+        req: (req: any) => {
+            const out: any = Bunyan.stdSerializers.req(req)
+            if (out && out.headers && out.headers.authorization) {
+                out.headers = {...out.headers, authorization: '[redacted]'}
+            }
+            return out
+        },
+    },
     streams: [stream],
 })
 

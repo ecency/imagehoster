@@ -81,7 +81,8 @@ GET /healthcheck
 
 ```
 POST /:username/:signature     Upload with Hive account signature
-POST /hs/:accesstoken          Upload with HiveSigner token
+POST /hs/:accesstoken          Upload with HiveSigner token in the path (legacy, kept for shipped clients)
+POST /hs                       Upload with HiveSigner token in `Authorization: Bearer <token>`
 ```
 
 **Requirements:**
@@ -295,9 +296,15 @@ curl -X POST https://images.ecency.com/username/signature \
 Get access token from HiveSigner OAuth flow, then:
 
 ```bash
-curl -X POST https://images.ecency.com/hs/ACCESS_TOKEN \
+curl -X POST https://images.ecency.com/hs \
+  -H "Authorization: Bearer ACCESS_TOKEN" \
   -F "image=@image.jpg"
 ```
+
+The legacy path form `POST /hs/ACCESS_TOKEN` still works, but URLs end up in access logs, so prefer
+the header. `/webp/hs` accepts both forms too. If both are sent, the path token is used and the
+header is ignored. A missing or empty token answers 400 `missing_param`; a token that is not
+valid base64url JSON of the expected shape answers 400 `invalid_signature`.
 
 Token format (base64url-encoded JSON):
 ```json

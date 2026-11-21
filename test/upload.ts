@@ -365,3 +365,112 @@ describe('hivesigner token replay via the username path', function() {
         assert.equal(response.statusCode, 200)
     })
 })
+
+/** Posts an upload to an arbitrary path with optional headers, for the header-token tests. */
+async function uploadTo(data: Buffer, port: number, urlPath: string, headers: {[key: string]: string} = {}) {
+    return new Promise<any>((resolve, reject) => {
+        const payload = {
+            image_file: {filename: 'test.jpg', buffer: data, content_type: 'image/jpeg'},
+        }
+        needle.post(`:${ port }${ urlPath }`, payload, {multipart: true, headers}, (error, response, body) => {
+            if (error) { reject(error) } else { resolve({response, body}) }
+        })
+    })
+}
+
+describe('hivesigner token in the Authorization header', function() {
+    const port = 63209
+    const server = http.createServer(app.callback())
+    let data: Buffer
+    let token: string
+
+    before((done) => {
+        data = fs.readFileSync(path.resolve(__dirname, 'test.jpg'))
+        token = makeHsToken({author: 'hsplain', signer: testKeys.bar})
+        server.listen(port, 'localhost', done)
+    })
+    after((done) => { server.close(done) })
+
+    it('uploads on POST /hs with a Bearer token, same response as the path form', async function() {
+        this.slow(1000)
+        const viaPath = await uploadTo(data, port, `/hs/${ token }`)
+        const viaHeader = await uploadTo(data, port, '/hs', {Authorization: `Bearer ${ token }`})
+        assert.equal(viaHeader.response.statusCode, 200)
+        assert.deepEqual(viaHeader.body, viaPath.body)
+    })
+
+    it('uploads on POST /webp/hs with a Bearer token', async function() {
+        this.slow(1000)
+        const {response, body} = await uploadTo(data, port, '/webp/hs', {Authorization: `Bearer ${ token }`})
+        assert.equal(response.statusCode, 200)
+        assert.ok(body.url)
+    })
+
+    it('treats the Bearer scheme case-insensitively', async function() {
+        this.slow(1000)
+        const {response} = await uploadTo(data, port, '/hs', {Authorization: `bEaReR ${ token }`})
+        assert.equal(response.statusCode, 200)
+    })
+
+    it('still accepts the path form on /hs/:token and /webp/hs/:token', async function() {
+        this.slow(1000)
+        assert.equal((await uploadTo(data, port, `/hs/${ token }`)).response.statusCode, 200)
+        assert.equal((await uploadTo(data, port, `/webp/hs/${ token }`)).response.statusCode, 200)
+    })
+
+    it('rejects POST /hs and /webp/hs without a token as a missing param', async function() {
+        for (const p of ['/hs', '/webp/hs']) {
+            const {response, body} = await uploadTo(data, port, p)
+            assert.equal(response.statusCode, 400, p)
+            assert.equal(body.error.name, 'missing_param', p)
+        }
+    })
+
+    it('rejects a non-Bearer scheme and an empty Bearer', async function() {
+        for (const header of ['Basic xyz', 'Bearer', 'Bearer ', 'Bearer   ']) {
+            const {response, body} = await uploadTo(data, port, '/hs', {Authorization: header})
+            assert.equal(response.statusCode, 400, header)
+            assert.equal(body.error.name, 'missing_param', header)
+        }
+    })
+
+    it('rejects a malformed Bearer token with 400 invalid_signature, not a 500', async function() {
+        const b64 = (value: any) => Buffer.from(JSON.stringify(value)).toString('base64')
+        const good = {signed_message: {type: 'posting', app: 'ecency.app'}, authors: ['hsplain'], signatures: ['sig']}
+        const bad = [
+            'not-a-token',
+            Buffer.from('{"authors":').toString('base64'),
+            b64({}),
+            b64(null),
+            b64({...good, authors: [1]}),
+            b64({...good, authors: {0: {}}}),
+            b64({...good, authors: 'hsplain'}),
+            b64({...good, signatures: [{}]}),
+            b64({...good, signatures: {0: 'sig'}}),
+        ]
+        for (const value of bad) {
+            const {response, body} = await uploadTo(data, port, '/hs', {Authorization: `Bearer ${ value }`})
+            assert.equal(response.statusCode, 400, value)
+            assert.equal(body.error.name, 'invalid_signature', value)
+        }
+    })
+
+    it('does not carry the token text on the error for an unparseable token', async function() {
+        const {decodeHsToken} = await import('./../src/upload')
+        const secret = 'SECRETTOKENTEXT'
+        let thrown: any
+        try { decodeHsToken(Buffer.from(`{${ secret }`).toString('base64')) } catch (err) { thrown = err }
+        assert.ok(thrown, 'expected a throw')
+        assert.equal(thrown.cause, undefined)
+        assert.ok(!String(thrown.message).includes(secret))
+        assert.equal(thrown.toJSON().name, 'invalid_signature')
+    })
+
+    it('lets the path token win when both are present', async function() {
+        this.slow(1000)
+        const good = await uploadTo(data, port, `/hs/${ token }`, {Authorization: 'Bearer garbage'})
+        assert.equal(good.response.statusCode, 200)
+        const bad = await uploadTo(data, port, `/hs/${ makeHsTokenWithBogusSignature('hsplain') }`, {Authorization: `Bearer ${ token }`})
+        assert.equal(bad.response.statusCode, 400)
+    })
+})
