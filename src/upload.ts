@@ -186,13 +186,38 @@ async function storeUpload(ctx: KoaContext, key: string, data: Buffer, uploader:
     }
 }
 
+/**
+ * Token from an `Authorization: Bearer <token>` header, or undefined when the
+ * header is absent, uses another scheme or carries an empty token.
+ */
+function bearerToken(header: string): string | undefined {
+    const match = /^bearer\s+(\S+)\s*$/i.exec(header)
+    return match ? match[1] : undefined
+}
+
+/**
+ * Decodes a base64url token to its JSON. The parse error is deliberately not
+ * attached as `cause`: its message quotes the token text, and causes reach logs
+ * and Sentry.
+ */
+export function decodeHsToken(token: string): any {
+    try {
+        return JSON.parse(Buffer.from(b64uToB64(token), 'base64').toString())
+    } catch {
+        throw new APIError({code: APIError.Code.InvalidSignature, message: 'Malformed access token'})
+    }
+}
+
 export async function uploadHsHandler(ctx: KoaContext) {
     ctx.tag({handler: 'hsupload'})
     let validSignature = false
     ctx.log.warn('uploadHsHandler triggered for %s', ctx.get('Origin'))
 
     APIError.assert(ctx.method === 'POST', {code: APIError.Code.InvalidMethod})
-    APIError.assertParams(ctx.params, ['accesstoken'])
+    // The path token wins when both are present: it is the form every shipped
+    // client sends, and a header is only read when the path carries none.
+    const token = ctx.params['accesstoken'] || bearerToken(ctx.get('authorization'))
+    APIError.assertParams({accesstoken: token}, ['accesstoken'])
     APIError.assert(ctx.get('content-type').includes('multipart/form-data'),
                     {message: 'Only multipart uploads are supported'})
     const contentLength = Number.parseInt(ctx.get('content-length'))
@@ -227,14 +252,15 @@ export async function uploadHsHandler(ctx: KoaContext) {
         .update(data)
         .digest()
 
-    const token = ctx.params['accesstoken']
-    const decoded = Buffer.from(b64uToB64(token), 'base64').toString()
-    const tokenObj = JSON.parse(decoded)
-    const signedMessage = tokenObj.signed_message
+    const tokenObj = decodeHsToken(token!)
+    const signedMessage = tokenObj && tokenObj.signed_message
     if (
-        tokenObj.authors
+        tokenObj
+        && Array.isArray(tokenObj.authors)
+        && typeof tokenObj.authors[0] === 'string'
         && tokenObj.authors[0]
-        && tokenObj.signatures
+        && Array.isArray(tokenObj.signatures)
+        && typeof tokenObj.signatures[0] === 'string'
         && tokenObj.signatures[0]
         && signedMessage
         && signedMessage.type
@@ -332,6 +358,9 @@ export async function uploadHsHandler(ctx: KoaContext) {
 
         ctx.status = 200
         ctx.body = {url}
+    } else {
+        // A token of the wrong shape used to fall through with no body (a 404).
+        throw new APIError({code: APIError.Code.InvalidSignature, message: 'Malformed access token'})
     }
 }
 

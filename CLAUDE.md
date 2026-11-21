@@ -46,7 +46,8 @@ NODE_ENV=test mocha --require ts-node/register test/[filename].ts --grep 'test p
 **Routing** (src/routes.ts)
 - `/` - Healthcheck endpoint with version info
 - `POST /:username/:signature` - Upload with Hive signature verification
-- `POST /hs/:accesstoken` - Upload with HiveSigner token
+- `POST /hs/:accesstoken` - Upload with HiveSigner token in the path (legacy form, shipped apps use it forever)
+- `POST /hs` (and `/webp/hs`) - Same handler, token in `Authorization: Bearer <token>`; the path token wins if both are sent. Registered before `/:username/:signature`, which would otherwise match `/webp/hs`
 - `GET /:hash/:filename?` - Serve uploaded images from upload store
 - `GET /p/:url` - Proxy and resize with query params (width, height, mode, format)
 - `GET /:width(\\d+)x:height(\\d+)/:url(.*)` - Legacy proxy (deprecated, redirects to `/p/` with `_src=legacy`)
