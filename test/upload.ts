@@ -1,3 +1,4 @@
+import {AddressInfo} from 'net'
 import 'mocha'
 import assert from 'assert'
 import * as http from 'http'
@@ -379,7 +380,7 @@ async function uploadTo(data: Buffer, port: number, urlPath: string, headers: {[
 }
 
 describe('hivesigner token in the Authorization header', function() {
-    const port = 63209
+    let port: number
     const server = http.createServer(app.callback())
     let data: Buffer
     let token: string
@@ -387,7 +388,10 @@ describe('hivesigner token in the Authorization header', function() {
     before((done) => {
         data = fs.readFileSync(path.resolve(__dirname, 'test.jpg'))
         token = makeHsToken({author: 'hsplain', signer: testKeys.bar})
-        server.listen(port, 'localhost', done)
+        server.listen(0, 'localhost', () => {
+            port = (server.address() as AddressInfo).port
+            done()
+        })
     })
     after((done) => { server.close(done) })
 

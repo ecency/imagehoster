@@ -3,7 +3,7 @@ import config from 'config'
 
 const dsn = config.has('sentry_dsn') ? config.get('sentry_dsn') as string : ''
 
-const UPLOAD_TOKEN_PATH = /(\/hs\/)[^/?#\s"']+/g
+const UPLOAD_TOKEN_PATH = /(\/hs\/)[^/?#\s"']+/gi
 
 function redactPath(value: any): any {
     return typeof value === 'string' ? value.replace(UPLOAD_TOKEN_PATH, '$1[redacted]') : value

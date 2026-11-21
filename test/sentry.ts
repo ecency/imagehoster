@@ -28,6 +28,13 @@ describe('sentry scrubbing', function() {
         assert.equal(out.request.url, 'https://i.ecency.com/webp/hs/[redacted]?x=1')
     })
 
+    it('redacts a mixed-case legacy path, which the router also accepts', function() {
+        const event: any = {transaction: `POST /HS/${ TOKEN }`, request: {url: `https://i.ecency.com/WebP/Hs/${ TOKEN }`}}
+        const out: any = scrubSentryEvent(event)
+        assert.ok(!JSON.stringify(out).includes(TOKEN), JSON.stringify(out))
+        assert.equal(out.transaction, 'POST /HS/[redacted]')
+    })
+
     it('leaves unrelated urls and events without a request alone', function() {
         const event: any = {transaction: 'GET /p/abc', request: {url: 'https://i.ecency.com/hs'}, message: 'x'}
         assert.deepEqual(scrubSentryEvent(event), {transaction: 'GET /p/abc', request: {url: 'https://i.ecency.com/hs'}, message: 'x'})
